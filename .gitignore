@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Virtual envs / local env
+.venv/
+venv/
+
+# ROS2 / build outputs
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Runtime logs
+runtime_logs/
+runtime_logs_clean/
+*.log
+*.pid
+
+# Experiment outputs
+results/
+tmp_batch/
+tmp_ext_check/
+tmp_pose_smoke/
+tmp_pose_smoke_ros/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
