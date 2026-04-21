@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # 计算源码目录。
 SRC_ROOT = PROJECT_ROOT / "src"
 # 若源码目录未加入搜索路径，则插入。
-if str(SRC_ROOT) not in sys.path:
+if SRC_ROOT.exists() and str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 # 导入桥接协议和 SDK 适配层函数。

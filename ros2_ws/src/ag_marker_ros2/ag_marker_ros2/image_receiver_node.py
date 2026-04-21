@@ -14,6 +14,7 @@ import numpy as np
 from cv_bridge import CvBridge
 # 导入 ROS2。
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 # 导入图像消息。
 from sensor_msgs.msg import Image
@@ -123,6 +124,9 @@ def main(args: list[str] | None = None) -> None:
     node = ImageReceiverNode()
     try:
         rclpy.spin(node)
+    except ExternalShutdownException:
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

@@ -1,131 +1,87 @@
-<<<<<<< HEAD
 # paus_robot
-=======
-# AG Marker Localization
 
-[中文版](#中文版) | [English](#english)
+[中文](#中文) | [English](#english)
 
-## 中文版
+## 中文
 
-### 项目简介
+### 项目概览
 
-这个项目当前用于搭建一条从相机图像到机械臂接近目标点的在线感知链路。  
-接下来的主线方向已经确定为：
+`paus_robot` 当前以 **纯 Linux / 原生 Ubuntu** 为主线，目标是在 Linux 上完成：
 
-```text
-纯 Linux / 原生 Ubuntu 主线
-```
+- 相机输入
+- ROS2 感知链
+- ArUco marker 检测
+- 相机到机器人基座的坐标变换
+- 候选接近位姿生成
+- FAIRINO 真机执行
 
-也就是说，后续开发和运行目标是：
+仓库中的 Windows / WSL 双桥方案仍然保留，但已经降级为历史与参考路线，不再是默认运行方式。
 
-- 在 Linux 上完成相机输入
-- 在 Linux 上运行 `ROS2 Humble`
-- 在 Linux 上完成 marker 检测、坐标变换、接近控制与机械臂执行
+### 当前主线
 
-当前仓库里仍然保留了一部分 `Windows / WSL` 相关代码和文档，它们现在属于：
+推荐工作流：
 
 ```text
-历史路线 / 过渡方案 / 参考实现
+Linux camera input
+-> image_receiver_node
+-> marker_pose_node
+-> target_transform_node
+-> fairino_control_node
+-> fairino_linux_client
+-> Robot
 ```
 
-不再是推荐长期主线。
+### 核心目录
 
-### 当前核心目标
+- [configs](/root/projects/ag-repro/configs)
+  - 主配置与外参
+- [src/ag_repro](/root/projects/ag-repro/src/ag_repro)
+  - 检测、位姿、坐标变换、控制、Linux FAIRINO 适配层
+- [ros2_ws](/root/projects/ag-repro/ros2_ws)
+  - ROS2 节点工作区
+- [scripts](/root/projects/ag-repro/scripts)
+  - 离线脚本与 Linux 执行测试脚本
+- [docs](/root/projects/ag-repro/docs)
+  - 工作流、执行说明、状态说明
+- [legacy](/root/projects/ag-repro/legacy)
+  - 历史 Windows / WSL 路线
 
-当前项目的核心目标是：
+### Linux 执行层
 
-1. 检测单个 `ArUco marker`
-2. 估计 marker 相对相机的位姿
-3. 将 marker 转换为机器人基座坐标系下的目标点
-4. 生成安全的候选接近位姿
-5. 在 Linux 主线下完成机械臂执行接口整合
+默认使用官方 FAIRINO Linux Python SDK。
 
-### 当前保留的 Linux 主线内容
+适配层：
 
-以下内容是后续纯 Linux 主线应继续保留和完善的：
+- [fairino_linux_client.py](/root/projects/ag-repro/src/ag_repro/fairino_linux_client.py)
 
-- `src/ag_repro`
-  - 配置
-  - 检测
-  - 位姿估计
-  - 坐标变换
-  - 控制逻辑
-- `ros2_ws`
-  - `image_receiver_node`
-  - `marker_pose_node`
-  - `target_transform_node`
-  - `fairino_control_node`
-- `configs`
-- `scripts`
-- `docs`
-- `tests`
+测试脚本：
 
-### 当前 Windows / WSL 相关内容的定位
+- [test_fairino_linux.py](/root/projects/ag-repro/scripts/test_fairino_linux.py)
 
-当前仓库里仍然存在：
+默认配置项：
 
-- Windows 相机桥接：
-  - `D:\Projects\auto_arm\camera_bridge_win.py`
-  - `D:\Projects\auto_arm\run_camera_bridge_win.ps1`
-- Windows FAIRINO 执行桥：
-  - `D:\Projects\auto_arm\fairino_exec_bridge_win.py`
-  - `D:\Projects\auto_arm\run_fairino_exec_bridge_win.ps1`
-- WSL 相关启动与日志路径
-
-这些内容目前不删除，但它们的角色改为：
-
-- 用于回顾和参考
-- 必要时作为临时过渡方案
-- 不再作为推荐长期运行架构
-
-### 当前建议的迁移原则
-
-#### 1. 先统一开发环境
-
-把后续开发重心统一到：
-
-```text
-Linux / 原生 Ubuntu
+```yaml
+control:
+  robot_ip: "192.168.58.2"
+  linux_fairino_sdk_root: "/opt/fairino_python_sdk/linux"
+  execute_motion: false
 ```
 
-优先减少：
+### 常用命令
 
-- Windows 路径
-- WSL 与 Windows 双向 TCP 桥
-- 多环境并存带来的调试复杂度
-
-#### 2. 先保留感知和控制逻辑
-
-优先保留并继续演进：
-
-- marker 检测
-- 位姿估计
-- `target_point_base`
-- `candidate_pose_mmdeg`
-- ROS2 topic 链
-
-#### 3. 再替换执行层
-
-后续需要单独验证：
-
-- FAIRINO 是否能在原生 Linux 下稳定执行
-- 如果不能，需要怎样做 Linux 侧替代或接口适配
-
-### 当前常用命令
-
-#### Linux 基础环境
+激活 ROS2：
 
 ```bash
 source /opt/ros/humble/setup.bash
 source /root/projects/ag-repro/ros2_ws/install/setup.bash
 ```
 
-#### 单图检测（离线）
+离线单图检测：
 
 ```bash
-source /root/miniconda3/etc/profile.d/conda.sh
-conda activate ag-repro
-cd /root/projects/ag-repro
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate paus_robot
+cd ~/paus_robot
 
 python scripts/run_single_image.py \
   --input /path/to/image.png \
@@ -134,71 +90,256 @@ python scripts/run_single_image.py \
   --camera-config configs/camera.yaml
 ```
 
-#### 批处理（离线）
+FAIRINO Linux SDK 连接测试：
 
 ```bash
-source /root/miniconda3/etc/profile.d/conda.sh
-conda activate ag-repro
-cd /root/projects/ag-repro
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate paus_robot
+cd ~/paus_robot
 
-python scripts/run_image_batch.py \
-  --input-dir /path/to/image_dir \
-  --output-dir results/batch_001 \
-  --config configs/default.yaml \
-  --camera-config configs/camera.yaml
+python scripts/test_fairino_linux.py \
+  --sdk-root /opt/fairino_python_sdk/linux \
+  --robot-ip 192.168.58.2 \
+  --command connect
 ```
 
-#### 棋盘格标定
+设置速度测试：
 
 ```bash
-source /root/miniconda3/etc/profile.d/conda.sh
-conda activate ag-repro
-cd /root/projects/ag-repro
-
-python scripts/calibrate_camera.py \
-  --input-dir /path/to/calib_images \
-  --rows 6 \
-  --cols 9 \
-  --square-size-m 0.01 \
-  --output configs/camera.yaml
+python scripts/test_fairino_linux.py \
+  --sdk-root /opt/fairino_python_sdk/linux \
+  --robot-ip 192.168.58.2 \
+  --command set_speed \
+  --speed 5
 ```
 
-### 当前文档说明
+### 一键启动（推荐）
 
-当前文档目录已经分成两类：
+默认 dry-run：
 
-#### Linux 主线相关
+```bash
+ros2 launch ag_marker_ros2 online_stack.launch.py
+```
+
+显式允许真实执行：
+
+```bash
+ros2 launch ag_marker_ros2 online_stack.launch.py execute_motion:=true
+```
+
+可选参数示例：
+
+```bash
+ros2 launch ag_marker_ros2 online_stack.launch.py \
+  config_path:=/root/projects/ag-repro/configs/default.yaml \
+  camera_config_output:=/root/projects/ag-repro/ros2_ws/install/ag_marker_ros2/share/ag_marker_ros2/configs/camera.yaml \
+  camera_ip:=192.168.58.20 \
+  execute_motion:=false
+```
+
+默认说明：
+
+- launch 会同时启动：
+  - `camera_bridge.py`
+  - `image_receiver_node`
+  - `marker_pose_node`
+  - `target_transform_node`
+  - `fairino_control_node`
+- `execute_motion` 默认是 `false`
+- 也就是说，默认只做 dry-run，不直接驱动机械臂
+
+### 手动启动顺序
+
+如果你不想使用 launch，可以按下面顺序手动启动。
+
+#### 1. 启动图像接收节点
+
+```bash
+ros2 run ag_marker_ros2 image_receiver_node
+```
+
+#### 2. 启动 Linux 相机桥接脚本
+
+```bash
+python -u scripts/camera_bridge.py \
+  --host 127.0.0.1 \
+  --port 5001 \
+  --camera-config-output /root/projects/ag-repro/ros2_ws/install/ag_marker_ros2/share/ag_marker_ros2/configs/camera.yaml
+```
+
+#### 3. 启动 marker 位姿节点
+
+```bash
+ros2 run ag_marker_ros2 marker_pose_node \
+  --ros-args -p camera_config_path:=/root/projects/ag-repro/ros2_ws/install/ag_marker_ros2/share/ag_marker_ros2/configs/camera.yaml
+```
+
+#### 4. 启动目标变换节点
+
+```bash
+ros2 run ag_marker_ros2 target_transform_node
+```
+
+#### 5. 启动控制节点
+
+```bash
+ros2 run ag_marker_ros2 fairino_control_node
+```
+
+### 最基本运行顺序说明
+
+1. 先用 `test_fairino_linux.py` 确认 Linux 执行层能连通机械臂。
+2. 起 `image_receiver_node`。
+3. 起 `camera_bridge.py`，确认相机图像进入 `/camera/image_bridge`。
+4. 起 `marker_pose_node`，确认 `/detection_status` 和 `/marker_pose` 有输出。
+5. 起 `target_transform_node`，确认 `/target_point_base` 有输出。
+6. 起 `fairino_control_node`，确认 `/control_status` 有输出，且 `control_backend` 为 `linux_sdk`。
+7. 若要真实执行，再把 `configs/default.yaml` 中的 `execute_motion` 改为 `true`，或 launch 时传 `execute_motion:=true`。
+
+### 常用检查命令
+
+查看节点：
+
+```bash
+ros2 node list
+```
+
+查看 marker 检测状态：
+
+```bash
+ros2 topic echo /detection_status
+```
+
+查看 marker 位姿：
+
+```bash
+ros2 topic echo /marker_pose
+```
+
+查看目标点：
+
+```bash
+ros2 topic echo /target_point_base
+```
+
+查看控制状态：
+
+```bash
+ros2 topic echo /control_status
+```
+
+### 文档入口
+
+主线文档：
 
 - [workflow.md](/root/projects/ag-repro/docs/workflow.md)
+- [linux_execution.md](/root/projects/ag-repro/docs/linux_execution.md)
 - [coordinate_transform.md](/root/projects/ag-repro/docs/coordinate_transform.md)
 - [current_status.md](/root/projects/ag-repro/docs/current_status.md)
-- [linux_execution.md](/root/projects/ag-repro/docs/linux_execution.md)
 
-#### 历史 / Windows 过渡方案
+历史路线文档：
 
 - [legacy_windows_route.md](/root/projects/ag-repro/docs/legacy_windows_route.md)
 
-### 当前推荐
-
-如果你准备继续做项目主线，推荐顺序是：
-
-1. 先把文档和架构认知切到 Linux 主线
-2. 继续保留并完善感知与几何链
-3. 再单独验证 Linux 下的机械臂执行层
-
 ## English
 
-The project is now being reorganized toward a **pure Linux / native Ubuntu mainline**.
+### Overview
 
-Windows / WSL bridge components are still kept in the repository, but they are now considered:
+`paus_robot` is now organized around a **pure Linux / native Ubuntu mainline**.  
+The target is to run the full stack on Linux:
 
-- historical paths
-- transitional tools
-- reference implementations
+- camera input
+- ROS2 perception pipeline
+- ArUco marker detection
+- camera-to-base transform
+- candidate approach pose generation
+- FAIRINO robot execution
 
-The long-term recommended direction is:
+The previous Windows / WSL bridge route is still kept in the repository, but only as a legacy/reference path.
 
-- Linux for camera input
-- Linux for ROS2
-- Linux for marker detection, transforms, control, and robot execution
->>>>>>> 64a9a07 (Initial import of paus_robot project)
+### Mainline Workflow
+
+```text
+Linux camera input
+-> image_receiver_node
+-> marker_pose_node
+-> target_transform_node
+-> fairino_control_node
+-> fairino_linux_client
+-> Robot
+```
+
+### Key Directories
+
+- `configs/`: runtime config and extrinsics
+- `src/ag_repro/`: perception, transforms, control, Linux FAIRINO adapter
+- `ros2_ws/`: ROS2 workspace
+- `scripts/`: offline tools and Linux execution tests
+- `docs/`: workflow and execution docs
+- `legacy/`: deprecated Windows / WSL route
+
+### Linux FAIRINO Execution
+
+Default execution path uses the official FAIRINO Linux Python SDK.
+
+Adapter:
+
+- [fairino_linux_client.py](/root/projects/ag-repro/src/ag_repro/fairino_linux_client.py)
+
+Smoke test:
+
+- [test_fairino_linux.py](/root/projects/ag-repro/scripts/test_fairino_linux.py)
+
+### One-Command Launch
+
+Default dry-run:
+
+```bash
+ros2 launch ag_marker_ros2 online_stack.launch.py
+```
+
+Enable real execution explicitly:
+
+```bash
+ros2 launch ag_marker_ros2 online_stack.launch.py execute_motion:=true
+```
+
+By default the launch file starts:
+
+- `camera_bridge.py`
+- `image_receiver_node`
+- `marker_pose_node`
+- `target_transform_node`
+- `fairino_control_node`
+
+Default behavior is dry-run. Real robot motion is disabled unless `execute_motion:=true` is provided.
+
+### Manual Runtime Order
+
+1. `ros2 run ag_marker_ros2 image_receiver_node`
+2. `python -u scripts/camera_bridge.py --host 127.0.0.1 --port 5001 --camera-config-output ...`
+3. `ros2 run ag_marker_ros2 marker_pose_node --ros-args -p camera_config_path:=...`
+4. `ros2 run ag_marker_ros2 target_transform_node`
+5. `ros2 run ag_marker_ros2 fairino_control_node`
+
+### Useful Checks
+
+```bash
+ros2 node list
+ros2 topic echo /detection_status
+ros2 topic echo /marker_pose
+ros2 topic echo /target_point_base
+ros2 topic echo /control_status
+```
+
+### Documentation
+
+Mainline docs:
+
+- [workflow.md](/root/projects/ag-repro/docs/workflow.md)
+- [linux_execution.md](/root/projects/ag-repro/docs/linux_execution.md)
+- [current_status.md](/root/projects/ag-repro/docs/current_status.md)
+
+Legacy docs:
+
+- [legacy_windows_route.md](/root/projects/ag-repro/docs/legacy_windows_route.md)

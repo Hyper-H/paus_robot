@@ -3,8 +3,10 @@ from __future__ import annotations
 # 导入 json，用于发布结构化状态。
 import json
 
+from ament_index_python.packages import get_package_share_directory
 # 导入 ROS2。
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 # 导入几何与状态消息。
 from geometry_msgs.msg import PointStamped, PoseStamped
@@ -26,8 +28,9 @@ class TargetTransformNode(Node):
     def __init__(self) -> None:
         super().__init__("target_transform_node")
 
-        self.declare_parameter("config_path", "/root/projects/ag-repro/configs/default.yaml")
-        self.declare_parameter("extrinsics_path", "/root/projects/ag-repro/configs/extrinsics.yaml")
+        package_share = get_package_share_directory("ag_marker_ros2")
+        self.declare_parameter("config_path", f"{package_share}/configs/default.yaml")
+        self.declare_parameter("extrinsics_path", f"{package_share}/configs/extrinsics.yaml")
         self.declare_parameter("marker_pose_topic", "/marker_pose")
         self.declare_parameter("target_pose_topic", "/target_pose_base")
         self.declare_parameter("target_point_topic", "/target_point_base")
@@ -121,6 +124,9 @@ def main(args: list[str] | None = None) -> None:
     node = TargetTransformNode()
     try:
         rclpy.spin(node)
+    except ExternalShutdownException:
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

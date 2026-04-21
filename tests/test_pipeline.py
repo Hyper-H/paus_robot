@@ -53,7 +53,11 @@ from ag_repro import (
 
 def create_synthetic_marker_scene(marker_id: int = 7, canvas_size: int = 640, marker_size: int = 160) -> np.ndarray:
     dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-    marker = cv2.aruco.generateImageMarker(dictionary, marker_id, marker_size)
+    if hasattr(cv2.aruco, "generateImageMarker"):
+        marker = cv2.aruco.generateImageMarker(dictionary, marker_id, marker_size)
+    else:
+        marker = np.zeros((marker_size, marker_size), dtype=np.uint8)
+        cv2.aruco.drawMarker(dictionary, marker_id, marker_size, marker, 1)
     marker_bgr = cv2.cvtColor(marker, cv2.COLOR_GRAY2BGR)
 
     canvas = np.full((canvas_size, canvas_size, 3), 255, dtype=np.uint8)

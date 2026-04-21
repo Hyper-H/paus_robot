@@ -33,6 +33,8 @@ class DiscoveredCamera:
 class CameraRuntime:
     # SDK 使用的相机索引。
     camera_index: int
+    # SDK 相机对象句柄。
+    camera_obj: Any
     # 当前 RGB 图像宽度。
     rgb_width: int
     # 当前 RGB 图像高度。
@@ -90,7 +92,26 @@ def resolve_camera_index(camera_ip: str | None = None, camera_index: int | None 
 
 
 # 读取 RGB 图像尺寸。
-def _read_rgb_dimensions(DkamSDK: Any, camera_index: int) -> tuple[int, int]:
+def _read_rgb_dimensions(DkamSDK: Any, camera_obj: Any) -> tuple[int, int]:
+    if hasattr(DkamSDK, "GetCameraWidth") and hasattr(DkamSDK, "GetCameraHeight"):
+        width_buffer = DkamSDK.new_intArray(1)
+        height_buffer = DkamSDK.new_intArray(1)
+        try:
+            width_status = int(DkamSDK.GetCameraWidth(camera_obj, width_buffer, 1))
+            height_status = int(DkamSDK.GetCameraHeight(camera_obj, height_buffer, 1))
+            if width_status != 0:
+                raise RuntimeError(f"GetCameraWidth failed with code {width_status}.")
+            if height_status != 0:
+                raise RuntimeError(f"GetCameraHeight failed with code {height_status}.")
+            width = int(DkamSDK.intArray_getitem(width_buffer, 0))
+            height = int(DkamSDK.intArray_getitem(height_buffer, 0))
+        finally:
+            if hasattr(DkamSDK, "delete_intArray"):
+                DkamSDK.delete_intArray(width_buffer)
+                DkamSDK.delete_intArray(height_buffer)
+        return width, height
+
+    camera_index = int(camera_obj)
     width_address = DkamSDK.GetRegisterAddr(camera_index, b"Width") + 0x100
     height_address = DkamSDK.GetRegisterAddr(camera_index, b"Height") + 0x100
     width_buffer = DkamSDK.new_intArray(1)
@@ -141,16 +162,16 @@ def convert_sdk_calibration_to_camera(
 
 
 # 使用 SDK 读取厂家标定参数。
-def read_factory_calibration(DkamSDK: Any, camera_index: int, width: int, height: int, camera_count: int = 0) -> CameraCalibration:
+def read_factory_calibration(DkamSDK: Any, camera_obj: Any, width: int, height: int, camera_count: int = 0) -> CameraCalibration:
     distortion = DkamSDK.new_floatArray(5)
     intrinsic = DkamSDK.new_floatArray(9)
     rotation = DkamSDK.new_floatArray(9)
     translation = DkamSDK.new_floatArray(3)
     try:
-        internal_status = int(DkamSDK.GetCamInternelParameter(camera_index, camera_count, distortion, intrinsic))
+        internal_status = int(DkamSDK.GetCamInternelParameter(camera_obj, camera_count, distortion, intrinsic))
         if internal_status != 0:
             raise RuntimeError(f"GetCamInternelParameter failed with code {internal_status}.")
-        external_status = int(DkamSDK.GetCamExternelParameter(camera_index, camera_count, rotation, translation))
+        external_status = int(DkamSDK.GetCamExternelParameter(camera_obj, camera_count, rotation, translation))
         if external_status != 0:
             raise RuntimeError(f"GetCamExternelParameter failed with code {external_status}.")
         distortion_values = [float(DkamSDK.floatArray_getitem(distortion, index)) for index in range(5)]
@@ -177,7 +198,7 @@ def read_runtime_calibration(runtime: CameraRuntime, camera_count: int = 0) -> C
     DkamSDK = _require_dkam_sdk()
     return read_factory_calibration(
         DkamSDK=DkamSDK,
-        camera_index=runtime.camera_index,
+        camera_obj=runtime.camera_obj,
         width=runtime.rgb_width,
         height=runtime.rgb_height,
         camera_count=camera_count,
@@ -189,34 +210,34 @@ def read_runtime_calibration(runtime: CameraRuntime, camera_count: int = 0) -> C
 def open_camera_runtime(camera_ip: str | None = None, camera_index: int | None = None) -> CameraRuntime:
     DkamSDK = _require_dkam_sdk()
     selected_index = resolve_camera_index(camera_ip=camera_ip, camera_index=camera_index)
-    DkamSDK.CreateCamera()
-    connect_status = int(DkamSDK.CameraConnect(selected_index))
+    camera_obj = DkamSDK.CreateCamera(selected_index)
+    connect_status = int(DkamSDK.CameraConnect(camera_obj))
     if connect_status != 0:
-        DkamSDK.DestroyCamera()
+        DkamSDK.DestroyCamera(camera_obj)
         raise RuntimeError(f"CameraConnect failed with code {connect_status}.")
     try:
-        width, height = _read_rgb_dimensions(DkamSDK, selected_index)
-        trigger_status = int(DkamSDK.SetRGBTriggerMode(selected_index, 0))
+        width, height = _read_rgb_dimensions(DkamSDK, camera_obj)
+        trigger_status = int(DkamSDK.SetRGBTriggerMode(camera_obj, 0))
         if trigger_status != 0:
             raise RuntimeError(f"SetRGBTriggerMode failed with code {trigger_status}.")
-        stream_status = int(DkamSDK.StreamOn(selected_index, 2))
+        stream_status = int(DkamSDK.StreamOn(camera_obj, 2))
         if stream_status != 0:
             raise RuntimeError(f"StreamOn failed with code {stream_status}.")
-        acquisition_status = int(DkamSDK.AcquisitionStart(selected_index))
+        acquisition_status = int(DkamSDK.AcquisitionStart(camera_obj))
         if acquisition_status != 0:
             raise RuntimeError(f"AcquisitionStart failed with code {acquisition_status}.")
-        yield CameraRuntime(camera_index=selected_index, rgb_width=width, rgb_height=height)
+        yield CameraRuntime(camera_index=selected_index, camera_obj=camera_obj, rgb_width=width, rgb_height=height)
     finally:
         try:
-            DkamSDK.StreamOff(selected_index, 2)
+            DkamSDK.StreamOff(camera_obj, 2)
         except Exception:
             pass
         try:
-            DkamSDK.CameraDisconnect(selected_index)
+            DkamSDK.CameraDisconnect(camera_obj)
         except Exception:
             pass
         try:
-            DkamSDK.DestroyCamera()
+            DkamSDK.DestroyCamera(camera_obj)
         except Exception:
             pass
 
@@ -227,10 +248,12 @@ def capture_rgb_frame(runtime: CameraRuntime, timeout_us: int = 3_000_000) -> np
     photo_info = DkamSDK.PhotoInfoCSharp()
     pixel_count = runtime.rgb_width * runtime.rgb_height * 3
     rgb_buffer = bytes(pixel_count)
-    DkamSDK.FlushBuffer(runtime.camera_index, 2)
-    capture_status = int(DkamSDK.TimeoutCaptureCSharp(runtime.camera_index, 2, photo_info, rgb_buffer, pixel_count, timeout_us))
+    DkamSDK.FlushBuffer(runtime.camera_obj, 2)
+    capture_status = int(DkamSDK.TimeoutCaptureCSharp(runtime.camera_obj, 2, photo_info, rgb_buffer, pixel_count, timeout_us))
     if capture_status != 0:
         raise RuntimeError(f"TimeoutCaptureCSharp failed with code {capture_status}.")
+    if hasattr(DkamSDK, "RawdataToRgb888CSharp"):
+        DkamSDK.RawdataToRgb888CSharp(runtime.camera_obj, photo_info, rgb_buffer, pixel_count)
     rgb_array = np.frombuffer(rgb_buffer, dtype=np.uint8).reshape((runtime.rgb_height, runtime.rgb_width, 3))
     return cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
 
@@ -246,7 +269,7 @@ def export_factory_calibration_to_yaml(
     with open_camera_runtime(camera_ip=camera_ip, camera_index=camera_index) as runtime:
         calibration = read_factory_calibration(
             DkamSDK=DkamSDK,
-            camera_index=runtime.camera_index,
+            camera_obj=runtime.camera_obj,
             width=runtime.rgb_width,
             height=runtime.rgb_height,
             camera_count=camera_count,

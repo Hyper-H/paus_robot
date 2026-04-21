@@ -4,8 +4,10 @@ import json
 
 import numpy as np
 import rclpy
+from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PointStamped
 from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
 from std_msgs.msg import String
 
 from ag_repro import FairinoLinuxClient, build_approach_decision, load_config
@@ -15,7 +17,8 @@ class FairinoControlNode(Node):
     def __init__(self) -> None:
         super().__init__("fairino_control_node")
 
-        self.declare_parameter("config_path", "/root/projects/ag-repro/configs/default.yaml")
+        package_share = get_package_share_directory("ag_marker_ros2")
+        self.declare_parameter("config_path", f"{package_share}/configs/default.yaml")
         self.declare_parameter("approach_target_topic", "/target_point_base")
         self.declare_parameter("control_status_topic", "/control_status")
 
@@ -40,6 +43,8 @@ class FairinoControlNode(Node):
         self.repeat_distance_threshold_mm = float(control_cfg["repeat_distance_threshold_mm"])
         self.use_mock_pose = bool(control_cfg["use_mock_pose"])
         self.mock_current_tcp_pose_mmdeg = [float(value) for value in control_cfg["mock_current_tcp_pose_mmdeg"]]
+        self.declare_parameter("execute_motion", bool(control_cfg["execute_motion"]))
+        self.execute_motion = bool(self.get_parameter("execute_motion").get_parameter_value().bool_value)
 
         self.status_publisher = self.create_publisher(String, status_topic, 10)
         self.subscription = self.create_subscription(PointStamped, target_topic, self._target_callback, 10)
@@ -237,6 +242,9 @@ def main(args: list[str] | None = None) -> None:
     node = FairinoControlNode()
     try:
         rclpy.spin(node)
+    except ExternalShutdownException:
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
