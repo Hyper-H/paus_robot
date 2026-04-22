@@ -19,20 +19,20 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 # 导入消息与服务类型。
-from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 # 导入项目中的相机标定读取与坐标变换工具。
+from paus_motion_ros2 import FairinoLinuxClient
 from paus_perception import (
     EyeToHandCalibrationSolution,
     average_transform_matrices,
     invert_transform_matrix,
     load_camera_calibration,
+    load_config,
     make_transform_matrix,
     make_transform_struct,
-    quaternion_xyzw_to_rotation_matrix,
     rpy_deg_to_rotation_matrix,
     save_eye_to_hand_solution,
 )
@@ -53,11 +53,12 @@ class EyeToHandCalibrationNode(Node):
         super().__init__("eye_to_hand_calibration_node")
         # 找到 bringup 包安装目录，方便给输出路径默认值。
         bringup_share = Path(get_package_share_directory("paus_bringup"))
+        default_config_path = bringup_share / "configs" / "default.yaml"
 
         # 声明节点参数。
+        self.declare_parameter("config_path", str(default_config_path))
         self.declare_parameter("camera_config_path", "/tmp/paus_robot/camera.yaml")
         self.declare_parameter("image_topic", "/camera/image_bridge")
-        self.declare_parameter("tool_pose_topic", "/nonrt_state_data")
         self.declare_parameter("status_topic", "/eye_to_hand/status")
         self.declare_parameter("board_rows", 6)
         self.declare_parameter("board_cols", 9)
@@ -68,9 +69,15 @@ class EyeToHandCalibrationNode(Node):
         self.declare_parameter("output_path", str(bringup_share / "configs" / "extrinsics.yaml"))
 
         # 读取参数值。
+        self.config_path = self.get_parameter("config_path").get_parameter_value().string_value
+        self.config = load_config(self.config_path)
+        control_cfg = self.config["control"]
+        # 在拿到主配置后，再声明机器人相关参数，允许后续显式覆盖。
+        self.declare_parameter("robot_ip", str(control_cfg["robot_ip"]))
+        self.declare_parameter("linux_fairino_sdk_root", str(control_cfg["linux_fairino_sdk_root"]))
+
         camera_config_path = self.get_parameter("camera_config_path").get_parameter_value().string_value
         self.image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
-        self.tool_pose_topic = self.get_parameter("tool_pose_topic").get_parameter_value().string_value
         self.status_topic = self.get_parameter("status_topic").get_parameter_value().string_value
         self.board_rows = int(self.get_parameter("board_rows").get_parameter_value().integer_value)
         self.board_cols = int(self.get_parameter("board_cols").get_parameter_value().integer_value)
@@ -79,6 +86,8 @@ class EyeToHandCalibrationNode(Node):
         self.tool_to_board_rotation_rpy = [float(value) for value in self.get_parameter("tool_to_board.rotation_rpy_deg").get_parameter_value().double_array_value]
         self.min_sample_count = int(self.get_parameter("min_sample_count").get_parameter_value().integer_value)
         self.output_path = Path(self.get_parameter("output_path").get_parameter_value().string_value)
+        self.robot_ip = self.get_parameter("robot_ip").get_parameter_value().string_value
+        self.linux_fairino_sdk_root = self.get_parameter("linux_fairino_sdk_root").get_parameter_value().string_value
 
         # 标定节点必须有相机内参文件，否则没法 solvePnP。
         if not camera_config_path:
@@ -88,16 +97,17 @@ class EyeToHandCalibrationNode(Node):
 
         # 创建图像桥接器。
         self.bridge = CvBridge()
-        # 缓存最新图像和最新工具位姿。
+        # 缓存最新图像。
         self.latest_image_bgr: np.ndarray | None = None
-        self.latest_tool_pose: PoseStamped | None = None
         # 保存已采集样本和当前求解结果。
         self.samples: list[CalibrationSample] = []
         self.current_solution: EyeToHandCalibrationSolution | None = None
+        # 建立 Linux SDK 客户端，用于直接读取当前 TCP。
+        self.linux_client = FairinoLinuxClient(self.linux_fairino_sdk_root, self.robot_ip)
+        self.linux_client.connect()
 
-        # 创建订阅器和状态发布器。
+        # 创建图像订阅器与状态发布器。
         self.image_subscription = self.create_subscription(Image, self.image_topic, self._image_callback, 10)
-        self.tool_pose_subscription = self.create_subscription(PoseStamped, self.tool_pose_topic, self._tool_pose_callback, 10)
         self.status_publisher = self.create_publisher(String, self.status_topic, 10)
 
         # 创建“采样 / 求解 / 保存”三个服务接口。
@@ -112,10 +122,6 @@ class EyeToHandCalibrationNode(Node):
     def _image_callback(self, message: Image) -> None:
         self.latest_image_bgr = self.bridge.imgmsg_to_cv2(message, desired_encoding="bgr8")
 
-    # 接收最新工具位姿。
-    def _tool_pose_callback(self, message: PoseStamped) -> None:
-        self.latest_tool_pose = message
-
     # 发布标定状态。
     def _publish_status(self, status: str, message: str, extra: dict[str, object] | None = None) -> None:
         payload = {
@@ -129,6 +135,7 @@ class EyeToHandCalibrationNode(Node):
         status_message = String()
         status_message.data = json.dumps(payload, ensure_ascii=False)
         self.status_publisher.publish(status_message)
+        self.get_logger().info(status_message.data)
 
     # 构造棋盘格的三维角点模板。
     def _build_board_object_points(self) -> np.ndarray:
@@ -168,15 +175,15 @@ class EyeToHandCalibrationNode(Node):
         rotation_matrix, _ = cv2.Rodrigues(rvec)
         return make_transform_matrix(tvec.reshape(3), rotation_matrix)
 
-    # 将最新工具位姿消息转换成 `base -> tool` 齐次矩阵。
-    def _latest_base_to_tool(self) -> np.ndarray:
-        if self.latest_tool_pose is None:
-            raise RuntimeError("No tool pose has been received yet.")
-        pose = self.latest_tool_pose.pose
-        translation = [pose.position.x, pose.position.y, pose.position.z]
-        quaternion = [pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w]
-        rotation_matrix = quaternion_xyzw_to_rotation_matrix(quaternion)
-        return make_transform_matrix(translation, rotation_matrix)
+    # 通过 Linux SDK 直接读取 `base -> tool(TCP)` 位姿。
+    def _current_base_to_tool(self) -> np.ndarray:
+        error, tcp_pose_mmdeg = self.linux_client.get_actual_tcp_pose()
+        if error != 0:
+            raise RuntimeError(f"GetActualTCPPose failed with code {error}.")
+        # SDK 返回单位是 mm / deg，而手眼矩阵这里统一按 m 计算。
+        translation_m = [float(value) / 1000.0 for value in tcp_pose_mmdeg[:3]]
+        rotation_matrix = rpy_deg_to_rotation_matrix(tcp_pose_mmdeg[3:6])
+        return make_transform_matrix(translation_m, rotation_matrix)
 
     # 根据固定的工具安装关系，构造 `tool -> board` 变换矩阵。
     def _tool_to_board_matrix(self) -> np.ndarray:
@@ -188,7 +195,7 @@ class EyeToHandCalibrationNode(Node):
         del request
         try:
             # 读取当前 `base -> tool`、估计 `camera -> board`，并准备固定的 `tool -> board`。
-            base_to_tool = self._latest_base_to_tool()
+            base_to_tool = self._current_base_to_tool()
             camera_to_board = self._estimate_camera_to_board()
             tool_to_board = self._tool_to_board_matrix()
             # 按链路公式反推 `base -> camera`。
@@ -197,7 +204,14 @@ class EyeToHandCalibrationNode(Node):
             self.samples.append(CalibrationSample(base_to_camera_matrix=base_to_camera))
             response.success = True
             response.message = f"Captured sample #{len(self.samples)}."
-            self._publish_status("sample_captured", response.message)
+            self._publish_status(
+                "sample_captured",
+                response.message,
+                {
+                    "robot_ip": self.robot_ip,
+                    "sdk_root": self.linux_fairino_sdk_root,
+                },
+            )
         except Exception as exc:
             response.success = False
             response.message = repr(exc)
