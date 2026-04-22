@@ -48,11 +48,29 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "transform": {
         # 工作 marker 到目标区域的固定变换。
         "marker_to_target": {
-            # 第一版默认向下偏移 5 cm。
-            "translation_m": [0.0, -0.05, 0.0],
+            # 第一版默认向下偏移 0 cm。
+            "translation_m": [0.0, 0.0, 0.0],
             # 第一版默认不附加旋转。
             "rotation_rpy_deg": [0.0, 0.0, 0.0],
         }
+    },
+    # 手眼标定相关配置。
+    "calibration": {
+        # 棋盘格内角点行数。
+        "board_rows": 6,
+        # 棋盘格内角点列数。
+        "board_cols": 9,
+        # 棋盘格单格边长，单位米。
+        "square_size_m": 0.01,
+        # 求解前最少需要的样本数。
+        "min_sample_count": 10,
+        # 标定结果默认保存路径。
+        "output_path": "/home/chen_lab/paus_robot/src/paus_bringup/configs/extrinsics.yaml",
+        # 当前 TCP 到棋盘格中心的固定外参。
+        "tool_to_board": {
+            "translation_m": [0.0, 0.0, 0.0],
+            "rotation_rpy_deg": [0.0, 0.0, 0.0],
+        },
     },
     # 机械臂接近控制相关配置。
     "control": {

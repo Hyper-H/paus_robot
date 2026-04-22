@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 # 导入 shutil，用于查找 python3 可执行文件。
 import shutil
+import yaml
 
 # 导入 ament 索引工具，用于定位安装后的 package share 路径。
 from ament_index_python.packages import get_package_share_directory
@@ -116,7 +117,17 @@ def generate_launch_description() -> LaunchDescription:
     # 找到 bringup 包安装目录，用于提供默认配置和外参输出路径。
     bringup_share = Path(get_package_share_directory("paus_bringup"))
     default_config_path = str(bringup_share / "configs" / "default.yaml")
-    default_extrinsics_path = str(bringup_share / "configs" / "extrinsics.yaml")
+    with (bringup_share / "configs" / "default.yaml").open("r", encoding="utf-8") as handle:
+        config_payload = yaml.safe_load(handle) or {}
+    calibration_cfg = config_payload.get("calibration", {})
+    tool_to_board_cfg = calibration_cfg.get("tool_to_board", {})
+    default_extrinsics_path = str(calibration_cfg.get("output_path", bringup_share / "configs" / "extrinsics.yaml"))
+    default_board_rows = str(calibration_cfg.get("board_rows", 6))
+    default_board_cols = str(calibration_cfg.get("board_cols", 9))
+    default_square_size_m = str(calibration_cfg.get("square_size_m", 0.01))
+    default_min_sample_count = str(calibration_cfg.get("min_sample_count", 10))
+    default_tool_to_board_translation = tool_to_board_cfg.get("translation_m", [0.0, 0.0, 0.0])
+    default_tool_to_board_rotation = tool_to_board_cfg.get("rotation_rpy_deg", [0.0, 0.0, 0.0])
 
     return LaunchDescription(
         [
@@ -142,22 +153,22 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "board_rows",
-                default_value="6",
+                default_value=default_board_rows,
                 description="Chessboard inner-corner rows.",
             ),
             DeclareLaunchArgument(
                 "board_cols",
-                default_value="9",
+                default_value=default_board_cols,
                 description="Chessboard inner-corner cols.",
             ),
             DeclareLaunchArgument(
                 "square_size_m",
-                default_value="0.01",
+                default_value=default_square_size_m,
                 description="Chessboard square size in meters.",
             ),
             DeclareLaunchArgument(
                 "min_sample_count",
-                default_value="10",
+                default_value=default_min_sample_count,
                 description="Minimum number of samples before solve.",
             ),
             DeclareLaunchArgument(
@@ -165,12 +176,12 @@ def generate_launch_description() -> LaunchDescription:
                 default_value=default_extrinsics_path,
                 description="Output path for the solved extrinsics YAML.",
             ),
-            DeclareLaunchArgument("tool_to_board_tx", default_value="0.0", description="Tool-to-board X translation in meters."),
-            DeclareLaunchArgument("tool_to_board_ty", default_value="0.0", description="Tool-to-board Y translation in meters."),
-            DeclareLaunchArgument("tool_to_board_tz", default_value="0.0", description="Tool-to-board Z translation in meters."),
-            DeclareLaunchArgument("tool_to_board_rx", default_value="0.0", description="Tool-to-board roll in degrees."),
-            DeclareLaunchArgument("tool_to_board_ry", default_value="0.0", description="Tool-to-board pitch in degrees."),
-            DeclareLaunchArgument("tool_to_board_rz", default_value="0.0", description="Tool-to-board yaw in degrees."),
+            DeclareLaunchArgument("tool_to_board_tx", default_value=str(default_tool_to_board_translation[0]), description="Tool-to-board X translation in meters."),
+            DeclareLaunchArgument("tool_to_board_ty", default_value=str(default_tool_to_board_translation[1]), description="Tool-to-board Y translation in meters."),
+            DeclareLaunchArgument("tool_to_board_tz", default_value=str(default_tool_to_board_translation[2]), description="Tool-to-board Z translation in meters."),
+            DeclareLaunchArgument("tool_to_board_rx", default_value=str(default_tool_to_board_rotation[0]), description="Tool-to-board roll in degrees."),
+            DeclareLaunchArgument("tool_to_board_ry", default_value=str(default_tool_to_board_rotation[1]), description="Tool-to-board pitch in degrees."),
+            DeclareLaunchArgument("tool_to_board_rz", default_value=str(default_tool_to_board_rotation[2]), description="Tool-to-board yaw in degrees."),
             OpaqueFunction(function=_launch_setup),
         ]
     )

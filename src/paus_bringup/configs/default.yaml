@@ -33,7 +33,17 @@ pose:
 
 transform:
   marker_to_target:
-    translation_m: [0.0, -0.05, 0.0]
+    translation_m: [0.0, 0.0, 0.0]
+    rotation_rpy_deg: [0.0, 0.0, 0.0]
+
+calibration:
+  board_rows: 6
+  board_cols: 9
+  square_size_m: 0.01
+  min_sample_count: 10
+  output_path: "/home/chen_lab/paus_robot/src/paus_bringup/configs/extrinsics.yaml"
+  tool_to_board:
+    translation_m: [0.0, 0.0, 0.0]
     rotation_rpy_deg: [0.0, 0.0, 0.0]
 
 control:

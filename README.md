@@ -102,6 +102,32 @@ ros2 launch paus_bringup eye_to_hand_calibration.launch.py \
   square_size_m:=0.01
 ```
 
+默认情况下，上面这些参数会优先从下面这个配置文件读取：
+
+- [default.yaml](/root/projects/ag-repro/src/paus_bringup/configs/default.yaml)
+
+对应配置段是：
+
+```yaml
+calibration:
+  board_rows: 6
+  board_cols: 9
+  square_size_m: 0.01
+  min_sample_count: 10
+  output_path: "/home/chen_lab/paus_robot/src/paus_bringup/configs/extrinsics.yaml"
+  tool_to_board:
+    translation_m: [0.0, 0.0, 0.0]
+    rotation_rpy_deg: [0.0, 0.0, 0.0]
+```
+
+也就是说，大多数情况下你只需要先改配置文件，然后直接：
+
+```bash
+ros2 launch paus_bringup eye_to_hand_calibration.launch.py
+```
+
+只有在你想临时覆盖某个参数时，才需要在命令行额外传参数。
+
 常用可选参数：
 
 ```bash
