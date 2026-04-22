@@ -1,56 +1,68 @@
 # paus_robot
 
-## ÖĞÎÄ
+## ä¸­æ–‡
 
-### ÏîÄ¿¸ÅÊö
-`paus_robot` ÏÖÔÚ²ÉÓÃ **²Ö¿â¸ùÄ¿Â¼¼´ ROS2 workspace** µÄ½á¹¹¡£Ö÷ÏßÃæÏò Linux / Ô­Éú Ubuntu£¬Î§ÈÆ¡°´Ö¶¨Î» -> ÔË¶¯½Ó½ü -> Ï¸¶¨Î»¡±µÄÏµÍ³·Ö²ã×éÖ¯´úÂë¡£
+### é¡¹ç›®æ¦‚è¿°
+`paus_robot` é‡‡ç”¨â€œä»“åº“æ ¹ç›®å½•å³ ROS2 workspaceâ€çš„ç»“æ„ï¼Œä¸»çº¿é¢å‘ Linux / åŸç”Ÿ Ubuntuã€‚
 
-µ±Ç°Ä¬ÈÏÖ÷Ïß£º
-- `paus_perception`£º´¿ Python ¸ĞÖªÓë±ä»»ºËĞÄ¿â
-- `paus_marker_ros2`£º´Ö¶¨Î»ÊÓ¾õ½Úµã
-- `paus_motion_ros2`£º¿ØÖÆ¡¢ÔË¶¯¡¢Ö´ĞĞ±àÅÅ½Úµã
-- `paus_fine_ros2`£ºÏ¸¶¨Î»Ô¤Áô°üÎ»
-- `paus_interfaces`£º×Ô¶¨Òå½Ó¿ÚÔ¤Áô°üÎ»
-- `paus_bringup`£ºlaunch ÓëÔËĞĞÅäÖÃ
+å½“å‰ä»£ç æŒ‰ç…§èŒè´£æ‹†æˆ 6 ä¸ªåŒ…ï¼š
+- `paus_perception`ï¼šçº¯ Python æ„ŸçŸ¥ã€æ ‡å®šã€ä½å§¿ã€åæ ‡å˜æ¢æ ¸å¿ƒåº“
+- `paus_marker_ros2`ï¼šç²—å®šä½è§†è§‰ ROS2 èŠ‚ç‚¹
+- `paus_motion_ros2`ï¼šæ§åˆ¶ã€è¿åŠ¨ã€æ‰§è¡Œç¼–æ’ ROS2 èŠ‚ç‚¹
+- `paus_fine_ros2`ï¼šç»†å®šä½é¢„ç•™åŒ…ä½
+- `paus_interfaces`ï¼šè‡ªå®šä¹‰ `msg / srv / action` é¢„ç•™åŒ…ä½
+- `paus_bringup`ï¼šlaunch ä¸è¿è¡Œé…ç½®
 
-¾ÉµÄ Windows / WSL Ë«ÇÅ·½°¸ÒÑÕûÌå½µ¼¶µ½ `legacy/`£¬²»ÔÙ×÷ÎªÄ¬ÈÏÔËĞĞÈë¿Ú¡£
+æ—§çš„ Windows / WSL åŒæ¡¥æ–¹æ¡ˆå·²ç»é™çº§åˆ° `legacy/`ï¼Œåªä¿ç•™ä½œå†å²å‚è€ƒï¼Œä¸å†ä½œä¸ºé»˜è®¤ä¸»çº¿ã€‚
 
-### Workspace ½á¹¹
+### Workspace ç»“æ„
 ```text
 paus_robot/
-©À©¤©¤ src/
-©¦   ©À©¤©¤ paus_perception/
-©¦   ©À©¤©¤ paus_marker_ros2/
-©¦   ©À©¤©¤ paus_motion_ros2/
-©¦   ©À©¤©¤ paus_fine_ros2/
-©¦   ©À©¤©¤ paus_interfaces/
-©¦   ©¸©¤©¤ paus_bringup/
-©À©¤©¤ docs/
-©À©¤©¤ test_data/
-©À©¤©¤ tests/
-©À©¤©¤ legacy/
-©À©¤©¤ README.md
-©À©¤©¤ build/      # ±¾µØÉú³É£¬²»Èë¿â
-©À©¤©¤ install/    # ±¾µØÉú³É£¬²»Èë¿â
-©¸©¤©¤ log/        # ±¾µØÉú³É£¬²»Èë¿â
+â”œâ”€â”€ src/
+â”‚   â”œâ”€â”€ paus_perception/
+â”‚   â”œâ”€â”€ paus_marker_ros2/
+â”‚   â”œâ”€â”€ paus_motion_ros2/
+â”‚   â”œâ”€â”€ paus_fine_ros2/
+â”‚   â”œâ”€â”€ paus_interfaces/
+â”‚   â””â”€â”€ paus_bringup/
+â”œâ”€â”€ docs/
+â”œâ”€â”€ test_data/
+â”œâ”€â”€ tests/
+â”œâ”€â”€ legacy/
+â”œâ”€â”€ README.md
+â”œâ”€â”€ build/      # æœ¬åœ°ç”Ÿæˆï¼Œä¸å…¥åº“
+â”œâ”€â”€ install/    # æœ¬åœ°ç”Ÿæˆï¼Œä¸å…¥åº“
+â””â”€â”€ log/        # æœ¬åœ°ç”Ÿæˆï¼Œä¸å…¥åº“
 ```
 
-### °üÖ°Ôğ
+### å„åŒ…èŒè´£
 - `paus_perception`
-  ¸ĞÖª¡¢±ê¶¨¡¢Î»×Ë¹À¼Æ¡¢×ø±ê±ä»»¡¢Ïà»úÇÅ½ÓĞ­Òé¡£
+  - ArUco æ£€æµ‹
+  - ç›¸æœºæ ‡å®šè¯»å†™
+  - ä½å§¿ä¼°è®¡
+  - åæ ‡å˜æ¢
+  - å›¾åƒæµæ°´çº¿
+  - ç›¸æœº SDK ä¸æ¡¥æ¥åè®®å·¥å…·
 - `paus_marker_ros2`
-  `image_receiver_node`¡¢`marker_pose_node`¡¢`target_transform_node`¡¢`eye_to_hand_calibration_node`¡£
+  - `image_receiver_node`
+  - `marker_pose_node`
+  - `target_transform_node`
+  - `eye_to_hand_calibration_node`
+  - `camera_bridge.py`ï¼ˆé ROS2 nodeï¼Œä½†å±äºè¯¥åŒ…ï¼‰
 - `paus_motion_ros2`
-  `fairino_control_node`¡¢½Ó½ü¾ö²ßÂß¼­¡¢Linux FAIRINO SDK ÊÊÅä²ã¡£
+  - `fairino_control_node`
+  - æ¥è¿‘å†³ç­–é€»è¾‘
+  - Linux FAIRINO SDK é€‚é…å±‚
 - `paus_fine_ros2`
-  ºóĞø³¬Éù/¹âÉùÏ¸¶¨Î»Óë½ü³¡±Õ»·¿ØÖÆ¡£
+  - æœªæ¥è¶…å£°/å…‰å£°ç»†å®šä½
 - `paus_interfaces`
-  Ô¤Áô¸ø×Ô¶¨Òå `msg / srv / action`¡£
+  - æœªæ¥è‡ªå®šä¹‰ ROS æ¥å£
 - `paus_bringup`
-  Ò»¼üÆô¶¯ launch ÓëÄ¬ÈÏÔËĞĞÅäÖÃ¡£
+  - ä¸€é”®å¯åŠ¨ launch
+  - é»˜è®¤é…ç½®æ–‡ä»¶
 
-### ¹¹½¨
-ÔÚ workspace ¸ùÄ¿Â¼Ö´ĞĞ£º
+### æ„å»º
+åœ¨ä»“åº“æ ¹ç›®å½•æ‰§è¡Œï¼š
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -58,20 +70,20 @@ colcon build --symlink-install
 source install/setup.bash
 ```
 
-### Ò»¼üÆô¶¯
-Ä¬ÈÏÒÔ **dry-run** Æô¶¯ÕûÌõÔÚÏßÁ´Â·£º
+### ä¸€é”®å¯åŠ¨
+é»˜è®¤ä»¥ dry-run å¯åŠ¨æ•´æ¡åœ¨çº¿é“¾è·¯ï¼š
 
 ```bash
 ros2 launch paus_bringup online_stack.launch.py
 ```
 
-ÏÔÊ½ÔÊĞíÕæÊµ»úĞµ±ÛÖ´ĞĞ£º
+æ˜¾å¼å…è®¸çœŸå®æœºæ¢°è‡‚æ‰§è¡Œï¼š
 
 ```bash
 ros2 launch paus_bringup online_stack.launch.py execute_motion:=true
 ```
 
-¿ÉÑ¡²ÎÊı£º
+å¯é€‰å‚æ•°ç¤ºä¾‹ï¼š
 
 ```bash
 ros2 launch paus_bringup online_stack.launch.py \
@@ -80,15 +92,15 @@ ros2 launch paus_bringup online_stack.launch.py \
   execute_motion:=false
 ```
 
-### ×î»ù±¾ÔËĞĞË³Ğò
-Èç¹ûÄã²»×ß launch£¬×îĞ¡ÊÖ¶¯Ë³ĞòÊÇ£º
+### æœ€åŸºæœ¬è¿è¡Œé¡ºåº
+å¦‚æœä¸èµ° launchï¼Œæœ€å°æ‰‹åŠ¨é¡ºåºå¦‚ä¸‹ï¼š
 
-1. Æô¶¯Í¼Ïñ½ÓÊÕ½Úµã
+1. å¯åŠ¨å›¾åƒæ¥æ”¶èŠ‚ç‚¹
 ```bash
 ros2 run paus_marker_ros2 image_receiver_node
 ```
 
-2. Æô¶¯Ïà»úÇÅ½Ó½Å±¾
+2. å¯åŠ¨ç›¸æœºæ¡¥æ¥è„šæœ¬
 ```bash
 python3 "$(ros2 pkg prefix paus_marker_ros2)/share/paus_marker_ros2/scripts/camera_bridge.py" \
   --host 127.0.0.1 \
@@ -96,52 +108,49 @@ python3 "$(ros2 pkg prefix paus_marker_ros2)/share/paus_marker_ros2/scripts/came
   --camera-config-output /tmp/paus_robot/camera.yaml
 ```
 
-3. Æô¶¯ marker Î»×Ë½Úµã
+3. å¯åŠ¨ marker ä½å§¿èŠ‚ç‚¹
 ```bash
 ros2 run paus_marker_ros2 marker_pose_node \
   --ros-args -p camera_config_path:=/tmp/paus_robot/camera.yaml
 ```
 
-4. Æô¶¯Ä¿±ê±ä»»½Úµã
+4. å¯åŠ¨ç›®æ ‡å˜æ¢èŠ‚ç‚¹
 ```bash
 ros2 run paus_marker_ros2 target_transform_node
 ```
 
-5. Æô¶¯¿ØÖÆ½Úµã
+5. å¯åŠ¨æ§åˆ¶èŠ‚ç‚¹
 ```bash
 ros2 run paus_motion_ros2 fairino_control_node
 ```
 
-### ¹Ø¼ü Topics
-- `/camera/image_bridge`
-  Linux Ïà»úÇÅ½ÓºóµÄÍ¼ÏñÁ÷¡£
-- `/detection_status`
-  marker ¼ì²â×´Ì¬¡£
-- `/marker_pose`
-  marker Ïà¶ÔÏà»úµÄÎ»×Ë¡£
-- `/target_point_base`
-  »úÆ÷ÈË»ù×ùÏµÏÂµÄÄ¿±êµã¡£
-- `/control_status`
-  ¿ØÖÆ½Úµã×´Ì¬¡¢ºòÑ¡Î»×ËÓëÖ´ĞĞ½á¹û¡£
+### å…³é”® Topics
+- `/camera/image_bridge`ï¼šLinux ç›¸æœºæ¡¥æ¥åçš„å›¾åƒæµ
+- `/detection_status`ï¼šmarker æ£€æµ‹çŠ¶æ€
+- `/marker_pose`ï¼šmarker ç›¸å¯¹ç›¸æœºçš„ä½å§¿
+- `/target_point_base`ï¼šæœºå™¨äººåŸºåº§ç³»ä¸‹çš„ç›®æ ‡ç‚¹
+- `/control_status`ï¼šæ§åˆ¶èŠ‚ç‚¹çŠ¶æ€ã€å€™é€‰ä½å§¿å’Œæ‰§è¡Œç»“æœ
 
-### CLI ¹¤¾ß
-ÒÔÏÂÖ÷Ïß¹¤¾ßÒÑ¾­×ªÎª console scripts£º
+### CLI å·¥å…·
+ä»¥ä¸‹ä¸»çº¿å·¥å…·å·²ç»æ•´ç†æˆ console scriptsï¼š
 
 ```bash
-ros2 run paus_perception generate_marker --marker-id 7 --output ./markers/id7.png
-ros2 run paus_perception run_single_image --input ./test_data/images/sample.png --output-dir ./results/run_001
+ros2 run paus_perception generate_marker --marker-id 7 --output ./test_data/markers/id7.png
+ros2 run paus_perception run_single_image --input ./test_data/images/01.jfif --output-dir ./results/run_001
 ros2 run paus_perception run_image_batch --input-dir ./test_data/images --output-dir ./results/batch_001
 ros2 run paus_perception calibrate_camera --input-dir ./test_data/calib --rows 6 --cols 9 --square-size-m 0.01 --output ./camera.yaml
 ```
 
-Linux FAIRINO SDK ×îĞ¡Ö±Á¬²âÊÔ½Å±¾±£ÁôÔÚ¸ùÄ¿Â¼ `scripts/`£º
+Linux FAIRINO SDK æœ€å°ç›´è¿æµ‹è¯•è„šæœ¬ä¿ç•™åœ¨æ ¹ç›®å½• `scripts/`ï¼š
 
 ```bash
 python3 scripts/test_fairino_linux.py --command connect
 python3 scripts/test_fairino_linux.py --command set_speed --speed 5
+python3 scripts/test_fairino_linux.py --command get_joints
+python3 scripts/test_fairino_linux.py --command get_tcp
 ```
 
-### ²âÊÔ
+### æµ‹è¯•
 ```bash
 python3 -m unittest discover -s src/paus_perception/tests -v
 python3 -m unittest discover -s src/paus_motion_ros2/tests -v
@@ -151,7 +160,7 @@ colcon test
 ```
 
 ### Legacy
-ÒÔÏÂÄ¿Â¼Ö»×÷ÀúÊ·±£Áô£¬²»²ÎÓëÄ¬ÈÏ¹¹½¨ÓëÄ¬ÈÏÔËĞĞ£º
+ä»¥ä¸‹ç›®å½•åªä½œå†å²ä¿ç•™ï¼Œä¸å‚ä¸é»˜è®¤æ„å»ºä¸é»˜è®¤è¿è¡Œï¼š
 - `legacy/hybrid_stack/`
 - `legacy/windows_bridge/`
 - `legacy/vendor/`
@@ -161,21 +170,19 @@ colcon test
 ## English
 
 ### Overview
-`paus_robot` now uses a **workspace-at-repository-root** ROS2 layout. The Linux / native Ubuntu path is the default mainline, organized around coarse localization, robot approach, and future fine localization.
+`paus_robot` uses a workspace-at-repository-root ROS2 layout and targets Linux / native Ubuntu as the mainline.
 
 Current package split:
-- `paus_perception`: pure Python perception and transform core
+- `paus_perception`: pure Python perception, calibration, pose, and transform core
 - `paus_marker_ros2`: coarse localization ROS2 nodes
 - `paus_motion_ros2`: control, motion, and execution orchestration
-- `paus_fine_ros2`: placeholder for fine localization
+- `paus_fine_ros2`: placeholder for future fine localization
 - `paus_interfaces`: placeholder for custom ROS interfaces
 - `paus_bringup`: launch files and runtime configuration
 
-The old Windows / WSL hybrid route has been moved to `legacy/` and is no longer the default runtime path.
+The old Windows / WSL hybrid route is preserved under `legacy/` for reference only.
 
 ### Build
-From the workspace root:
-
 ```bash
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install
@@ -189,7 +196,7 @@ Dry-run by default:
 ros2 launch paus_bringup online_stack.launch.py
 ```
 
-Allow real robot motion explicitly:
+Enable real motion explicitly:
 
 ```bash
 ros2 launch paus_bringup online_stack.launch.py execute_motion:=true
@@ -197,8 +204,8 @@ ros2 launch paus_bringup online_stack.launch.py execute_motion:=true
 
 ### Manual startup order
 1. `ros2 run paus_marker_ros2 image_receiver_node`
-2. `python3 "$(ros2 pkg prefix paus_marker_ros2)/share/paus_marker_ros2/scripts/camera_bridge.py" --host 127.0.0.1 --port 5001 --camera-config-output /tmp/paus_robot/camera.yaml`
-3. `ros2 run paus_marker_ros2 marker_pose_node --ros-args -p camera_config_path:=/tmp/paus_robot/camera.yaml`
+2. `camera_bridge.py`
+3. `ros2 run paus_marker_ros2 marker_pose_node`
 4. `ros2 run paus_marker_ros2 target_transform_node`
 5. `ros2 run paus_motion_ros2 fairino_control_node`
 
@@ -208,7 +215,3 @@ ros2 launch paus_bringup online_stack.launch.py execute_motion:=true
 - `/marker_pose`
 - `/target_point_base`
 - `/control_status`
-
-### Legacy
-Historical-only content lives under `legacy/` and is excluded from the mainline workflow.
-

@@ -1,20 +1,20 @@
-# Legacy Windows Route
+# Legacy Windows 路线
 
-The repository still keeps the old Windows / WSL hybrid path under `legacy/`:
+仓库仍然保留旧的 Windows / WSL 双桥方案，位置在：
 
 - `legacy/hybrid_stack/`
 - `legacy/windows_bridge/`
 - `legacy/vendor/`
 
-This route is preserved only for reference, rollback, or historical comparison. It is not part of the default Linux mainline anymore.
+这些内容现在只作历史回溯和参考，不再作为默认主线。
 
-## Archived content
-- Windows camera bridge implementation
-- Windows FAIRINO execution bridge
-- old ROS2 vendor packages formerly used inside the nested workspace
+## 归档内容
+- Windows 相机桥
+- Windows FAIRINO 执行桥
+- 旧的 ROS2 vendor 包
 
-## Current recommendation
-Use the Linux-native workspace root mainline instead:
+## 当前推荐
+默认使用 Linux 原生主线：
 - `paus_perception`
 - `paus_marker_ros2`
 - `paus_motion_ros2`

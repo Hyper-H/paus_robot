@@ -1,73 +1,65 @@
-# Coordinate Transform Pipeline
+# 坐标变换链说明
 
-## Goal
-
-This module turns:
+## 目标
+这一模块的目标是把：
 
 - `camera -> marker`
 
-into:
+变成：
 
 - `robot_base -> target_region`
 
-through a complete transform chain.
+也就是把相机系下的粗定位结果转换成机器人基座系下的目标区域。
 
-## Frames
+## 主要坐标系
+- `robot_base`：机械臂基座坐标系
+- `tool`：当前工具 / TCP 坐标系
+- `calib_board`：安装在工具上的标定板坐标系
+- `camera`：相机坐标系
+- `marker`：患者附近工作 marker 坐标系
+- `target_region`：希望机器人靠近的粗目标区域
 
-- `robot_base`: robot base frame
-- `tool`: robot TCP frame
-- `calib_board`: calibration board frame mounted on the robot tool
-- `camera`: camera frame
-- `marker`: working marker frame attached near the patient
-- `target_region`: the coarse target region for the robot to approach
-
-## Calibration Stage
-
-The calibration stage only solves:
+## 标定阶段
+标定阶段的目标是求：
 
 - `T_base_camera`
 
-Workflow:
-
-1. Mount a chessboard / calibration board rigidly on the robot tool
-2. Detect the board in the camera image and estimate `T_camera_board`
-3. Read the current robot TCP pose as `T_base_tool`
-4. Use a fixed `T_tool_board`
-5. Compute one sample:
+流程：
+1. 将棋盘格或标定板刚性固定在工具上
+2. 在相机图像中检测标定板，估计 `T_camera_board`
+3. 读取机械臂当前 TCP 位姿 `T_base_tool`
+4. 使用固定的 `T_tool_board`
+5. 计算单次样本：
 
 ```text
 T_base_camera_i = T_base_tool_i * T_tool_board * inverse(T_camera_board_i)
 ```
 
-6. Average multiple samples to obtain the final `T_base_camera`
+6. 对多组样本求平均，得到最终 `T_base_camera`
 
-Output:
+输出文件：
+- `src/paus_bringup/configs/extrinsics.yaml`
 
-- `configs/extrinsics.yaml`
+## 运行阶段
+运行阶段移除标定板，只保留工作 marker。
 
-## Runtime Stage
-
-During runtime the calibration board is removed and only the working marker remains.
-
-Workflow:
-
-1. Detect the working marker
-2. Estimate `T_camera_marker`
-3. Load `T_base_camera`
-4. Define a fixed `T_marker_target`
-5. Compute:
+流程：
+1. 检测工作 marker
+2. 估计 `T_camera_marker`
+3. 加载 `T_base_camera`
+4. 定义固定的 `T_marker_target`
+5. 计算：
 
 ```text
 T_base_target = T_base_camera * T_camera_marker * T_marker_target
 ```
 
-6. Publish:
-   - `/target_pose_base`
-   - `/target_point_base`
+6. 发布：
+- `/target_pose_base`
+- `/target_point_base`
 
-## Default Offset
-
-The first version uses a fixed offset from the working marker to the coarse target region:
+## 默认偏移
+第一版默认从工作 marker 到粗目标区域使用固定偏移：
 
 ```yaml
 transform:
@@ -76,106 +68,74 @@ transform:
     rotation_rpy_deg: [0.0, 0.0, 0.0]
 ```
 
-This means:
+含义是：
+- 工作 marker 贴在下巴附近
+- 粗目标点定义在 marker 坐标系下方 5 cm 处
 
-- the working marker is attached near the chin
-- the coarse target is defined 5 cm below the marker in marker coordinates
-
-## ROS2 Nodes
-
+## ROS2 节点
 ### `eye_to_hand_calibration_node`
-
-Responsibilities:
-
-- collect calibration samples
-- solve `T_base_camera`
-- save `configs/extrinsics.yaml`
-
-Inputs:
-
-- `/camera/image_bridge`
-- `/nonrt_state_data` (currently assumed to be `PoseStamped`)
-
-Services:
-
-- `/eye_to_hand/capture_sample`
-- `/eye_to_hand/solve`
-- `/eye_to_hand/save`
+负责：
+- 采集标定样本
+- 求解 `T_base_camera`
+- 保存 `extrinsics.yaml`
 
 ### `target_transform_node`
+负责：
+- 将 `camera -> marker` 转换成 `robot_base -> target_region`
 
-Responsibilities:
-
-- convert `camera -> marker` into `robot_base -> target_region`
-
-Inputs:
-
+输入：
 - `/marker_pose`
-- `configs/extrinsics.yaml`
-- `configs/default.yaml`
+- `extrinsics.yaml`
+- `default.yaml`
 
-Outputs:
-
+输出：
 - `/target_pose_base`
 - `/target_point_base`
 - `/transform_status`
 
-## Current Scope
+## 当前范围
+当前模块还不处理：
+- 遮挡鲁棒性
+- 点云精修
+- 手眼算法创新
+- 实际机械臂执行
 
-This module does not yet handle:
+当前目标只是：
+**把相机系粗定位闭环到机器人基座系粗定位。**
 
-- occlusion robustness
-- point-cloud refinement
-- hand-eye algorithm innovation
-- actual robot motion execution
+## 第一阶段机器人接近控制
+第一版执行策略刻意做得比较保守。
 
-The current goal is only:
-
-**to close the transform chain from camera-frame coarse localization to robot-base coarse localization.**
-
-## 8. First-stage robot approach control
-
-The current first-stage execution strategy is intentionally conservative.
-
-### Input
-
+### 输入
 - `/target_point_base`
 
-This topic already represents the coarse target point in the `robot_base` frame.
+### 控制策略
+`fairino_control_node` 当前会：
+1. 从 FAIRINO Linux SDK 读取当前 TCP 位姿
+2. 保持当前 TCP 姿态不变
+3. 将目标点从米转换为毫米
+4. 生成预接近点，而不是直接贴向目标
+5. 执行安全检查
+6. 仅在 `execute_motion=true` 时真正调用 `MoveL`
 
-### Control strategy
+### 安全检查
+当前检查项包括：
+- 工作空间范围
+- 最低安全 `z`
+- 单步最大位移
+- 输入数值有限性
+- `frame_id` 是否正确
 
-The first version of `fairino_control_node` will:
-
-1. Read the current TCP pose from the FAIRINO Python SDK
-2. Keep the current TCP orientation unchanged
-3. Convert the target point from `m` to `mm`
-4. Generate a pre-approach point instead of directly touching the target
-5. Apply safety checks
-6. Only call `MoveL` when `execute_motion=true`
-
-### Safety checks
-
-The node checks:
-
-- workspace limits
-- minimum safe `z`
-- maximum one-step motion distance
-- finite input values
-- correct `frame_id`
-
-### Dry-run first
-
-The default mode is:
+### Dry-run 优先
+默认配置：
 
 ```yaml
 control:
   execute_motion: false
 ```
 
-This means:
+这意味着：
+- 节点会输出并发布候选指令
+- 机器人不会真实动作
 
-- the node prints and publishes the candidate command
-- the robot does not move
-
-Only after validating the command numerically should execution be enabled.
+只有在数值和逻辑确认无误后，才建议打开真实执行。
