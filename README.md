@@ -92,6 +92,70 @@ ros2 launch paus_bringup online_stack.launch.py \
   execute_motion:=false
 ```
 
+### 手眼标定一键启动
+如果你要做 `eye-to-hand` 手眼标定，推荐直接用专门的 launch：
+
+```bash
+ros2 launch paus_bringup eye_to_hand_calibration.launch.py \
+  board_rows:=6 \
+  board_cols:=9 \
+  square_size_m:=0.01
+```
+
+常用可选参数：
+
+```bash
+ros2 launch paus_bringup eye_to_hand_calibration.launch.py \
+  camera_ip:=192.168.58.20 \
+  camera_config_output:=/tmp/paus_robot/camera.yaml \
+  board_rows:=6 \
+  board_cols:=9 \
+  square_size_m:=0.01 \
+  min_sample_count:=10 \
+  output_path:=/home/chen_lab/paus_robot/src/paus_bringup/configs/extrinsics.yaml
+```
+
+如果棋盘格中心不在 TCP 上，还可以显式传工具到棋盘的固定偏移：
+
+```bash
+ros2 launch paus_bringup eye_to_hand_calibration.launch.py \
+  tool_to_board_tx:=0.0 \
+  tool_to_board_ty:=0.0 \
+  tool_to_board_tz:=0.0 \
+  tool_to_board_rx:=0.0 \
+  tool_to_board_ry:=0.0 \
+  tool_to_board_rz:=0.0
+```
+
+标定链启动后，节点会自己通过 Linux SDK 读取当前 TCP，所以不再依赖 `/nonrt_state_data` 这类外部位姿 topic。
+
+#### 标定步骤
+1. 启动上面的标定 launch
+2. 确保棋盘格在相机视野内且清晰可见
+3. 机械臂切换到不同姿态，每到一个姿态采一次样本：
+
+```bash
+ros2 service call /eye_to_hand/capture_sample std_srvs/srv/Trigger "{}"
+```
+
+4. 样本数达到 `min_sample_count` 后求解：
+
+```bash
+ros2 service call /eye_to_hand/solve std_srvs/srv/Trigger "{}"
+```
+
+5. 求解成功后保存：
+
+```bash
+ros2 service call /eye_to_hand/save std_srvs/srv/Trigger "{}"
+```
+
+6. 查看状态：
+
+```bash
+ros2 topic echo /eye_to_hand/status
+```
+
 ### 最基本运行顺序
 如果不走 launch，最小手动顺序如下：
 
@@ -200,6 +264,24 @@ Enable real motion explicitly:
 
 ```bash
 ros2 launch paus_bringup online_stack.launch.py execute_motion:=true
+```
+
+### One-command eye-to-hand calibration
+To start the eye-to-hand calibration chain:
+
+```bash
+ros2 launch paus_bringup eye_to_hand_calibration.launch.py \
+  board_rows:=6 \
+  board_cols:=9 \
+  square_size_m:=0.01
+```
+
+Capture, solve, and save:
+
+```bash
+ros2 service call /eye_to_hand/capture_sample std_srvs/srv/Trigger "{}"
+ros2 service call /eye_to_hand/solve std_srvs/srv/Trigger "{}"
+ros2 service call /eye_to_hand/save std_srvs/srv/Trigger "{}"
 ```
 
 ### Manual startup order
