@@ -1,345 +1,214 @@
 # paus_robot
 
-[ä¸­æ–‡](#ä¸­æ–‡) | [English](#english)
+## ÖÐÎÄ
 
-## ä¸­æ–‡
+### ÏîÄ¿¸ÅÊö
+`paus_robot` ÏÖÔÚ²ÉÓÃ **²Ö¿â¸ùÄ¿Â¼¼´ ROS2 workspace** µÄ½á¹¹¡£Ö÷ÏßÃæÏò Linux / Ô­Éú Ubuntu£¬Î§ÈÆ¡°´Ö¶¨Î» -> ÔË¶¯½Ó½ü -> Ï¸¶¨Î»¡±µÄÏµÍ³·Ö²ã×éÖ¯´úÂë¡£
 
-### é¡¹ç›®æ¦‚è§ˆ
+µ±Ç°Ä¬ÈÏÖ÷Ïß£º
+- `paus_perception`£º´¿ Python ¸ÐÖªÓë±ä»»ºËÐÄ¿â
+- `paus_marker_ros2`£º´Ö¶¨Î»ÊÓ¾õ½Úµã
+- `paus_motion_ros2`£º¿ØÖÆ¡¢ÔË¶¯¡¢Ö´ÐÐ±àÅÅ½Úµã
+- `paus_fine_ros2`£ºÏ¸¶¨Î»Ô¤Áô°üÎ»
+- `paus_interfaces`£º×Ô¶¨Òå½Ó¿ÚÔ¤Áô°üÎ»
+- `paus_bringup`£ºlaunch ÓëÔËÐÐÅäÖÃ
 
-`paus_robot` å½“å‰ä»¥ **çº¯ Linux / åŽŸç”Ÿ Ubuntu** ä¸ºä¸»çº¿ï¼Œç›®æ ‡æ˜¯åœ¨ Linux ä¸Šå®Œæˆï¼š
+¾ÉµÄ Windows / WSL Ë«ÇÅ·½°¸ÒÑÕûÌå½µ¼¶µ½ `legacy/`£¬²»ÔÙ×÷ÎªÄ¬ÈÏÔËÐÐÈë¿Ú¡£
 
-- ç›¸æœºè¾“å…¥
-- ROS2 æ„ŸçŸ¥é“¾
-- ArUco marker æ£€æµ‹
-- ç›¸æœºåˆ°æœºå™¨äººåŸºåº§çš„åæ ‡å˜æ¢
-- å€™é€‰æŽ¥è¿‘ä½å§¿ç”Ÿæˆ
-- FAIRINO çœŸæœºæ‰§è¡Œ
-
-ä»“åº“ä¸­çš„ Windows / WSL åŒæ¡¥æ–¹æ¡ˆä»ç„¶ä¿ç•™ï¼Œä½†å·²ç»é™çº§ä¸ºåŽ†å²ä¸Žå‚è€ƒè·¯çº¿ï¼Œä¸å†æ˜¯é»˜è®¤è¿è¡Œæ–¹å¼ã€‚
-
-### å½“å‰ä¸»çº¿
-
-æŽ¨èå·¥ä½œæµï¼š
-
+### Workspace ½á¹¹
 ```text
-Linux camera input
--> image_receiver_node
--> marker_pose_node
--> target_transform_node
--> fairino_control_node
--> fairino_linux_client
--> Robot
+paus_robot/
+©À©¤©¤ src/
+©¦   ©À©¤©¤ paus_perception/
+©¦   ©À©¤©¤ paus_marker_ros2/
+©¦   ©À©¤©¤ paus_motion_ros2/
+©¦   ©À©¤©¤ paus_fine_ros2/
+©¦   ©À©¤©¤ paus_interfaces/
+©¦   ©¸©¤©¤ paus_bringup/
+©À©¤©¤ docs/
+©À©¤©¤ test_data/
+©À©¤©¤ tests/
+©À©¤©¤ legacy/
+©À©¤©¤ README.md
+©À©¤©¤ build/      # ±¾µØÉú³É£¬²»Èë¿â
+©À©¤©¤ install/    # ±¾µØÉú³É£¬²»Èë¿â
+©¸©¤©¤ log/        # ±¾µØÉú³É£¬²»Èë¿â
 ```
 
-### æ ¸å¿ƒç›®å½•
+### °üÖ°Ôð
+- `paus_perception`
+  ¸ÐÖª¡¢±ê¶¨¡¢Î»×Ë¹À¼Æ¡¢×ø±ê±ä»»¡¢Ïà»úÇÅ½ÓÐ­Òé¡£
+- `paus_marker_ros2`
+  `image_receiver_node`¡¢`marker_pose_node`¡¢`target_transform_node`¡¢`eye_to_hand_calibration_node`¡£
+- `paus_motion_ros2`
+  `fairino_control_node`¡¢½Ó½ü¾ö²ßÂß¼­¡¢Linux FAIRINO SDK ÊÊÅä²ã¡£
+- `paus_fine_ros2`
+  ºóÐø³¬Éù/¹âÉùÏ¸¶¨Î»Óë½ü³¡±Õ»·¿ØÖÆ¡£
+- `paus_interfaces`
+  Ô¤Áô¸ø×Ô¶¨Òå `msg / srv / action`¡£
+- `paus_bringup`
+  Ò»¼üÆô¶¯ launch ÓëÄ¬ÈÏÔËÐÐÅäÖÃ¡£
 
-- [configs](/root/projects/ag-repro/configs)
-  - ä¸»é…ç½®ä¸Žå¤–å‚
-- [src/ag_repro](/root/projects/ag-repro/src/ag_repro)
-  - æ£€æµ‹ã€ä½å§¿ã€åæ ‡å˜æ¢ã€æŽ§åˆ¶ã€Linux FAIRINO é€‚é…å±‚
-- [ros2_ws](/root/projects/ag-repro/ros2_ws)
-  - ROS2 èŠ‚ç‚¹å·¥ä½œåŒº
-- [scripts](/root/projects/ag-repro/scripts)
-  - ç¦»çº¿è„šæœ¬ä¸Ž Linux æ‰§è¡Œæµ‹è¯•è„šæœ¬
-- [docs](/root/projects/ag-repro/docs)
-  - å·¥ä½œæµã€æ‰§è¡Œè¯´æ˜Žã€çŠ¶æ€è¯´æ˜Ž
-- [legacy](/root/projects/ag-repro/legacy)
-  - åŽ†å² Windows / WSL è·¯çº¿
-
-### Linux æ‰§è¡Œå±‚
-
-é»˜è®¤ä½¿ç”¨å®˜æ–¹ FAIRINO Linux Python SDKã€‚
-
-é€‚é…å±‚ï¼š
-
-- [fairino_linux_client.py](/root/projects/ag-repro/src/ag_repro/fairino_linux_client.py)
-
-æµ‹è¯•è„šæœ¬ï¼š
-
-- [test_fairino_linux.py](/root/projects/ag-repro/scripts/test_fairino_linux.py)
-
-é»˜è®¤é…ç½®é¡¹ï¼š
-
-```yaml
-control:
-  robot_ip: "192.168.58.2"
-  linux_fairino_sdk_root: "/opt/fairino_python_sdk/linux"
-  execute_motion: false
-```
-
-### å¸¸ç”¨å‘½ä»¤
-
-æ¿€æ´» ROS2ï¼š
+### ¹¹½¨
+ÔÚ workspace ¸ùÄ¿Â¼Ö´ÐÐ£º
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /root/projects/ag-repro/ros2_ws/install/setup.bash
+colcon build --symlink-install
+source install/setup.bash
 ```
 
-ç¦»çº¿å•å›¾æ£€æµ‹ï¼š
+### Ò»¼üÆô¶¯
+Ä¬ÈÏÒÔ **dry-run** Æô¶¯ÕûÌõÔÚÏßÁ´Â·£º
 
 ```bash
-source ~/miniconda3/etc/profile.d/conda.sh
-conda activate paus_robot
-cd ~/paus_robot
-
-python scripts/run_single_image.py \
-  --input /path/to/image.png \
-  --output-dir results/run_single_001 \
-  --config configs/default.yaml \
-  --camera-config configs/camera.yaml
+ros2 launch paus_bringup online_stack.launch.py
 ```
 
-FAIRINO Linux SDK è¿žæŽ¥æµ‹è¯•ï¼š
+ÏÔÊ½ÔÊÐíÕæÊµ»úÐµ±ÛÖ´ÐÐ£º
 
 ```bash
-source ~/miniconda3/etc/profile.d/conda.sh
-conda activate paus_robot
-cd ~/paus_robot
-
-python scripts/test_fairino_linux.py \
-  --sdk-root /opt/fairino_python_sdk/linux \
-  --robot-ip 192.168.58.2 \
-  --command connect
+ros2 launch paus_bringup online_stack.launch.py execute_motion:=true
 ```
 
-è®¾ç½®é€Ÿåº¦æµ‹è¯•ï¼š
+¿ÉÑ¡²ÎÊý£º
 
 ```bash
-python scripts/test_fairino_linux.py \
-  --sdk-root /opt/fairino_python_sdk/linux \
-  --robot-ip 192.168.58.2 \
-  --command set_speed \
-  --speed 5
-```
-
-### ä¸€é”®å¯åŠ¨ï¼ˆæŽ¨èï¼‰
-
-é»˜è®¤ dry-runï¼š
-
-```bash
-ros2 launch ag_marker_ros2 online_stack.launch.py
-```
-
-æ˜¾å¼å…è®¸çœŸå®žæ‰§è¡Œï¼š
-
-```bash
-ros2 launch ag_marker_ros2 online_stack.launch.py execute_motion:=true
-```
-
-å¯é€‰å‚æ•°ç¤ºä¾‹ï¼š
-
-```bash
-ros2 launch ag_marker_ros2 online_stack.launch.py \
-  config_path:=/root/projects/ag-repro/configs/default.yaml \
-  camera_config_output:=/root/projects/ag-repro/ros2_ws/install/ag_marker_ros2/share/ag_marker_ros2/configs/camera.yaml \
+ros2 launch paus_bringup online_stack.launch.py \
   camera_ip:=192.168.58.20 \
+  camera_config_output:=/tmp/paus_robot/camera.yaml \
   execute_motion:=false
 ```
 
-é»˜è®¤è¯´æ˜Žï¼š
+### ×î»ù±¾ÔËÐÐË³Ðò
+Èç¹ûÄã²»×ß launch£¬×îÐ¡ÊÖ¶¯Ë³ÐòÊÇ£º
 
-- launch ä¼šåŒæ—¶å¯åŠ¨ï¼š
-  - `camera_bridge.py`
-  - `image_receiver_node`
-  - `marker_pose_node`
-  - `target_transform_node`
-  - `fairino_control_node`
-- `execute_motion` é»˜è®¤æ˜¯ `false`
-- ä¹Ÿå°±æ˜¯è¯´ï¼Œé»˜è®¤åªåš dry-runï¼Œä¸ç›´æŽ¥é©±åŠ¨æœºæ¢°è‡‚
-
-### æ‰‹åŠ¨å¯åŠ¨é¡ºåº
-
-å¦‚æžœä½ ä¸æƒ³ä½¿ç”¨ launchï¼Œå¯ä»¥æŒ‰ä¸‹é¢é¡ºåºæ‰‹åŠ¨å¯åŠ¨ã€‚
-
-#### 1. å¯åŠ¨å›¾åƒæŽ¥æ”¶èŠ‚ç‚¹
-
+1. Æô¶¯Í¼Ïñ½ÓÊÕ½Úµã
 ```bash
-ros2 run ag_marker_ros2 image_receiver_node
+ros2 run paus_marker_ros2 image_receiver_node
 ```
 
-#### 2. å¯åŠ¨ Linux ç›¸æœºæ¡¥æŽ¥è„šæœ¬
-
+2. Æô¶¯Ïà»úÇÅ½Ó½Å±¾
 ```bash
-python -u scripts/camera_bridge.py \
+python3 "$(ros2 pkg prefix paus_marker_ros2)/share/paus_marker_ros2/scripts/camera_bridge.py" \
   --host 127.0.0.1 \
   --port 5001 \
-  --camera-config-output /root/projects/ag-repro/ros2_ws/install/ag_marker_ros2/share/ag_marker_ros2/configs/camera.yaml
+  --camera-config-output /tmp/paus_robot/camera.yaml
 ```
 
-#### 3. å¯åŠ¨ marker ä½å§¿èŠ‚ç‚¹
+3. Æô¶¯ marker Î»×Ë½Úµã
+```bash
+ros2 run paus_marker_ros2 marker_pose_node \
+  --ros-args -p camera_config_path:=/tmp/paus_robot/camera.yaml
+```
+
+4. Æô¶¯Ä¿±ê±ä»»½Úµã
+```bash
+ros2 run paus_marker_ros2 target_transform_node
+```
+
+5. Æô¶¯¿ØÖÆ½Úµã
+```bash
+ros2 run paus_motion_ros2 fairino_control_node
+```
+
+### ¹Ø¼ü Topics
+- `/camera/image_bridge`
+  Linux Ïà»úÇÅ½ÓºóµÄÍ¼ÏñÁ÷¡£
+- `/detection_status`
+  marker ¼ì²â×´Ì¬¡£
+- `/marker_pose`
+  marker Ïà¶ÔÏà»úµÄÎ»×Ë¡£
+- `/target_point_base`
+  »úÆ÷ÈË»ù×ùÏµÏÂµÄÄ¿±êµã¡£
+- `/control_status`
+  ¿ØÖÆ½Úµã×´Ì¬¡¢ºòÑ¡Î»×ËÓëÖ´ÐÐ½á¹û¡£
+
+### CLI ¹¤¾ß
+ÒÔÏÂÖ÷Ïß¹¤¾ßÒÑ¾­×ªÎª console scripts£º
 
 ```bash
-ros2 run ag_marker_ros2 marker_pose_node \
-  --ros-args -p camera_config_path:=/root/projects/ag-repro/ros2_ws/install/ag_marker_ros2/share/ag_marker_ros2/configs/camera.yaml
+ros2 run paus_perception generate_marker --marker-id 7 --output ./markers/id7.png
+ros2 run paus_perception run_single_image --input ./test_data/images/sample.png --output-dir ./results/run_001
+ros2 run paus_perception run_image_batch --input-dir ./test_data/images --output-dir ./results/batch_001
+ros2 run paus_perception calibrate_camera --input-dir ./test_data/calib --rows 6 --cols 9 --square-size-m 0.01 --output ./camera.yaml
 ```
 
-#### 4. å¯åŠ¨ç›®æ ‡å˜æ¢èŠ‚ç‚¹
+Linux FAIRINO SDK ×îÐ¡Ö±Á¬²âÊÔ½Å±¾±£ÁôÔÚ¸ùÄ¿Â¼ `scripts/`£º
 
 ```bash
-ros2 run ag_marker_ros2 target_transform_node
+python3 scripts/test_fairino_linux.py --command connect
+python3 scripts/test_fairino_linux.py --command set_speed --speed 5
 ```
 
-#### 5. å¯åŠ¨æŽ§åˆ¶èŠ‚ç‚¹
-
+### ²âÊÔ
 ```bash
-ros2 run ag_marker_ros2 fairino_control_node
+python3 -m unittest discover -s src/paus_perception/tests -v
+python3 -m unittest discover -s src/paus_motion_ros2/tests -v
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install
+colcon test
 ```
 
-### æœ€åŸºæœ¬è¿è¡Œé¡ºåºè¯´æ˜Ž
+### Legacy
+ÒÔÏÂÄ¿Â¼Ö»×÷ÀúÊ·±£Áô£¬²»²ÎÓëÄ¬ÈÏ¹¹½¨ÓëÄ¬ÈÏÔËÐÐ£º
+- `legacy/hybrid_stack/`
+- `legacy/windows_bridge/`
+- `legacy/vendor/`
 
-1. å…ˆç”¨ `test_fairino_linux.py` ç¡®è®¤ Linux æ‰§è¡Œå±‚èƒ½è¿žé€šæœºæ¢°è‡‚ã€‚
-2. èµ· `image_receiver_node`ã€‚
-3. èµ· `camera_bridge.py`ï¼Œç¡®è®¤ç›¸æœºå›¾åƒè¿›å…¥ `/camera/image_bridge`ã€‚
-4. èµ· `marker_pose_node`ï¼Œç¡®è®¤ `/detection_status` å’Œ `/marker_pose` æœ‰è¾“å‡ºã€‚
-5. èµ· `target_transform_node`ï¼Œç¡®è®¤ `/target_point_base` æœ‰è¾“å‡ºã€‚
-6. èµ· `fairino_control_node`ï¼Œç¡®è®¤ `/control_status` æœ‰è¾“å‡ºï¼Œä¸” `control_backend` ä¸º `linux_sdk`ã€‚
-7. è‹¥è¦çœŸå®žæ‰§è¡Œï¼Œå†æŠŠ `configs/default.yaml` ä¸­çš„ `execute_motion` æ”¹ä¸º `true`ï¼Œæˆ– launch æ—¶ä¼  `execute_motion:=true`ã€‚
-
-### å¸¸ç”¨æ£€æŸ¥å‘½ä»¤
-
-æŸ¥çœ‹èŠ‚ç‚¹ï¼š
-
-```bash
-ros2 node list
-```
-
-æŸ¥çœ‹ marker æ£€æµ‹çŠ¶æ€ï¼š
-
-```bash
-ros2 topic echo /detection_status
-```
-
-æŸ¥çœ‹ marker ä½å§¿ï¼š
-
-```bash
-ros2 topic echo /marker_pose
-```
-
-æŸ¥çœ‹ç›®æ ‡ç‚¹ï¼š
-
-```bash
-ros2 topic echo /target_point_base
-```
-
-æŸ¥çœ‹æŽ§åˆ¶çŠ¶æ€ï¼š
-
-```bash
-ros2 topic echo /control_status
-```
-
-### æ–‡æ¡£å…¥å£
-
-ä¸»çº¿æ–‡æ¡£ï¼š
-
-- [workflow.md](/root/projects/ag-repro/docs/workflow.md)
-- [linux_execution.md](/root/projects/ag-repro/docs/linux_execution.md)
-- [coordinate_transform.md](/root/projects/ag-repro/docs/coordinate_transform.md)
-- [current_status.md](/root/projects/ag-repro/docs/current_status.md)
-
-åŽ†å²è·¯çº¿æ–‡æ¡£ï¼š
-
-- [legacy_windows_route.md](/root/projects/ag-repro/docs/legacy_windows_route.md)
+---
 
 ## English
 
 ### Overview
+`paus_robot` now uses a **workspace-at-repository-root** ROS2 layout. The Linux / native Ubuntu path is the default mainline, organized around coarse localization, robot approach, and future fine localization.
 
-`paus_robot` is now organized around a **pure Linux / native Ubuntu mainline**.  
-The target is to run the full stack on Linux:
+Current package split:
+- `paus_perception`: pure Python perception and transform core
+- `paus_marker_ros2`: coarse localization ROS2 nodes
+- `paus_motion_ros2`: control, motion, and execution orchestration
+- `paus_fine_ros2`: placeholder for fine localization
+- `paus_interfaces`: placeholder for custom ROS interfaces
+- `paus_bringup`: launch files and runtime configuration
 
-- camera input
-- ROS2 perception pipeline
-- ArUco marker detection
-- camera-to-base transform
-- candidate approach pose generation
-- FAIRINO robot execution
+The old Windows / WSL hybrid route has been moved to `legacy/` and is no longer the default runtime path.
 
-The previous Windows / WSL bridge route is still kept in the repository, but only as a legacy/reference path.
-
-### Mainline Workflow
-
-```text
-Linux camera input
--> image_receiver_node
--> marker_pose_node
--> target_transform_node
--> fairino_control_node
--> fairino_linux_client
--> Robot
-```
-
-### Key Directories
-
-- `configs/`: runtime config and extrinsics
-- `src/ag_repro/`: perception, transforms, control, Linux FAIRINO adapter
-- `ros2_ws/`: ROS2 workspace
-- `scripts/`: offline tools and Linux execution tests
-- `docs/`: workflow and execution docs
-- `legacy/`: deprecated Windows / WSL route
-
-### Linux FAIRINO Execution
-
-Default execution path uses the official FAIRINO Linux Python SDK.
-
-Adapter:
-
-- [fairino_linux_client.py](/root/projects/ag-repro/src/ag_repro/fairino_linux_client.py)
-
-Smoke test:
-
-- [test_fairino_linux.py](/root/projects/ag-repro/scripts/test_fairino_linux.py)
-
-### One-Command Launch
-
-Default dry-run:
+### Build
+From the workspace root:
 
 ```bash
-ros2 launch ag_marker_ros2 online_stack.launch.py
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install
+source install/setup.bash
 ```
 
-Enable real execution explicitly:
+### One-command launch
+Dry-run by default:
 
 ```bash
-ros2 launch ag_marker_ros2 online_stack.launch.py execute_motion:=true
+ros2 launch paus_bringup online_stack.launch.py
 ```
 
-By default the launch file starts:
-
-- `camera_bridge.py`
-- `image_receiver_node`
-- `marker_pose_node`
-- `target_transform_node`
-- `fairino_control_node`
-
-Default behavior is dry-run. Real robot motion is disabled unless `execute_motion:=true` is provided.
-
-### Manual Runtime Order
-
-1. `ros2 run ag_marker_ros2 image_receiver_node`
-2. `python -u scripts/camera_bridge.py --host 127.0.0.1 --port 5001 --camera-config-output ...`
-3. `ros2 run ag_marker_ros2 marker_pose_node --ros-args -p camera_config_path:=...`
-4. `ros2 run ag_marker_ros2 target_transform_node`
-5. `ros2 run ag_marker_ros2 fairino_control_node`
-
-### Useful Checks
+Allow real robot motion explicitly:
 
 ```bash
-ros2 node list
-ros2 topic echo /detection_status
-ros2 topic echo /marker_pose
-ros2 topic echo /target_point_base
-ros2 topic echo /control_status
+ros2 launch paus_bringup online_stack.launch.py execute_motion:=true
 ```
 
-### Documentation
+### Manual startup order
+1. `ros2 run paus_marker_ros2 image_receiver_node`
+2. `python3 "$(ros2 pkg prefix paus_marker_ros2)/share/paus_marker_ros2/scripts/camera_bridge.py" --host 127.0.0.1 --port 5001 --camera-config-output /tmp/paus_robot/camera.yaml`
+3. `ros2 run paus_marker_ros2 marker_pose_node --ros-args -p camera_config_path:=/tmp/paus_robot/camera.yaml`
+4. `ros2 run paus_marker_ros2 target_transform_node`
+5. `ros2 run paus_motion_ros2 fairino_control_node`
 
-Mainline docs:
+### Main topics
+- `/camera/image_bridge`
+- `/detection_status`
+- `/marker_pose`
+- `/target_point_base`
+- `/control_status`
 
-- [workflow.md](/root/projects/ag-repro/docs/workflow.md)
-- [linux_execution.md](/root/projects/ag-repro/docs/linux_execution.md)
-- [current_status.md](/root/projects/ag-repro/docs/current_status.md)
+### Legacy
+Historical-only content lives under `legacy/` and is excluded from the mainline workflow.
 
-Legacy docs:
-
-- [legacy_windows_route.md](/root/projects/ag-repro/docs/legacy_windows_route.md)

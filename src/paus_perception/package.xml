@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>paus_perception</name>
+  <version>0.1.0</version>
+  <description>Pure Python perception core for PAUS Robot.</description>
+  <maintainer email="local@example.com">Local User</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>ament_index_python</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

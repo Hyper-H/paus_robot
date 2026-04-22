@@ -5,13 +5,12 @@ import json
 import sys
 from pathlib import Path
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = PROJECT_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
+MOTION_PACKAGE_ROOT = PROJECT_ROOT / "src" / "paus_motion_ros2"
+if (MOTION_PACKAGE_ROOT / "setup.py").exists() and str(MOTION_PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(MOTION_PACKAGE_ROOT))
 
-from ag_repro import FairinoLinuxClient
+from paus_motion_ros2 import FairinoLinuxClient
 
 
 def parse_args() -> argparse.Namespace:

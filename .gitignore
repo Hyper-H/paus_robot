@@ -10,19 +10,20 @@ __pycache__/
 .venv/
 venv/
 
-# ROS2 / build outputs
-ros2_ws/build/
-ros2_ws/install/
-ros2_ws/log/
+# ROS2 workspace outputs
+build/
+install/
+log/
 
-# Runtime logs
+# Runtime logs and outputs
+results/
 runtime_logs/
 runtime_logs_clean/
 *.log
 *.pid
 
-# Experiment outputs
-results/
+# Temporary experiment artifacts
+tmp_*/
 tmp_batch/
 tmp_ext_check/
 tmp_pose_smoke/
