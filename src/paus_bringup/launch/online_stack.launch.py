@@ -45,6 +45,8 @@ def _launch_setup(context, *args, **kwargs):
     camera_ip = LaunchConfiguration("camera_ip").perform(context).strip()
     camera_index = LaunchConfiguration("camera_index").perform(context).strip()
     execute_motion = LaunchConfiguration("execute_motion").perform(context).strip().lower()
+    # 外参默认和主配置放在同一目录，避免源码配置与 install 外参混用。
+    extrinsics_path = str(Path(config_path).resolve().with_name("extrinsics.yaml"))
 
     # 拼出 `camera_bridge.py` 的实际命令行。
     camera_bridge_cmd = [
@@ -159,5 +161,3 @@ def generate_launch_description() -> LaunchDescription:
             OpaqueFunction(function=_launch_setup),
         ]
     )
-    # 外参默认和主配置放在同一目录，避免源码配置与 install 外参混用。
-    extrinsics_path = str(Path(config_path).resolve().with_name("extrinsics.yaml"))
