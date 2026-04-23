@@ -113,6 +113,7 @@ calibration:
   board_rows: 6
   board_cols: 9
   square_size_m: 0.01
+  solver_method: "ax_xb_park"
   min_sample_count: 10
   output_path: "/home/chen_lab/paus_robot/src/paus_bringup/configs/extrinsics.yaml"
   tool_to_board:
@@ -126,6 +127,15 @@ calibration:
 ros2 launch paus_bringup eye_to_hand_calibration.launch.py
 ```
 
+当前 launch 已经默认**优先读取工作区 `src/paus_bringup/configs/default.yaml`**。  
+所以在日常联调里，你通常不需要再手动写：
+
+```bash
+config_path:=/root/projects/ag-repro/src/paus_bringup/configs/default.yaml
+```
+
+只有在你想显式切到另一份配置文件时，才需要传这个参数。
+
 只有在你想临时覆盖某个参数时，才需要在命令行额外传参数。
 
 常用可选参数：
@@ -137,6 +147,7 @@ ros2 launch paus_bringup eye_to_hand_calibration.launch.py \
   board_rows:=6 \
   board_cols:=9 \
   square_size_m:=0.01 \
+  solver_method:=ax_xb_park \
   min_sample_count:=10 \
   output_path:=/home/chen_lab/paus_robot/src/paus_bringup/configs/extrinsics.yaml
 ```
@@ -151,6 +162,29 @@ ros2 launch paus_bringup eye_to_hand_calibration.launch.py \
   tool_to_board_rx:=0.0 \
   tool_to_board_ry:=0.0 \
   tool_to_board_rz:=0.0
+```
+
+#### AX = XB 说明
+当前默认手眼求解器已经切换为标准 `AX = XB` 路径：
+
+- 采样阶段保存每一帧的：
+  - `base -> tool`
+  - `camera -> board`
+- 求解阶段基于多组相对运动构造：
+  - `A = (base->tool)_i @ inv((base->tool)_j)`
+  - `B = (camera->board)_i @ inv((camera->board)_j)`
+- 然后使用 `AX = XB` 的 Park 方法求 `X = base -> camera`
+
+这和旧版“每个样本直接反推 `base->camera` 然后平均”的方案不同。  
+新方法的优点是：
+- 更接近业界常用的 hand-eye calibration 形式
+- 对多姿态样本利用更充分
+- 在当前 eye-to-hand 场景下，`tool_to_board` 的固定偏移不会直接混进主求解公式里
+
+如果你想回退到旧方法做对照，也可以临时指定：
+
+```bash
+ros2 launch paus_bringup eye_to_hand_calibration.launch.py solver_method:=board_average
 ```
 
 标定链启动后，节点会自己通过 Linux SDK 读取当前 TCP，所以不再依赖 `/nonrt_state_data` 这类外部位姿 topic。

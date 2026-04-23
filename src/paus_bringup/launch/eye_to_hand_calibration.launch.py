@@ -22,6 +22,13 @@ from launch_ros.actions import Node
 RUNTIME_CAMERA_CONFIG = "/tmp/paus_robot/camera.yaml"
 
 
+# 优先返回工作区源码里的配置；如果当前环境只有 install 副本，再回退到 share 目录。
+def _resolve_default_config_path(bringup_share: Path) -> Path:
+    workspace_root = bringup_share.parents[3]
+    source_config = workspace_root / "src" / "paus_bringup" / "configs" / "default.yaml"
+    return source_config if source_config.exists() else bringup_share / "configs" / "default.yaml"
+
+
 # 真正组装标定链启动动作。
 def _launch_setup(context, *args, **kwargs):
     # 当前函数不使用额外参数，显式丢弃即可。
@@ -43,6 +50,7 @@ def _launch_setup(context, *args, **kwargs):
     board_rows = int(LaunchConfiguration("board_rows").perform(context))
     board_cols = int(LaunchConfiguration("board_cols").perform(context))
     square_size_m = float(LaunchConfiguration("square_size_m").perform(context))
+    solver_method = LaunchConfiguration("solver_method").perform(context).strip()
     min_sample_count = int(LaunchConfiguration("min_sample_count").perform(context))
     output_path = LaunchConfiguration("output_path").perform(context)
     tool_to_board_tx = float(LaunchConfiguration("tool_to_board_tx").perform(context))
@@ -102,6 +110,7 @@ def _launch_setup(context, *args, **kwargs):
                     "board_rows": board_rows,
                     "board_cols": board_cols,
                     "square_size_m": square_size_m,
+                    "solver_method": solver_method,
                     "min_sample_count": min_sample_count,
                     "output_path": output_path,
                     "tool_to_board.translation_m": [tool_to_board_tx, tool_to_board_ty, tool_to_board_tz],
@@ -116,8 +125,9 @@ def _launch_setup(context, *args, **kwargs):
 def generate_launch_description() -> LaunchDescription:
     # 找到 bringup 包安装目录，用于提供默认配置和外参输出路径。
     bringup_share = Path(get_package_share_directory("paus_bringup"))
-    default_config_path = str(bringup_share / "configs" / "default.yaml")
-    with (bringup_share / "configs" / "default.yaml").open("r", encoding="utf-8") as handle:
+    default_config_file = _resolve_default_config_path(bringup_share)
+    default_config_path = str(default_config_file)
+    with default_config_file.open("r", encoding="utf-8") as handle:
         config_payload = yaml.safe_load(handle) or {}
     calibration_cfg = config_payload.get("calibration", {})
     tool_to_board_cfg = calibration_cfg.get("tool_to_board", {})
@@ -125,6 +135,7 @@ def generate_launch_description() -> LaunchDescription:
     default_board_rows = str(calibration_cfg.get("board_rows", 6))
     default_board_cols = str(calibration_cfg.get("board_cols", 9))
     default_square_size_m = str(calibration_cfg.get("square_size_m", 0.01))
+    default_solver_method = str(calibration_cfg.get("solver_method", "ax_xb_park"))
     default_min_sample_count = str(calibration_cfg.get("min_sample_count", 10))
     default_tool_to_board_translation = tool_to_board_cfg.get("translation_m", [0.0, 0.0, 0.0])
     default_tool_to_board_rotation = tool_to_board_cfg.get("rotation_rpy_deg", [0.0, 0.0, 0.0])
@@ -165,6 +176,11 @@ def generate_launch_description() -> LaunchDescription:
                 "square_size_m",
                 default_value=default_square_size_m,
                 description="Chessboard square size in meters.",
+            ),
+            DeclareLaunchArgument(
+                "solver_method",
+                default_value=default_solver_method,
+                description="Hand-eye calibration solver method. ax_xb_park is the default standard method.",
             ),
             DeclareLaunchArgument(
                 "min_sample_count",

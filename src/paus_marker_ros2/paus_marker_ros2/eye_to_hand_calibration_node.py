@@ -10,7 +10,7 @@ from pathlib import Path
 # 导入 OpenCV 与 NumPy，用于棋盘格检测和矩阵运算。
 import cv2
 import numpy as np
-# 导入 ament 索引，用于定位默认配置目录。
+# 导入 ament 索引，用于定位默认配置目录。(ROS2 的“包注册表 + 查找器”)
 from ament_index_python.packages import get_package_share_directory
 # 导入 cv_bridge，用于 ROS Image 转 OpenCV 图像。
 from cv_bridge import CvBridge
@@ -35,14 +35,17 @@ from paus_perception import (
     make_transform_struct,
     rpy_deg_to_rotation_matrix,
     save_eye_to_hand_solution,
+    solve_ax_xb_hand_eye_park,
 )
 
 
 # 保存一次标定采样的结果。
 @dataclass
 class CalibrationSample:
-    # 当前样本估计出的 `base -> camera` 齐次矩阵。
-    base_to_camera_matrix: np.ndarray
+    # 当前样本对应的 `base -> tool` 齐次矩阵。
+    base_to_tool_matrix: np.ndarray
+    # 当前样本对应的 `camera -> board` 齐次矩阵。
+    camera_to_board_matrix: np.ndarray
 
 
 # 这个节点负责采集 eye-to-hand 标定样本，并求解 `base -> camera` 外参。
@@ -55,7 +58,7 @@ class EyeToHandCalibrationNode(Node):
         bringup_share = Path(get_package_share_directory("paus_bringup"))
         default_config_path = bringup_share / "configs" / "default.yaml"
 
-        # 声明节点参数。
+        # 声明节点参数。如果用户用 launch 文件覆盖参数，这些默认值就会被覆盖掉。
         self.declare_parameter("config_path", str(default_config_path))
         self.declare_parameter("camera_config_path", "/tmp/paus_robot/camera.yaml")
         self.declare_parameter("image_topic", "/camera/image_bridge")
@@ -63,6 +66,7 @@ class EyeToHandCalibrationNode(Node):
         self.declare_parameter("board_rows", 6)
         self.declare_parameter("board_cols", 9)
         self.declare_parameter("square_size_m", 0.01)
+        self.declare_parameter("solver_method", "ax_xb_park")
         self.declare_parameter("tool_to_board.translation_m", [0.0, 0.0, 0.0])
         self.declare_parameter("tool_to_board.rotation_rpy_deg", [0.0, 0.0, 0.0])
         self.declare_parameter("min_sample_count", 10)
@@ -74,7 +78,7 @@ class EyeToHandCalibrationNode(Node):
         control_cfg = self.config["control"]
         # 在拿到主配置后，再声明机器人相关参数，允许后续显式覆盖。
         self.declare_parameter("robot_ip", str(control_cfg["robot_ip"]))
-        self.declare_parameter("linux_fairino_sdk_root", str(control_cfg["linux_fairino_sdk_root"]))
+        self.declare_parameter("linux_fairino_sdk_root", str(control_cfg["linux_fairino_sdk_root"]))#在你这台 Linux/Ubuntu 机器上，FAIRINO 提供的 Python SDK 文件放在这个目录里。
 
         camera_config_path = self.get_parameter("camera_config_path").get_parameter_value().string_value
         self.image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
@@ -82,6 +86,7 @@ class EyeToHandCalibrationNode(Node):
         self.board_rows = int(self.get_parameter("board_rows").get_parameter_value().integer_value)
         self.board_cols = int(self.get_parameter("board_cols").get_parameter_value().integer_value)
         self.square_size_m = float(self.get_parameter("square_size_m").get_parameter_value().double_value)
+        self.solver_method = self.get_parameter("solver_method").get_parameter_value().string_value.strip().lower()
         self.tool_to_board_translation = [float(value) for value in self.get_parameter("tool_to_board.translation_m").get_parameter_value().double_array_value]
         self.tool_to_board_rotation_rpy = [float(value) for value in self.get_parameter("tool_to_board.rotation_rpy_deg").get_parameter_value().double_array_value]
         self.min_sample_count = int(self.get_parameter("min_sample_count").get_parameter_value().integer_value)
@@ -90,6 +95,7 @@ class EyeToHandCalibrationNode(Node):
         self.linux_fairino_sdk_root = self.get_parameter("linux_fairino_sdk_root").get_parameter_value().string_value
 
         # 标定节点必须有相机内参文件，否则没法 solvePnP。
+        ##runtimeerror表示运行时报错，即运行到这里时，状态不满足要求，所以不能继续
         if not camera_config_path:
             raise RuntimeError("camera_config_path is required for eye-to-hand calibration.")
         # 加载相机内参。
@@ -110,7 +116,7 @@ class EyeToHandCalibrationNode(Node):
         self.image_subscription = self.create_subscription(Image, self.image_topic, self._image_callback, 10)
         self.status_publisher = self.create_publisher(String, self.status_topic, 10)
 
-        # 创建“采样 / 求解 / 保存”三个服务接口。
+        # 创建“采样 / 求解 / 保存”三个服务接口。 service是按一下就执行一次的“请求-响应接口”是 node 提供的一次性请求-响应接口。
         self.capture_service = self.create_service(Trigger, "/eye_to_hand/capture_sample", self._capture_sample_callback)
         self.solve_service = self.create_service(Trigger, "/eye_to_hand/solve", self._solve_callback)
         self.save_service = self.create_service(Trigger, "/eye_to_hand/save", self._save_callback)
@@ -129,6 +135,7 @@ class EyeToHandCalibrationNode(Node):
             "message": message,
             "sample_count": len(self.samples),
             "min_sample_count": self.min_sample_count,
+            "solver_method": self.solver_method,
         }
         if extra:
             payload.update(extra)
@@ -139,9 +146,9 @@ class EyeToHandCalibrationNode(Node):
 
     # 构造棋盘格的三维角点模板。
     def _build_board_object_points(self) -> np.ndarray:
-        object_points = np.zeros((self.board_rows * self.board_cols, 3), np.float32)
-        object_points[:, :2] = np.mgrid[0:self.board_cols, 0:self.board_rows].T.reshape(-1, 2)
-        object_points *= self.square_size_m
+        object_points = np.zeros((self.board_rows * self.board_cols, 3), np.float32) #为每个角点创建一个三维坐标，初始值为 (0, 0, 0)，后续会根据行列数和方格大小更新 x 和 y 坐标。这里的 z 坐标保持为 0，因为我们假设棋盘格是平放在一个平面上的。
+        object_points[:, :2] = np.mgrid[0:self.board_cols, 0:self.board_rows].T.reshape(-1, 2)#这一句是在给每个点填上 (x, y)。
+        object_points *= self.square_size_m #转化为真实世界角点位置坐标，单位是米。比如如果 square_size_m 是 0.01，那么相邻角点之间的距离就是 1 厘米。
         return object_points
 
     # 从最新图像中估计 `camera -> board` 变换。
@@ -155,13 +162,13 @@ class EyeToHandCalibrationNode(Node):
         if not found:
             raise RuntimeError("Chessboard was not detected in the latest image.")
 
-        # 对角点做亚像素优化。
+        # 对角点做亚像素优化。可以让位姿估计更精确，但需要更多计算时间。对于标定这种对精度要求较高的场景，通常是值得的。
         refined = cv2.cornerSubPix(
             gray,
             corners,
-            (11, 11),
-            (-1, -1),
-            (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001),
+            (11, 11),#这里表示大约在一个 11 x 11 的局部区域内看灰度变化。这里表示大约在一个 11 x 11 的局部区域内看灰度变化。
+            (-1, -1),#不额外挖掉窗口中心的某一块，正常用整个窗口做优化
+            (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001),#迭代终止条件：最多迭代 30 次，或者当角点位置的变化小于 0.001 像素时停止。这个条件可以防止优化过程过长，同时确保优化结果足够精确。
         )
         # 准备 solvePnP 所需的三维点、相机内参和畸变参数。
         object_points = self._build_board_object_points()
@@ -190,18 +197,29 @@ class EyeToHandCalibrationNode(Node):
         rotation_matrix = rpy_deg_to_rotation_matrix(self.tool_to_board_rotation_rpy)
         return make_transform_matrix(self.tool_to_board_translation, rotation_matrix)
 
+    # 使用旧版“直接平均 base->camera”的方式求解。
+    def _solve_board_average(self) -> np.ndarray:
+        tool_to_board = self._tool_to_board_matrix()
+        matrices = [
+            sample.base_to_tool_matrix @ tool_to_board @ invert_transform_matrix(sample.camera_to_board_matrix)
+            for sample in self.samples
+        ]
+        return average_transform_matrices(matrices)
+
     # 采集一次样本。
     def _capture_sample_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         del request
         try:
-            # 读取当前 `base -> tool`、估计 `camera -> board`，并准备固定的 `tool -> board`。
+            # 读取当前 `base -> tool` 并估计当前 `camera -> board`。
             base_to_tool = self._current_base_to_tool()
             camera_to_board = self._estimate_camera_to_board()
-            tool_to_board = self._tool_to_board_matrix()
-            # 按链路公式反推 `base -> camera`。
-            base_to_camera = base_to_tool @ tool_to_board @ invert_transform_matrix(camera_to_board)
-            # 保存当前样本。
-            self.samples.append(CalibrationSample(base_to_camera_matrix=base_to_camera))
+            # 保存当前样本的绝对位姿，供后续 AX=XB 或旧方法统一求解。
+            self.samples.append(
+                CalibrationSample(
+                    base_to_tool_matrix=base_to_tool,
+                    camera_to_board_matrix=camera_to_board,
+                )
+            )
             response.success = True
             response.message = f"Captured sample #{len(self.samples)}."
             self._publish_status(
@@ -228,11 +246,21 @@ class EyeToHandCalibrationNode(Node):
             self._publish_status("solve_failed", response.message)
             return response
         try:
-            # 对所有样本矩阵做平均，得到稳定的 `base -> camera`。
-            matrices = [sample.base_to_camera_matrix for sample in self.samples]
-            averaged = average_transform_matrices(matrices)
-            translation = averaged[:3, 3]
-            rotation = averaged[:3, :3]
+            # 根据配置选择具体的求解方法。
+            if self.solver_method == "board_average":
+                solved_matrix = self._solve_board_average()
+                solve_method = "eye_to_hand_board_average"
+            elif self.solver_method == "ax_xb_park":
+                solved_matrix = solve_ax_xb_hand_eye_park(
+                    [sample.base_to_tool_matrix for sample in self.samples],
+                    [sample.camera_to_board_matrix for sample in self.samples],
+                )
+                solve_method = "ax_xb_park"
+            else:
+                raise RuntimeError(f"Unsupported solver_method: {self.solver_method}")
+
+            translation = solved_matrix[:3, 3]
+            rotation = solved_matrix[:3, :3]
             transform = make_transform_struct(translation, rotation, "robot_base", "camera")
             # 保存当前求解结果。
             self.current_solution = EyeToHandCalibrationSolution(
@@ -243,10 +271,18 @@ class EyeToHandCalibrationNode(Node):
                 base_to_camera=transform,
                 tool_to_board_translation_m=list(self.tool_to_board_translation),
                 tool_to_board_rotation_rpy_deg=list(self.tool_to_board_rotation_rpy),
+                method=solve_method,
             )
             response.success = True
             response.message = self.current_solution.message
-            self._publish_status("solved", response.message)
+            self._publish_status(
+                "solved",
+                response.message,
+                {
+                    "method": solve_method,
+                    "base_to_camera_translation_m": transform.translation_m,
+                },
+            )
         except Exception as exc:
             response.success = False
             response.message = repr(exc)

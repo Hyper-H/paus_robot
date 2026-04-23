@@ -62,6 +62,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "board_cols": 9,
         # 棋盘格单格边长，单位米。
         "square_size_m": 0.01,
+        # 手眼标定求解器，默认使用标准 AX=XB Park 方法。
+        "solver_method": "ax_xb_park",
         # 求解前最少需要的样本数。
         "min_sample_count": 10,
         # 标定结果默认保存路径。

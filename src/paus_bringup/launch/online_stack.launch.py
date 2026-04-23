@@ -19,6 +19,13 @@ from launch_ros.actions import Node
 RUNTIME_CAMERA_CONFIG = "/tmp/paus_robot/camera.yaml"
 
 
+# 优先返回工作区源码里的配置；如果当前环境只有 install 副本，再回退到 share 目录。
+def _resolve_default_config_path(bringup_share: Path) -> Path:
+    workspace_root = bringup_share.parents[3]
+    source_config = workspace_root / "src" / "paus_bringup" / "configs" / "default.yaml"
+    return source_config if source_config.exists() else bringup_share / "configs" / "default.yaml"
+
+
 # 这个函数会在 launch 参数都解析完成之后执行，
 # 负责真正拼装出需要启动的外部进程和 ROS2 节点。
 def _launch_setup(context, *args, **kwargs):
@@ -95,7 +102,7 @@ def _launch_setup(context, *args, **kwargs):
             parameters=[
                 {
                     "config_path": config_path,
-                    "extrinsics_path": str(bringup_share / "configs" / "extrinsics.yaml"),
+                    "extrinsics_path": extrinsics_path,
                 }
             ],
         ),
@@ -119,7 +126,7 @@ def _launch_setup(context, *args, **kwargs):
 def generate_launch_description() -> LaunchDescription:
     # 找到 bringup 包安装目录中的默认配置文件。
     bringup_share = Path(get_package_share_directory("paus_bringup"))
-    default_config_path = str(bringup_share / "configs" / "default.yaml")
+    default_config_path = str(_resolve_default_config_path(bringup_share))
 
     # 声明 launch 可用参数，并把 `_launch_setup` 挂进去。
     return LaunchDescription(
@@ -152,3 +159,5 @@ def generate_launch_description() -> LaunchDescription:
             OpaqueFunction(function=_launch_setup),
         ]
     )
+    # 外参默认和主配置放在同一目录，避免源码配置与 install 外参混用。
+    extrinsics_path = str(Path(config_path).resolve().with_name("extrinsics.yaml"))

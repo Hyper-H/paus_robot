@@ -197,6 +197,70 @@ def average_transform_matrices(transform_matrices: list[np.ndarray]) -> np.ndarr
     return make_transform_matrix(mean_translation, mean_rotation)
 
 
+# 根据绝对位姿样本构造 AX=XB 的相对运动对。
+def build_ax_xb_motion_pairs(lhs_absolute_matrices: list[np.ndarray], rhs_absolute_matrices: list[np.ndarray]) -> list[tuple[np.ndarray, np.ndarray]]:
+    if len(lhs_absolute_matrices) != len(rhs_absolute_matrices):
+        raise ValueError("Left and right motion sample counts do not match.")
+    if len(lhs_absolute_matrices) < 2:
+        raise ValueError("At least two absolute pose samples are required to build AX=XB motion pairs.")
+
+    motion_pairs: list[tuple[np.ndarray, np.ndarray]] = []
+    for i in range(len(lhs_absolute_matrices) - 1):
+        for j in range(i + 1, len(lhs_absolute_matrices)):
+            lhs_relative = np.asarray(lhs_absolute_matrices[i], dtype=np.float64) @ invert_transform_matrix(lhs_absolute_matrices[j])
+            rhs_relative = np.asarray(rhs_absolute_matrices[i], dtype=np.float64) @ invert_transform_matrix(rhs_absolute_matrices[j])
+            motion_pairs.append((lhs_relative, rhs_relative))
+    return motion_pairs
+
+
+# 使用 Park-Martin 的 AX=XB 方法求解 hand-eye 外参。
+def solve_ax_xb_hand_eye_park(lhs_absolute_matrices: list[np.ndarray], rhs_absolute_matrices: list[np.ndarray]) -> np.ndarray:
+    motion_pairs = build_ax_xb_motion_pairs(lhs_absolute_matrices, rhs_absolute_matrices)
+
+    rotation_constraints: list[tuple[np.ndarray, np.ndarray]] = []
+    for lhs_relative, rhs_relative in motion_pairs:
+        lhs_rotation = np.asarray(lhs_relative[:3, :3], dtype=np.float64)
+        rhs_rotation = np.asarray(rhs_relative[:3, :3], dtype=np.float64)
+        lhs_rvec, _ = cv2.Rodrigues(lhs_rotation)
+        rhs_rvec, _ = cv2.Rodrigues(rhs_rotation)
+        lhs_axis = lhs_rvec.reshape(3)
+        rhs_axis = rhs_rvec.reshape(3)
+        if np.linalg.norm(lhs_axis) <= 1e-9 or np.linalg.norm(rhs_axis) <= 1e-9:
+            continue
+        rotation_constraints.append((lhs_axis, rhs_axis))
+
+    if len(rotation_constraints) < 2:
+        raise ValueError("Not enough informative relative motions to solve AX=XB rotation.")
+
+    correlation = np.zeros((3, 3), dtype=np.float64)
+    for lhs_axis, rhs_axis in rotation_constraints:
+        correlation += np.outer(lhs_axis, rhs_axis)
+
+    u, _, vh = np.linalg.svd(correlation)
+    rotation = u @ vh
+    if np.linalg.det(rotation) < 0.0:
+        u[:, -1] *= -1.0
+        rotation = u @ vh
+
+    lhs_translation_blocks = []
+    rhs_translation_blocks = []
+    identity = np.eye(3, dtype=np.float64)
+    for lhs_relative, rhs_relative in motion_pairs:
+        lhs_rotation = np.asarray(lhs_relative[:3, :3], dtype=np.float64)
+        lhs_translation = np.asarray(lhs_relative[:3, 3], dtype=np.float64)
+        rhs_translation = np.asarray(rhs_relative[:3, 3], dtype=np.float64)
+        lhs_translation_blocks.append(lhs_rotation - identity)
+        rhs_translation_blocks.append(rotation @ rhs_translation - lhs_translation)
+
+    lhs_stacked = np.concatenate(lhs_translation_blocks, axis=0)
+    rhs_stacked = np.concatenate(rhs_translation_blocks, axis=0)
+    translation, _, rank, _ = np.linalg.lstsq(lhs_stacked, rhs_stacked, rcond=None)
+    if rank < 3:
+        raise ValueError("AX=XB translation solve is rank deficient.")
+
+    return make_transform_matrix(translation, rotation)
+
+
 # 保存 eye-to-hand 标定结果到 YAML。
 def save_eye_to_hand_solution(solution: EyeToHandCalibrationSolution, output_path: str | Path) -> None:
     output_path = Path(output_path)
