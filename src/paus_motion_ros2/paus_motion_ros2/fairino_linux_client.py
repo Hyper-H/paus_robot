@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from collections.abc import Sequence
 
 
 # 这个类负责把官方 Linux FAIRINO Python SDK 包装成更稳定的项目内部接口。
@@ -67,8 +68,29 @@ class FairinoLinuxClient:
     # 读取当前 TCP 位姿，位置单位为 mm，姿态单位为 deg。
     def get_actual_tcp_pose(self) -> tuple[int, list[float]]:
         self.ensure_connection()
-        error, values = self.robot.GetActualTCPPose()
-        return int(error), [float(value) for value in values]
+        try:
+            result = self.robot.GetActualTCPPose()
+        except TypeError as exc:
+            # Some SDK versions read a UDP state struct that may still be the
+            # ctypes class, not an instance. Fall back to the blocking XML-RPC
+            # call used in FAIRINO's own commented implementation.
+            if "_ctypes.CField" not in str(exc) or not hasattr(self.robot, "robot"):
+                raise
+            result = self.robot.robot.GetActualTCPPose(0)
+        return self._normalize_pose_result(result, "GetActualTCPPose")
+
+    def _normalize_pose_result(self, result: object, method_name: str) -> tuple[int, list[float]]:
+        if not isinstance(result, Sequence):
+            raise RuntimeError(f"{method_name} returned non-sequence result: {result!r}")
+        if len(result) == 2 and isinstance(result[1], Sequence):
+            error = int(result[0])
+            values = result[1]
+        elif len(result) >= 7:
+            error = int(result[0])
+            values = result[1:7]
+        else:
+            raise RuntimeError(f"{method_name} returned unexpected result: {result!r}")
+        return error, [float(value) for value in values]
 
     # 执行关节空间运动。
     def move_j(self, joint_pos: list[float], tool_id: int, user_id: int, vel: float) -> int:
