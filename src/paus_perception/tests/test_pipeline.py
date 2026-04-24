@@ -44,6 +44,7 @@ from paus_perception import (
     rpy_deg_to_rotation_matrix,
     save_camera_calibration,
     save_eye_to_hand_solution,
+    solve_eye_to_hand_opencv_handeye,
     split_transform_matrix,
     solve_ax_xb_hand_eye_park,
     write_summary_csv,
@@ -305,6 +306,28 @@ class MarkerPipelineTests(unittest.TestCase):
         self.assertGreaterEqual(len(motion_pairs), 6)
 
         solved = solve_ax_xb_hand_eye_park(base_to_tool_samples, camera_to_board_samples)
+        translation, rotation = split_transform_matrix(solved)
+        expected_translation, expected_rotation = split_transform_matrix(base_to_camera)
+
+        self.assertTrue(np.allclose(translation, expected_translation, atol=1e-6))
+        self.assertTrue(np.allclose(rotation, expected_rotation, atol=1e-6))
+
+    def test_opencv_eye_to_hand_solver_recovers_base_to_camera(self) -> None:
+        base_to_camera = make_transform_matrix([0.24, -0.18, 0.42], rpy_deg_to_rotation_matrix([175.0, -5.0, 92.0]))
+        tool_to_board = make_transform_matrix([0.02, 0.01, 0.12], rpy_deg_to_rotation_matrix([0.0, 0.0, 0.0]))
+
+        base_to_tool_samples = [
+            make_transform_matrix([0.35, -0.10, 0.20], rpy_deg_to_rotation_matrix([-150.0, 10.0, -90.0])),
+            make_transform_matrix([0.30, -0.05, 0.25], rpy_deg_to_rotation_matrix([-145.0, 15.0, -80.0])),
+            make_transform_matrix([0.40, -0.15, 0.22], rpy_deg_to_rotation_matrix([-160.0, 5.0, -100.0])),
+            make_transform_matrix([0.32, -0.20, 0.28], rpy_deg_to_rotation_matrix([-155.0, -2.0, -95.0])),
+        ]
+        target_to_camera_samples = [
+            invert_transform_matrix(base_to_camera) @ base_to_tool @ tool_to_board
+            for base_to_tool in base_to_tool_samples
+        ]
+
+        solved = solve_eye_to_hand_opencv_handeye(base_to_tool_samples, target_to_camera_samples)
         translation, rotation = split_transform_matrix(solved)
         expected_translation, expected_rotation = split_transform_matrix(base_to_camera)
 

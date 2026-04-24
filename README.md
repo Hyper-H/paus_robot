@@ -113,7 +113,7 @@ calibration:
   board_rows: 6
   board_cols: 9
   square_size_m: 0.01
-  solver_method: "ax_xb_park"
+  solver_method: "opencv_handeye_park"
   min_sample_count: 10
   output_path: "/home/chen_lab/paus_robot/src/paus_bringup/configs/extrinsics.yaml"
   tool_to_board:
@@ -147,7 +147,7 @@ ros2 launch paus_bringup eye_to_hand_calibration.launch.py \
   board_rows:=6 \
   board_cols:=9 \
   square_size_m:=0.01 \
-  solver_method:=ax_xb_park \
+  solver_method:=opencv_handeye_park \
   min_sample_count:=10 \
   output_path:=/home/chen_lab/paus_robot/src/paus_bringup/configs/extrinsics.yaml
 ```
@@ -165,21 +165,23 @@ ros2 launch paus_bringup eye_to_hand_calibration.launch.py \
 ```
 
 #### AX = XB 说明
-当前默认手眼求解器已经切换为标准 `AX = XB` 路径：
+当前默认手眼求解器已经切换为 OpenCV 官方 `calibrateHandEye` 的 eye-to-hand 用法：
 
 - 采样阶段保存每一帧的：
   - `base -> tool`
-  - `camera -> board`
-- 求解阶段基于多组相对运动构造：
-  - `A = (base->tool)_i @ inv((base->tool)_j)`
-  - `B = (camera->board)_i @ inv((camera->board)_j)`
-- 然后使用 `AX = XB` 的 Park 方法求 `X = base -> camera`
+  - `target -> camera`
+- 求解阶段会把 `base -> tool` 先取逆，变成 OpenCV 所要求的：
+  - `gripper -> base`
+- 然后调用：
+  - `cv2.calibrateHandEye(..., method=cv2.CALIB_HAND_EYE_PARK)`
+- 在 eye-to-hand 模式下，把返回结果解释为：
+  - `base -> camera`
 
 这和旧版“每个样本直接反推 `base->camera` 然后平均”的方案不同。  
 新方法的优点是：
 - 更接近业界常用的 hand-eye calibration 形式
 - 对多姿态样本利用更充分
-- 在当前 eye-to-hand 场景下，`tool_to_board` 的固定偏移不会直接混进主求解公式里
+- 严格按照 OpenCV 文档支持的 eye-to-hand 输入语义求解
 
 如果你想回退到旧方法做对照，也可以临时指定：
 

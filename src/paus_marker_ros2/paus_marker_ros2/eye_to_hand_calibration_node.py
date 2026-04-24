@@ -35,6 +35,7 @@ from paus_perception import (
     make_transform_struct,
     rpy_deg_to_rotation_matrix,
     save_eye_to_hand_solution,
+    solve_eye_to_hand_opencv_handeye,
     solve_ax_xb_hand_eye_park,
 )
 
@@ -66,7 +67,7 @@ class EyeToHandCalibrationNode(Node):
         self.declare_parameter("board_rows", 6)
         self.declare_parameter("board_cols", 9)
         self.declare_parameter("square_size_m", 0.01)
-        self.declare_parameter("solver_method", "ax_xb_park")
+        self.declare_parameter("solver_method", "opencv_handeye_park")
         self.declare_parameter("tool_to_board.translation_m", [0.0, 0.0, 0.0])
         self.declare_parameter("tool_to_board.rotation_rpy_deg", [0.0, 0.0, 0.0])
         self.declare_parameter("min_sample_count", 10)
@@ -250,6 +251,13 @@ class EyeToHandCalibrationNode(Node):
             if self.solver_method == "board_average":
                 solved_matrix = self._solve_board_average()
                 solve_method = "eye_to_hand_board_average"
+            elif self.solver_method == "opencv_handeye_park":
+                solved_matrix = solve_eye_to_hand_opencv_handeye(
+                    [sample.base_to_tool_matrix for sample in self.samples],
+                    [sample.camera_to_board_matrix for sample in self.samples],
+                    method=cv2.CALIB_HAND_EYE_PARK,
+                )
+                solve_method = "opencv_handeye_park"
             elif self.solver_method == "ax_xb_park":
                 solved_matrix = solve_ax_xb_hand_eye_park(
                     [sample.base_to_tool_matrix for sample in self.samples],

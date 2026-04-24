@@ -197,6 +197,47 @@ def average_transform_matrices(transform_matrices: list[np.ndarray]) -> np.ndarr
     return make_transform_matrix(mean_translation, mean_rotation)
 
 
+# 使用 OpenCV 官方 hand-eye 接口求解 eye-to-hand 外参。
+# 输入：
+# - `base_to_tool_matrices`：每次采样的 ^bT_g
+# - `target_to_camera_matrices`：每次采样的 ^cT_t（PnP 结果）
+# 输出：
+# - eye-to-hand 场景下的 ^bT_c
+def solve_eye_to_hand_opencv_handeye(
+    base_to_tool_matrices: list[np.ndarray],
+    target_to_camera_matrices: list[np.ndarray],
+    method: int = cv2.CALIB_HAND_EYE_PARK,
+) -> np.ndarray:
+    if len(base_to_tool_matrices) != len(target_to_camera_matrices):
+        raise ValueError("Robot and target pose sample counts do not match.")
+    if len(base_to_tool_matrices) < 3:
+        raise ValueError("At least three samples are required for OpenCV hand-eye calibration.")
+
+    rotation_gripper_to_base = []
+    translation_gripper_to_base = []
+    rotation_target_to_camera = []
+    translation_target_to_camera = []
+
+    for base_to_tool, target_to_camera in zip(base_to_tool_matrices, target_to_camera_matrices):
+        gripper_to_base = invert_transform_matrix(base_to_tool)
+        rotation_gripper_to_base.append(np.asarray(gripper_to_base[:3, :3], dtype=np.float64))
+        translation_gripper_to_base.append(np.asarray(gripper_to_base[:3, 3], dtype=np.float64).reshape(3, 1))
+        rotation_target_to_camera.append(np.asarray(target_to_camera[:3, :3], dtype=np.float64))
+        translation_target_to_camera.append(np.asarray(target_to_camera[:3, 3], dtype=np.float64).reshape(3, 1))
+
+    rotation_base_to_camera, translation_base_to_camera = cv2.calibrateHandEye(
+        rotation_gripper_to_base,
+        translation_gripper_to_base,
+        rotation_target_to_camera,
+        translation_target_to_camera,
+        method=method,
+    )
+    return make_transform_matrix(
+        np.asarray(translation_base_to_camera, dtype=np.float64).reshape(3),
+        np.asarray(rotation_base_to_camera, dtype=np.float64).reshape(3, 3),
+    )
+
+
 # 根据绝对位姿样本构造 AX=XB 的相对运动对。
 def build_ax_xb_motion_pairs(lhs_absolute_matrices: list[np.ndarray], rhs_absolute_matrices: list[np.ndarray]) -> list[tuple[np.ndarray, np.ndarray]]:
     if len(lhs_absolute_matrices) != len(rhs_absolute_matrices):

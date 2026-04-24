@@ -180,7 +180,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "solver_method",
                 default_value=default_solver_method,
-                description="Hand-eye calibration solver method. ax_xb_park is the default standard method.",
+                description="Hand-eye calibration solver method. opencv_handeye_park is the default eye-to-hand method.",
             ),
             DeclareLaunchArgument(
                 "min_sample_count",

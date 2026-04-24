@@ -46,6 +46,7 @@ from .transforms import (
     rotation_matrix_to_quaternion_xyzw,
     rpy_deg_to_rotation_matrix,
     save_eye_to_hand_solution,
+    solve_eye_to_hand_opencv_handeye,
     solve_ax_xb_hand_eye_park,
     split_transform_matrix,
 )
@@ -95,6 +96,7 @@ __all__ = [
     "save_eye_to_hand_solution",
     "save_result_json",
     "save_runtime_calibration_to_yaml",
+    "solve_eye_to_hand_opencv_handeye",
     "solve_ax_xb_hand_eye_park",
     "split_transform_matrix",
     "write_summary_csv",
