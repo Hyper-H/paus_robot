@@ -34,10 +34,12 @@ from .sdk_camera import (
 )
 from .pose import ApproachPlan, MarkerPose, build_approach_plan, estimate_marker_pose
 from .transforms import (
+    CalibrationResidualSummary,
     EyeToHandCalibrationSolution,
     Transform3D,
     average_transform_matrices,
     build_ax_xb_motion_pairs,
+    evaluate_eye_to_hand_residuals,
     invert_transform_matrix,
     load_eye_to_hand_solution,
     make_transform_matrix,
@@ -54,6 +56,7 @@ from .transforms import (
 __all__ = [
     "ApproachPlan",
     "CalibrationResult",
+    "CalibrationResidualSummary",
     "CameraCalibration",
     "EyeToHandCalibrationSolution",
     "MarkerDetection",
@@ -72,6 +75,7 @@ __all__ = [
     "discover_cameras",
     "encode_bgr_frame_to_jpeg",
     "estimate_marker_pose",
+    "evaluate_eye_to_hand_residuals",
     "export_factory_calibration_to_yaml",
     "export_debug_images",
     "load_camera_calibration",

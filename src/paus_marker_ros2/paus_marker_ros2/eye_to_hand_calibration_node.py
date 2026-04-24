@@ -3,9 +3,11 @@ from __future__ import annotations
 # 导入 json，用于发布结构化状态。
 import json
 # 导入 dataclass，便于保存单次标定样本。
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 # 导入 Path，便于处理输出路径。
 from pathlib import Path
+import threading
+import time
 
 # 导入 OpenCV 与 NumPy，用于棋盘格检测和矩阵运算。
 import cv2
@@ -16,7 +18,9 @@ from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 # 导入 ROS2 Python API。
 import rclpy
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 # 导入消息与服务类型。
 from sensor_msgs.msg import Image
@@ -28,6 +32,7 @@ from paus_motion_ros2 import FairinoLinuxClient
 from paus_perception import (
     EyeToHandCalibrationSolution,
     average_transform_matrices,
+    evaluate_eye_to_hand_residuals,
     invert_transform_matrix,
     load_camera_calibration,
     load_config,
@@ -47,6 +52,25 @@ class CalibrationSample:
     base_to_tool_matrix: np.ndarray
     # 当前样本对应的 `camera -> board` 齐次矩阵。
     camera_to_board_matrix: np.ndarray
+    # 图像消息 header 时间，单位秒；如果上游未填 header，则为 None。
+    image_header_time_s: float | None
+    # 本节点收到图像的单调时钟时间，单位秒。
+    image_received_time_s: float
+    # TCP 读取开始和结束的单调时钟时间，单位秒。
+    tcp_read_start_time_s: float
+    tcp_read_end_time_s: float
+    # SDK 返回的原始 TCP 位姿，单位 mm / deg。
+    tcp_pose_mmdeg: list[float]
+    # 本节点内部图像序号，用来确认服务调用后确实等到了新帧。
+    image_sequence: int
+
+
+@dataclass
+class CapturedImage:
+    image_bgr: np.ndarray
+    header_time_s: float | None
+    received_time_s: float
+    sequence: int
 
 
 # 这个节点负责采集 eye-to-hand 标定样本，并求解 `base -> camera` 外参。
@@ -68,6 +92,8 @@ class EyeToHandCalibrationNode(Node):
         self.declare_parameter("board_cols", 9)
         self.declare_parameter("square_size_m", 0.01)
         self.declare_parameter("solver_method", "opencv_handeye_park")
+        self.declare_parameter("fresh_image_timeout_s", 2.0)
+        self.declare_parameter("sample_log_path", "/tmp/paus_robot/eye_to_hand_samples.jsonl")
         self.declare_parameter("tool_to_board.translation_m", [0.0, 0.0, 0.0])
         self.declare_parameter("tool_to_board.rotation_rpy_deg", [0.0, 0.0, 0.0])
         self.declare_parameter("min_sample_count", 10)
@@ -88,6 +114,8 @@ class EyeToHandCalibrationNode(Node):
         self.board_cols = int(self.get_parameter("board_cols").get_parameter_value().integer_value)
         self.square_size_m = float(self.get_parameter("square_size_m").get_parameter_value().double_value)
         self.solver_method = self.get_parameter("solver_method").get_parameter_value().string_value.strip().lower()
+        self.fresh_image_timeout_s = float(self.get_parameter("fresh_image_timeout_s").get_parameter_value().double_value)
+        self.sample_log_path = Path(self.get_parameter("sample_log_path").get_parameter_value().string_value)
         self.tool_to_board_translation = [float(value) for value in self.get_parameter("tool_to_board.translation_m").get_parameter_value().double_array_value]
         self.tool_to_board_rotation_rpy = [float(value) for value in self.get_parameter("tool_to_board.rotation_rpy_deg").get_parameter_value().double_array_value]
         self.min_sample_count = int(self.get_parameter("min_sample_count").get_parameter_value().integer_value)
@@ -104,30 +132,45 @@ class EyeToHandCalibrationNode(Node):
 
         # 创建图像桥接器。
         self.bridge = CvBridge()
-        # 缓存最新图像。
-        self.latest_image_bgr: np.ndarray | None = None
+        # 缓存最新图像及其时间信息，供采样服务等待“调用后的新帧”。
+        self._image_condition = threading.Condition()
+        self.latest_image: CapturedImage | None = None
+        self.image_sequence = 0
         # 保存已采集样本和当前求解结果。
         self.samples: list[CalibrationSample] = []
         self.current_solution: EyeToHandCalibrationSolution | None = None
+        self.callback_group = ReentrantCallbackGroup()
         # 建立 Linux SDK 客户端，用于直接读取当前 TCP。
         self.linux_client = FairinoLinuxClient(self.linux_fairino_sdk_root, self.robot_ip)
         self.linux_client.connect()
 
         # 创建图像订阅器与状态发布器。
-        self.image_subscription = self.create_subscription(Image, self.image_topic, self._image_callback, 10)
+        self.image_subscription = self.create_subscription(Image, self.image_topic, self._image_callback, 10, callback_group=self.callback_group)
         self.status_publisher = self.create_publisher(String, self.status_topic, 10)
 
         # 创建“采样 / 求解 / 保存”三个服务接口。 service是按一下就执行一次的“请求-响应接口”是 node 提供的一次性请求-响应接口。
-        self.capture_service = self.create_service(Trigger, "/eye_to_hand/capture_sample", self._capture_sample_callback)
-        self.solve_service = self.create_service(Trigger, "/eye_to_hand/solve", self._solve_callback)
-        self.save_service = self.create_service(Trigger, "/eye_to_hand/save", self._save_callback)
+        self.capture_service = self.create_service(Trigger, "/eye_to_hand/capture_sample", self._capture_sample_callback, callback_group=self.callback_group)
+        self.solve_service = self.create_service(Trigger, "/eye_to_hand/solve", self._solve_callback, callback_group=self.callback_group)
+        self.save_service = self.create_service(Trigger, "/eye_to_hand/save", self._save_callback, callback_group=self.callback_group)
 
         # 节点启动后发布初始状态。
         self._publish_status("ready", "Eye-to-hand calibration node started.")
 
     # 接收最新图像。
     def _image_callback(self, message: Image) -> None:
-        self.latest_image_bgr = self.bridge.imgmsg_to_cv2(message, desired_encoding="bgr8")
+        image_bgr = self.bridge.imgmsg_to_cv2(message, desired_encoding="bgr8")
+        header_time_s = None
+        if message.header.stamp.sec != 0 or message.header.stamp.nanosec != 0:
+            header_time_s = float(message.header.stamp.sec) + float(message.header.stamp.nanosec) * 1e-9
+        with self._image_condition:
+            self.image_sequence += 1
+            self.latest_image = CapturedImage(
+                image_bgr=image_bgr,
+                header_time_s=header_time_s,
+                received_time_s=time.monotonic_ns() * 1e-9,
+                sequence=self.image_sequence,
+            )
+            self._image_condition.notify_all()
 
     # 发布标定状态。
     def _publish_status(self, status: str, message: str, extra: dict[str, object] | None = None) -> None:
@@ -152,13 +195,27 @@ class EyeToHandCalibrationNode(Node):
         object_points *= self.square_size_m #转化为真实世界角点位置坐标，单位是米。比如如果 square_size_m 是 0.01，那么相邻角点之间的距离就是 1 厘米。
         return object_points
 
-    # 从最新图像中估计 `camera -> board` 变换。
-    def _estimate_camera_to_board(self) -> np.ndarray:
-        if self.latest_image_bgr is None:
-            raise RuntimeError("No image has been received yet.")
+    # 等待服务调用之后到达的一帧新图像，避免把旧缓存图像和当前 TCP 拼成样本。
+    def _wait_for_fresh_image(self, previous_sequence: int) -> CapturedImage:
+        deadline = time.monotonic() + self.fresh_image_timeout_s
+        with self._image_condition:
+            while self.latest_image is None or self.latest_image.sequence <= previous_sequence:
+                remaining_s = deadline - time.monotonic()
+                if remaining_s <= 0.0:
+                    raise RuntimeError(f"No fresh image arrived within {self.fresh_image_timeout_s:.3f}s.")
+                self._image_condition.wait(timeout=remaining_s)
+            latest = self.latest_image
+        return CapturedImage(
+            image_bgr=latest.image_bgr.copy(),
+            header_time_s=latest.header_time_s,
+            received_time_s=latest.received_time_s,
+            sequence=latest.sequence,
+        )
 
+    # 从指定图像中估计 `camera -> board` 变换。
+    def _estimate_camera_to_board(self, image_bgr: np.ndarray) -> np.ndarray:
         # 先转成灰度图，再做棋盘格检测。
-        gray = cv2.cvtColor(self.latest_image_bgr, cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
         found, corners = cv2.findChessboardCorners(gray, (self.board_cols, self.board_rows))
         if not found:
             raise RuntimeError("Chessboard was not detected in the latest image.")
@@ -184,19 +241,45 @@ class EyeToHandCalibrationNode(Node):
         return make_transform_matrix(tvec.reshape(3), rotation_matrix)
 
     # 通过 Linux SDK 直接读取 `base -> tool(TCP)` 位姿。
-    def _current_base_to_tool(self) -> np.ndarray:
+    def _read_current_base_to_tool(self) -> tuple[np.ndarray, list[float], float, float]:
+        read_start_time_s = time.monotonic_ns() * 1e-9
         error, tcp_pose_mmdeg = self.linux_client.get_actual_tcp_pose()
+        read_end_time_s = time.monotonic_ns() * 1e-9
         if error != 0:
             raise RuntimeError(f"GetActualTCPPose failed with code {error}.")
         # SDK 返回单位是 mm / deg，而手眼矩阵这里统一按 m 计算。
         translation_m = [float(value) / 1000.0 for value in tcp_pose_mmdeg[:3]]
         rotation_matrix = rpy_deg_to_rotation_matrix(tcp_pose_mmdeg[3:6])
-        return make_transform_matrix(translation_m, rotation_matrix)
+        return make_transform_matrix(translation_m, rotation_matrix), [float(value) for value in tcp_pose_mmdeg], read_start_time_s, read_end_time_s
+
+    def _current_base_to_tool(self) -> np.ndarray:
+        base_to_tool, _, _, _ = self._read_current_base_to_tool()
+        return base_to_tool
 
     # 根据固定的工具安装关系，构造 `tool -> board` 变换矩阵。
     def _tool_to_board_matrix(self) -> np.ndarray:
         rotation_matrix = rpy_deg_to_rotation_matrix(self.tool_to_board_rotation_rpy)
         return make_transform_matrix(self.tool_to_board_translation, rotation_matrix)
+
+    def _sample_to_log_record(self, sample: CalibrationSample) -> dict[str, object]:
+        tcp_mid_time_s = (sample.tcp_read_start_time_s + sample.tcp_read_end_time_s) * 0.5
+        return {
+            "sample_index": len(self.samples),
+            "image_sequence": sample.image_sequence,
+            "image_header_time_s": sample.image_header_time_s,
+            "image_received_time_s": sample.image_received_time_s,
+            "tcp_read_start_time_s": sample.tcp_read_start_time_s,
+            "tcp_read_end_time_s": sample.tcp_read_end_time_s,
+            "image_to_tcp_midpoint_age_ms": (tcp_mid_time_s - sample.image_received_time_s) * 1000.0,
+            "tcp_pose_mmdeg": sample.tcp_pose_mmdeg,
+            "base_to_tool_matrix": sample.base_to_tool_matrix.tolist(),
+            "camera_to_board_matrix": sample.camera_to_board_matrix.tolist(),
+        }
+
+    def _append_sample_log(self, sample: CalibrationSample) -> None:
+        self.sample_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.sample_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(self._sample_to_log_record(sample), ensure_ascii=False) + "\n")
 
     # 使用旧版“直接平均 base->camera”的方式求解。
     def _solve_board_average(self) -> np.ndarray:
@@ -211,16 +294,25 @@ class EyeToHandCalibrationNode(Node):
     def _capture_sample_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         del request
         try:
-            # 读取当前 `base -> tool` 并估计当前 `camera -> board`。
-            base_to_tool = self._current_base_to_tool()
-            camera_to_board = self._estimate_camera_to_board()
+            with self._image_condition:
+                previous_sequence = self.image_sequence
+            # 先等待服务调用后的新图像，再尽快读取当前 `base -> tool`。
+            captured_image = self._wait_for_fresh_image(previous_sequence)
+            base_to_tool, tcp_pose_mmdeg, tcp_read_start_time_s, tcp_read_end_time_s = self._read_current_base_to_tool()
+            camera_to_board = self._estimate_camera_to_board(captured_image.image_bgr)
             # 保存当前样本的绝对位姿，供后续 AX=XB 或旧方法统一求解。
-            self.samples.append(
-                CalibrationSample(
-                    base_to_tool_matrix=base_to_tool,
-                    camera_to_board_matrix=camera_to_board,
-                )
+            sample = CalibrationSample(
+                base_to_tool_matrix=base_to_tool,
+                camera_to_board_matrix=camera_to_board,
+                image_header_time_s=captured_image.header_time_s,
+                image_received_time_s=captured_image.received_time_s,
+                tcp_read_start_time_s=tcp_read_start_time_s,
+                tcp_read_end_time_s=tcp_read_end_time_s,
+                tcp_pose_mmdeg=tcp_pose_mmdeg,
+                image_sequence=captured_image.sequence,
             )
+            self.samples.append(sample)
+            self._append_sample_log(sample)
             response.success = True
             response.message = f"Captured sample #{len(self.samples)}."
             self._publish_status(
@@ -229,6 +321,8 @@ class EyeToHandCalibrationNode(Node):
                 {
                     "robot_ip": self.robot_ip,
                     "sdk_root": self.linux_fairino_sdk_root,
+                    "sample_log_path": str(self.sample_log_path),
+                    "capture_timing": self._sample_to_log_record(sample),
                 },
             )
         except Exception as exc:
@@ -247,6 +341,8 @@ class EyeToHandCalibrationNode(Node):
             self._publish_status("solve_failed", response.message)
             return response
         try:
+            tool_to_board = self._tool_to_board_matrix()
+            solver_matrices: dict[str, np.ndarray | None] = {}
             # 根据配置选择具体的求解方法。
             if self.solver_method == "board_average":
                 solved_matrix = self._solve_board_average()
@@ -266,6 +362,52 @@ class EyeToHandCalibrationNode(Node):
                 solve_method = "ax_xb_park"
             else:
                 raise RuntimeError(f"Unsupported solver_method: {self.solver_method}")
+            solver_matrices[solve_method] = solved_matrix
+
+            # 额外对同一批样本跑其它求解器，只做诊断输出，不影响当前选择。
+            for method_name, method_builder in (
+                ("eye_to_hand_board_average", self._solve_board_average),
+                (
+                    "opencv_handeye_park",
+                    lambda: solve_eye_to_hand_opencv_handeye(
+                        [sample.base_to_tool_matrix for sample in self.samples],
+                        [sample.camera_to_board_matrix for sample in self.samples],
+                        method=cv2.CALIB_HAND_EYE_PARK,
+                    ),
+                ),
+                (
+                    "ax_xb_park",
+                    lambda: solve_ax_xb_hand_eye_park(
+                        [sample.base_to_tool_matrix for sample in self.samples],
+                        [sample.camera_to_board_matrix for sample in self.samples],
+                    ),
+                ),
+            ):
+                if method_name in solver_matrices:
+                    continue
+                try:
+                    solver_matrices[method_name] = method_builder()
+                except Exception:
+                    solver_matrices[method_name] = None
+
+            residuals = evaluate_eye_to_hand_residuals(
+                solved_matrix,
+                [sample.base_to_tool_matrix for sample in self.samples],
+                [sample.camera_to_board_matrix for sample in self.samples],
+                tool_to_board,
+            )
+            solver_residuals = {}
+            for method_name, matrix in solver_matrices.items():
+                if matrix is None:
+                    solver_residuals[method_name] = {"status": "failed"}
+                    continue
+                summary = evaluate_eye_to_hand_residuals(
+                    matrix,
+                    [sample.base_to_tool_matrix for sample in self.samples],
+                    [sample.camera_to_board_matrix for sample in self.samples],
+                    tool_to_board,
+                )
+                solver_residuals[method_name] = asdict(summary)
 
             translation = solved_matrix[:3, 3]
             rotation = solved_matrix[:3, :3]
@@ -289,6 +431,8 @@ class EyeToHandCalibrationNode(Node):
                 {
                     "method": solve_method,
                     "base_to_camera_translation_m": transform.translation_m,
+                    "residuals": asdict(residuals),
+                    "solver_residuals": solver_residuals,
                 },
             )
         except Exception as exc:
@@ -325,13 +469,16 @@ def main(args: list[str] | None = None) -> None:
     rclpy.init(args=args)
     # 创建节点实例。
     node = EyeToHandCalibrationNode()
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
         # 进入事件循环。
-        rclpy.spin(node)
+        executor.spin()
     except ExternalShutdownException:
         pass
     finally:
         # 退出前销毁节点并关闭 ROS2。
+        executor.remove_node(node)
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

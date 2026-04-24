@@ -51,6 +51,18 @@ class EyeToHandCalibrationSolution:
     method: str = "eye_to_hand_board_average"
 
 
+# 保存一组标定样本回代残差。
+@dataclass
+class CalibrationResidualSummary:
+    translation_rms_mm: float
+    translation_mean_mm: float
+    translation_max_mm: float
+    rotation_rms_deg: float
+    rotation_mean_deg: float
+    rotation_max_deg: float
+    sample_count: int
+
+
 # 将平移和旋转矩阵拼成 4x4 齐次变换矩阵。
 def make_transform_matrix(translation: list[float] | np.ndarray, rotation_matrix: list[list[float]] | np.ndarray) -> np.ndarray:
     matrix = np.eye(4, dtype=np.float64)
@@ -195,6 +207,49 @@ def average_transform_matrices(transform_matrices: list[np.ndarray]) -> np.ndarr
     mean_translation = np.mean(np.stack(translations, axis=0), axis=0)
     mean_rotation = average_rotation_matrices(rotations)
     return make_transform_matrix(mean_translation, mean_rotation)
+
+
+# 计算两个旋转矩阵之间的夹角，单位为度。
+def rotation_error_deg(lhs_rotation: np.ndarray, rhs_rotation: np.ndarray) -> float:
+    delta = np.asarray(lhs_rotation, dtype=np.float64).reshape(3, 3).T @ np.asarray(rhs_rotation, dtype=np.float64).reshape(3, 3)
+    cosine = (float(np.trace(delta)) - 1.0) * 0.5
+    return float(np.rad2deg(np.arccos(np.clip(cosine, -1.0, 1.0))))
+
+
+# 回代检查每个样本：base->camera->board 应该接近 base->tool->board。
+def evaluate_eye_to_hand_residuals(
+    base_to_camera_matrix: np.ndarray,
+    base_to_tool_matrices: list[np.ndarray],
+    camera_to_board_matrices: list[np.ndarray],
+    tool_to_board_matrix: np.ndarray | None = None,
+) -> CalibrationResidualSummary:
+    if len(base_to_tool_matrices) != len(camera_to_board_matrices):
+        raise ValueError("Robot and camera sample counts do not match.")
+    if not base_to_tool_matrices:
+        raise ValueError("At least one sample is required to evaluate calibration residuals.")
+
+    tool_to_board = np.eye(4, dtype=np.float64) if tool_to_board_matrix is None else np.asarray(tool_to_board_matrix, dtype=np.float64).reshape(4, 4)
+    base_to_camera = np.asarray(base_to_camera_matrix, dtype=np.float64).reshape(4, 4)
+    translation_errors_mm = []
+    rotation_errors_deg = []
+
+    for base_to_tool, camera_to_board in zip(base_to_tool_matrices, camera_to_board_matrices):
+        observed_base_to_board = np.asarray(base_to_tool, dtype=np.float64).reshape(4, 4) @ tool_to_board
+        predicted_base_to_board = base_to_camera @ np.asarray(camera_to_board, dtype=np.float64).reshape(4, 4)
+        translation_errors_mm.append(float(np.linalg.norm(predicted_base_to_board[:3, 3] - observed_base_to_board[:3, 3]) * 1000.0))
+        rotation_errors_deg.append(rotation_error_deg(observed_base_to_board[:3, :3], predicted_base_to_board[:3, :3]))
+
+    translation_array = np.asarray(translation_errors_mm, dtype=np.float64)
+    rotation_array = np.asarray(rotation_errors_deg, dtype=np.float64)
+    return CalibrationResidualSummary(
+        translation_rms_mm=float(np.sqrt(np.mean(np.square(translation_array)))),
+        translation_mean_mm=float(np.mean(translation_array)),
+        translation_max_mm=float(np.max(translation_array)),
+        rotation_rms_deg=float(np.sqrt(np.mean(np.square(rotation_array)))),
+        rotation_mean_deg=float(np.mean(rotation_array)),
+        rotation_max_deg=float(np.max(rotation_array)),
+        sample_count=len(base_to_tool_matrices),
+    )
 
 
 # 使用 OpenCV 官方 hand-eye 接口求解 eye-to-hand 外参。
