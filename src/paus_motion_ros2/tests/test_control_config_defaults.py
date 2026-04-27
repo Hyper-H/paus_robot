@@ -11,8 +11,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PERCEPTION_PACKAGE_ROOT = PROJECT_ROOT / "src" / "paus_perception"
 if str(PERCEPTION_PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PERCEPTION_PACKAGE_ROOT))
+MOTION_PACKAGE_ROOT = PROJECT_ROOT / "src" / "paus_motion_ros2"
+if str(MOTION_PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(MOTION_PACKAGE_ROOT))
 
 from paus_perception import load_config
+from paus_motion_ros2.fairino_linux_client import FairinoLinuxClient
 
 
 class ConfigControlDefaultsTests(unittest.TestCase):
@@ -44,6 +48,24 @@ class ConfigControlDefaultsTests(unittest.TestCase):
             control = config["control"]
             self.assertEqual(control["linux_fairino_sdk_root"], "/srv/fairino/linux_sdk")
             self.assertTrue(control["use_mock_pose"])
+
+
+class FairinoLinuxClientTests(unittest.TestCase):
+    def test_normalize_pose_result_accepts_sdk_list_shape(self) -> None:
+        client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
+
+        error, pose = client._normalize_pose_result((0, [1, 2, 3, 4, 5, 6]), "GetActualTCPPose")
+
+        self.assertEqual(error, 0)
+        self.assertEqual(pose, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+
+    def test_normalize_pose_result_accepts_xmlrpc_flat_shape(self) -> None:
+        client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
+
+        error, pose = client._normalize_pose_result((0, 1, 2, 3, 4, 5, 6), "GetActualTCPPose")
+
+        self.assertEqual(error, 0)
+        self.assertEqual(pose, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ from paus_perception import (
     build_summary_record,
     detect_marker,
     estimate_marker_pose,
+    evaluate_eye_to_hand_residuals,
     invert_transform_matrix,
     load_camera_calibration,
     load_config,
@@ -333,6 +334,29 @@ class MarkerPipelineTests(unittest.TestCase):
 
         self.assertTrue(np.allclose(translation, expected_translation, atol=1e-6))
         self.assertTrue(np.allclose(rotation, expected_rotation, atol=1e-6))
+
+    def test_eye_to_hand_residuals_are_zero_for_consistent_samples(self) -> None:
+        base_to_camera = make_transform_matrix([0.24, -0.18, 0.42], rpy_deg_to_rotation_matrix([175.0, -5.0, 92.0]))
+        tool_to_board = make_transform_matrix([0.02, 0.01, 0.12], np.eye(3))
+        base_to_tool_samples = [
+            make_transform_matrix([0.35, -0.10, 0.20], rpy_deg_to_rotation_matrix([-150.0, 10.0, -90.0])),
+            make_transform_matrix([0.30, -0.05, 0.25], rpy_deg_to_rotation_matrix([-145.0, 15.0, -80.0])),
+            make_transform_matrix([0.40, -0.15, 0.22], rpy_deg_to_rotation_matrix([-160.0, 5.0, -100.0])),
+        ]
+        camera_to_board_samples = [
+            invert_transform_matrix(base_to_camera) @ base_to_tool @ tool_to_board
+            for base_to_tool in base_to_tool_samples
+        ]
+
+        residuals = evaluate_eye_to_hand_residuals(
+            base_to_camera,
+            base_to_tool_samples,
+            camera_to_board_samples,
+            tool_to_board,
+        )
+
+        self.assertLess(residuals.translation_rms_mm, 1e-6)
+        self.assertLess(residuals.rotation_rms_deg, 1e-6)
 
     def test_transform_inverse_round_trip(self) -> None:
         rotation = rpy_deg_to_rotation_matrix([10.0, 20.0, 30.0])

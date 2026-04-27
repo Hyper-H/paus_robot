@@ -1,46 +1,36 @@
-# ArUco 检测相关配置。
 aruco:
-  # 默认使用的 ArUco 字典。
   dictionary: DICT_4X4_50
-  # 默认不强制指定某个 marker ID。
-  target_id: null
-  # 自适应阈值算法中的常数项。
+  target_id: 7
   adaptive_thresh_constant: 7
-  # 自适应阈值算法中的窗口大小。
   adaptive_thresh_block_size: 31
-  # 调试轮廓筛选时允许的最小面积。
   min_candidate_area: 1200
-  # 多边形近似时的周长比例参数。
   approx_epsilon_ratio: 0.04
 
-# 输出与调试图配置。
 output:
-  # 是否导出调试中间图。
   export_debug: true
-  # 透视展开后用于 Otsu 二值化的边长。
   debug_square_size: 160
-  # 调试轮廓图中的线宽。
   contour_line_thickness: 2
 
-# 位姿估计与接近目标规划相关配置。
 pose:
-  # 当前单个 marker 的真实边长，单位米。
-  marker_length_m: 0.04
-  # 机械臂希望停在 marker 前的距离，单位米。
+  marker_length_m: 0.06
   approach_distance_m: 0.05
-  # 规划结果所在坐标系，当前阶段固定为相机坐标系。
   target_frame: camera
+  min_forward_distance_m: 0.02
+  max_pose_distance_m: 1.5
+  max_pose_jump_m: 0.25
 
 transform:
   marker_to_target:
     translation_m: [0.0, 0.0, 0.0]
     rotation_rpy_deg: [0.0, 0.0, 0.0]
+  max_target_distance_mm: 1500.0
+  max_target_jump_mm: 250.0
 
 calibration:
-  board_rows: 6
-  board_cols: 9
-  square_size_m: 0.01
-  solver_method: "opencv_handeye_park"
+  board_rows: 8
+  board_cols: 11
+  square_size_m: 0.02
+  solver_method: "joint_absolute"
   min_sample_count: 10
   output_path: "/home/chen_lab/paus_robot/src/paus_bringup/configs/extrinsics.yaml"
   tool_to_board:
@@ -57,9 +47,22 @@ control:
   move_acc: 10.0
   move_ovl: 20.0
   blendR: -1.0
+  orientation_mode: "face_marker_normal"
+  flange_face_axis: "-Z"
+  hover_clearance_mm: 30.0
+  pre_approach_distance_mm: 80.0
+  prefer_positive_z_surface_normal: true
+  enable_safe_lift_on_low_clearance: true
+  safe_lift_step_mm: 80.0
+  safe_lift_above_marker_mm: 180.0
+  safe_lift_max_z_mm: 500.0
   max_step_distance_mm: 80.0
-  final_standoff_mm: 30.0
+  max_execution_stage: "final_hover"
+  target_hold_timeout_ms: 500
+  completion_position_tolerance_mm: 20.0
+  completion_normal_tolerance_deg: 5.0
   min_safe_z_mm: 50.0
+  min_plane_clearance_mm: 10.0
   workspace_min_mm: [-1000.0, -1000.0, 0.0]
   workspace_max_mm: [1000.0, 1000.0, 1000.0]
   repeat_distance_threshold_mm: 5.0

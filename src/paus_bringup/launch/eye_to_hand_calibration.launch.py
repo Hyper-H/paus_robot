@@ -135,7 +135,7 @@ def generate_launch_description() -> LaunchDescription:
     default_board_rows = str(calibration_cfg.get("board_rows", 6))
     default_board_cols = str(calibration_cfg.get("board_cols", 9))
     default_square_size_m = str(calibration_cfg.get("square_size_m", 0.01))
-    default_solver_method = str(calibration_cfg.get("solver_method", "ax_xb_park"))
+    default_solver_method = str(calibration_cfg.get("solver_method", "joint_absolute"))
     default_min_sample_count = str(calibration_cfg.get("min_sample_count", 10))
     default_tool_to_board_translation = tool_to_board_cfg.get("translation_m", [0.0, 0.0, 0.0])
     default_tool_to_board_rotation = tool_to_board_cfg.get("rotation_rpy_deg", [0.0, 0.0, 0.0])
@@ -180,7 +180,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "solver_method",
                 default_value=default_solver_method,
-                description="Hand-eye calibration solver method. opencv_handeye_park is the default eye-to-hand method.",
+                description="Hand-eye calibration solver method. joint_absolute jointly estimates base_to_camera and tool_to_board.",
             ),
             DeclareLaunchArgument(
                 "min_sample_count",
