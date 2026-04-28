@@ -783,6 +783,7 @@ class EyeToHandCalibrationNode(Node):
                 return response
 
             captured_count = 0
+            skipped_count = 0
             for waypoint in trajectory.waypoints:
                 if waypoint.motion != "movej":
                     raise RuntimeError(f"Unsupported waypoint motion: {waypoint.motion}")
@@ -798,16 +799,74 @@ class EyeToHandCalibrationNode(Node):
                 time.sleep(max(0.0, waypoint.dwell_s))
                 self._append_run_log("waypoint_reached", {"waypoint": waypoint.to_payload(), "stable_tcp_pose_mmdeg": stable_pose})
                 if waypoint.capture:
-                    self._capture_one_sample()
+                    try:
+                        self._capture_one_sample()
+                    except Exception as exc:
+                        skipped_count += 1
+                        self._append_run_log(
+                            "waypoint_capture_skipped",
+                            {
+                                "waypoint": waypoint.to_payload(),
+                                "reason": repr(exc),
+                            },
+                        )
+                        self._publish_status(
+                            "waypoint_capture_skipped",
+                            f"Skipped {waypoint.name}: {exc}",
+                            {
+                                "waypoint": waypoint.to_payload(),
+                                "reason": repr(exc),
+                                "captured_count": captured_count,
+                                "skipped_count": skipped_count,
+                            },
+                        )
+                        continue
                     captured_count += 1
+
+            if len(self.samples) < self.min_sample_count:
+                response.success = False
+                response.message = (
+                    f"Semi-auto run completed with {captured_count} accepted samples and {skipped_count} skipped waypoints, "
+                    f"but need at least {self.min_sample_count} valid samples."
+                )
+                self._append_run_log(
+                    "semi_auto_insufficient_samples",
+                    {
+                        "accepted_samples": captured_count,
+                        "skipped_waypoints": skipped_count,
+                        "min_sample_count": self.min_sample_count,
+                    },
+                )
+                self._publish_status(
+                    "semi_auto_insufficient_samples",
+                    response.message,
+                    {
+                        "session_dir": str(self.session_dir),
+                        "accepted_samples": captured_count,
+                        "skipped_waypoints": skipped_count,
+                        "min_sample_count": self.min_sample_count,
+                    },
+                )
+                return response
 
             solve_response = self._solve_callback(Trigger.Request(), Trigger.Response())
             if not solve_response.success:
                 raise RuntimeError(solve_response.message)
             self._save_current_solution()
             response.success = True
-            response.message = f"Semi-auto calibration finished with {captured_count} captured samples."
-            self._publish_status("semi_auto_finished", response.message, {"session_dir": str(self.session_dir), "report_path": str(self.report_path)})
+            response.message = (
+                f"Semi-auto calibration finished with {captured_count} accepted samples and {skipped_count} skipped waypoints."
+            )
+            self._publish_status(
+                "semi_auto_finished" if skipped_count == 0 else "semi_auto_finished_with_skips",
+                response.message,
+                {
+                    "session_dir": str(self.session_dir),
+                    "report_path": str(self.report_path),
+                    "accepted_samples": captured_count,
+                    "skipped_waypoints": skipped_count,
+                },
+            )
         except Exception as exc:
             response.success = False
             response.message = repr(exc)
