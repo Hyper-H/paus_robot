@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 导入 deepcopy，避免解析路径时修改全局默认配置对象。
+from copy import deepcopy
+import os
 # 导入 Path，便于处理配置文件路径。
 from pathlib import Path
 # 导入 Any，便于描述灵活的配置字典。
@@ -67,11 +70,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # 求解前最少需要的样本数。
         "min_sample_count": 10,
         # 标定结果默认保存路径。
-        "output_path": "/home/chen_lab/paus_robot/src/paus_bringup/configs/extrinsics.yaml",
+        "output_path": "src/paus_bringup/configs/extrinsics.yaml",
         # 半自动标定示教轨迹保存路径。
-        "trajectory_path": "/home/chen_lab/paus_robot/src/paus_bringup/configs/eye_to_hand_trajectory.yaml",
+        "trajectory_path": "src/paus_bringup/configs/eye_to_hand_trajectory.yaml",
         # 每次半自动标定运行的归档目录根路径。
-        "session_root_path": "/home/chen_lab/paus_robot/calibration_sessions",
+        "session_root_path": "calibration_sessions",
         # 是否保存每个有效样本图像。
         "save_sample_images": True,
         # 棋盘 solvePnP 质量过滤阈值。
@@ -132,7 +135,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 # 递归合并默认配置和用户配置。
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     # 先复制基础配置，避免原对象被直接修改。
-    merged = dict(base)
+    merged = deepcopy(base)
     # 遍历用户传入的每个键值对。
     for key, value in override.items():
         # 如果两边都是字典，则继续递归合并。
@@ -145,11 +148,49 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return merged
 
 
+def _infer_project_root(config_path: Path) -> Path:
+    resolved_config_path = config_path.expanduser().resolve()
+    search_roots = [resolved_config_path.parent, *resolved_config_path.parents]
+    for candidate in search_roots:
+        if (candidate / "src" / "paus_bringup").exists() and (candidate / "src" / "paus_perception").exists():
+            return candidate
+
+    parts = resolved_config_path.parts
+    if "src" in parts:
+        src_index = parts.index("src")
+        if src_index > 0:
+            return Path(*parts[:src_index])
+    if "install" in parts:
+        install_index = parts.index("install")
+        if install_index > 0:
+            return Path(*parts[:install_index])
+    return resolved_config_path.parent
+
+
+def resolve_config_path(path_value: str | Path, config_path: str | Path) -> str:
+    path_text = os.path.expandvars(str(path_value)).strip()
+    path = Path(path_text).expanduser()
+    if path.is_absolute():
+        return str(path)
+    return str((_infer_project_root(Path(config_path)) / path).resolve())
+
+
+def _resolve_project_paths(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
+    calibration = config.get("calibration", {})
+    if not isinstance(calibration, dict):
+        return config
+    for field_name in ("output_path", "trajectory_path", "session_root_path"):
+        value = calibration.get(field_name)
+        if value:
+            calibration[field_name] = resolve_config_path(value, config_path)
+    return config
+
+
 # 加载 YAML 配置文件并返回最终配置。
 def load_config(path: str | Path | None = None) -> dict[str, Any]:
     # 如果没有给路径，就直接返回默认配置。
     if path is None:
-        return DEFAULT_CONFIG
+        return deepcopy(DEFAULT_CONFIG)
 
     # 将路径统一转成 Path 对象。
     config_path = Path(path)
@@ -157,4 +198,5 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     with config_path.open("r", encoding="utf-8") as handle:
         user_config = yaml.safe_load(handle) or {}
     # 将用户配置合并到默认配置上。
-    return _deep_merge(DEFAULT_CONFIG, user_config)
+    merged = _deep_merge(DEFAULT_CONFIG, user_config)
+    return _resolve_project_paths(merged, config_path)

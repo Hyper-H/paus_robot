@@ -15,7 +15,7 @@ MOTION_PACKAGE_ROOT = PROJECT_ROOT / "src" / "paus_motion_ros2"
 if str(MOTION_PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(MOTION_PACKAGE_ROOT))
 
-from paus_perception import load_config
+from paus_perception import load_config, resolve_config_path
 from paus_motion_ros2.fairino_linux_client import FairinoLinuxClient
 
 
@@ -48,6 +48,30 @@ class ConfigControlDefaultsTests(unittest.TestCase):
             control = config["control"]
             self.assertEqual(control["linux_fairino_sdk_root"], "/srv/fairino/linux_sdk")
             self.assertTrue(control["use_mock_pose"])
+
+    def test_default_yaml_paths_resolve_against_project_root(self) -> None:
+        config_path = PROJECT_ROOT / "src" / "paus_bringup" / "configs" / "default.yaml"
+
+        config = load_config(config_path)
+        calibration = config["calibration"]
+
+        self.assertEqual(calibration["output_path"], str(PROJECT_ROOT / "src" / "paus_bringup" / "configs" / "extrinsics.yaml"))
+        self.assertEqual(calibration["trajectory_path"], str(PROJECT_ROOT / "src" / "paus_bringup" / "configs" / "eye_to_hand_trajectory.yaml"))
+        self.assertEqual(calibration["session_root_path"], str(PROJECT_ROOT / "calibration_sessions"))
+
+    def test_resolve_config_path_uses_config_location_for_relative_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "demo_ws"
+            config_dir = project_root / "src" / "paus_bringup" / "configs"
+            perception_dir = project_root / "src" / "paus_perception"
+            perception_dir.mkdir(parents=True, exist_ok=True)
+            config_dir.mkdir(parents=True, exist_ok=True)
+            config_path = config_dir / "default.yaml"
+            config_path.write_text("calibration: {}\n", encoding="utf-8")
+
+            resolved = resolve_config_path("calibration_sessions", config_path)
+
+            self.assertEqual(resolved, str(project_root / "calibration_sessions"))
 
 
 class FairinoLinuxClientTests(unittest.TestCase):

@@ -4,7 +4,6 @@ from __future__ import annotations
 from pathlib import Path
 # 导入 shutil，用于查找 python3 可执行文件。
 import shutil
-import yaml
 
 # 导入 ament 索引工具，用于定位安装后的 package share 路径。
 from ament_index_python.packages import get_package_share_directory
@@ -16,6 +15,7 @@ from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 # 导入 ROS2 Node 启动动作。
 from launch_ros.actions import Node
+from paus_perception import load_config
 
 
 # 标定链默认把相机标定输出写到 `/tmp`，避免污染仓库工作树。
@@ -149,8 +149,7 @@ def generate_launch_description() -> LaunchDescription:
     bringup_share = Path(get_package_share_directory("paus_bringup"))
     default_config_file = _resolve_default_config_path(bringup_share)
     default_config_path = str(default_config_file)
-    with default_config_file.open("r", encoding="utf-8") as handle:
-        config_payload = yaml.safe_load(handle) or {}
+    config_payload = load_config(default_config_file)
     calibration_cfg = config_payload.get("calibration", {})
     tool_to_board_cfg = calibration_cfg.get("tool_to_board", {})
     default_extrinsics_path = str(calibration_cfg.get("output_path", bringup_share / "configs" / "extrinsics.yaml"))

@@ -9,14 +9,20 @@ import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 
-from paus_perception import load_config
+from paus_perception import load_config, resolve_config_path
+
+
+def _resolve_default_config_path() -> Path:
+    bringup_share = Path(get_package_share_directory("paus_bringup"))
+    workspace_root = bringup_share.parents[3]
+    source_config = workspace_root / "src" / "paus_bringup" / "configs" / "default.yaml"
+    return source_config if source_config.exists() else bringup_share / "configs" / "default.yaml"
 
 
 def _resolve_default_trajectory_path() -> str:
-    bringup_share = Path(get_package_share_directory("paus_bringup"))
-    default_config = bringup_share / "configs" / "default.yaml"
+    default_config = _resolve_default_config_path()
     config = load_config(default_config)
-    return str(config["calibration"].get("trajectory_path", bringup_share / "configs" / "eye_to_hand_trajectory.yaml"))
+    return str(config["calibration"].get("trajectory_path", default_config.parent / "eye_to_hand_trajectory.yaml"))
 
 
 def _call_trigger(node: Node, service_name: str, timeout_s: float) -> Trigger.Response:
@@ -74,7 +80,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    trajectory_path = Path(args.trajectory_path or _resolve_default_trajectory_path())
+    default_config = _resolve_default_config_path()
+    if args.trajectory_path:
+        trajectory_path = Path(resolve_config_path(args.trajectory_path, default_config))
+    else:
+        trajectory_path = Path(_resolve_default_trajectory_path())
 
     rclpy.init(args=[])
     node = rclpy.create_node("eye_to_hand_semi_auto_cli")
