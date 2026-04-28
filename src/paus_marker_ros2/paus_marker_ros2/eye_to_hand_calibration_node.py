@@ -38,8 +38,10 @@ from paus_perception import (
     load_config,
     make_transform_matrix,
     make_transform_struct,
+    rotation_matrix_to_rpy_deg,
     rpy_deg_to_rotation_matrix,
     save_eye_to_hand_solution,
+    solve_eye_to_hand_joint_absolute,
     solve_eye_to_hand_opencv_handeye,
     solve_ax_xb_hand_eye_park,
 )
@@ -91,7 +93,7 @@ class EyeToHandCalibrationNode(Node):
         self.declare_parameter("board_rows", 6)
         self.declare_parameter("board_cols", 9)
         self.declare_parameter("square_size_m", 0.01)
-        self.declare_parameter("solver_method", "opencv_handeye_park")
+        self.declare_parameter("solver_method", "joint_absolute")
         self.declare_parameter("fresh_image_timeout_s", 2.0)
         self.declare_parameter("sample_log_path", "/tmp/paus_robot/eye_to_hand_samples.jsonl")
         self.declare_parameter("tool_to_board.translation_m", [0.0, 0.0, 0.0])
@@ -290,6 +292,13 @@ class EyeToHandCalibrationNode(Node):
         ]
         return average_transform_matrices(matrices)
 
+    def _tool_to_board_payload(self, tool_to_board_matrix: np.ndarray) -> dict[str, list[float]]:
+        tool_to_board_matrix = np.asarray(tool_to_board_matrix, dtype=np.float64).reshape(4, 4)
+        return {
+            "translation_m": [float(value) for value in tool_to_board_matrix[:3, 3].tolist()],
+            "rotation_rpy_deg": [float(value) for value in rotation_matrix_to_rpy_deg(tool_to_board_matrix[:3, :3])],
+        }
+
     # 采集一次样本。
     def _capture_sample_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         del request
@@ -341,11 +350,12 @@ class EyeToHandCalibrationNode(Node):
             self._publish_status("solve_failed", response.message)
             return response
         try:
-            tool_to_board = self._tool_to_board_matrix()
-            solver_matrices: dict[str, np.ndarray | None] = {}
+            configured_tool_to_board = self._tool_to_board_matrix()
+            solver_results: dict[str, tuple[np.ndarray, np.ndarray] | None] = {}
             # 根据配置选择具体的求解方法。
             if self.solver_method == "board_average":
                 solved_matrix = self._solve_board_average()
+                solved_tool_to_board = configured_tool_to_board
                 solve_method = "eye_to_hand_board_average"
             elif self.solver_method == "opencv_handeye_park":
                 solved_matrix = solve_eye_to_hand_opencv_handeye(
@@ -353,20 +363,29 @@ class EyeToHandCalibrationNode(Node):
                     [sample.camera_to_board_matrix for sample in self.samples],
                     method=cv2.CALIB_HAND_EYE_PARK,
                 )
+                solved_tool_to_board = configured_tool_to_board
                 solve_method = "opencv_handeye_park"
             elif self.solver_method == "ax_xb_park":
                 solved_matrix = solve_ax_xb_hand_eye_park(
                     [sample.base_to_tool_matrix for sample in self.samples],
                     [sample.camera_to_board_matrix for sample in self.samples],
                 )
+                solved_tool_to_board = configured_tool_to_board
                 solve_method = "ax_xb_park"
+            elif self.solver_method == "joint_absolute":
+                solved_matrix, solved_tool_to_board = solve_eye_to_hand_joint_absolute(
+                    [sample.base_to_tool_matrix for sample in self.samples],
+                    [sample.camera_to_board_matrix for sample in self.samples],
+                    initial_tool_to_board_matrix=configured_tool_to_board,
+                )
+                solve_method = "joint_absolute"
             else:
                 raise RuntimeError(f"Unsupported solver_method: {self.solver_method}")
-            solver_matrices[solve_method] = solved_matrix
+            solver_results[solve_method] = (solved_matrix, solved_tool_to_board)
 
             # 额外对同一批样本跑其它求解器，只做诊断输出，不影响当前选择。
             for method_name, method_builder in (
-                ("eye_to_hand_board_average", self._solve_board_average),
+                ("eye_to_hand_board_average", lambda: (self._solve_board_average(), configured_tool_to_board)),
                 (
                     "opencv_handeye_park",
                     lambda: solve_eye_to_hand_opencv_handeye(
@@ -382,36 +401,57 @@ class EyeToHandCalibrationNode(Node):
                         [sample.camera_to_board_matrix for sample in self.samples],
                     ),
                 ),
+                (
+                    "joint_absolute",
+                    lambda: solve_eye_to_hand_joint_absolute(
+                        [sample.base_to_tool_matrix for sample in self.samples],
+                        [sample.camera_to_board_matrix for sample in self.samples],
+                        initial_tool_to_board_matrix=configured_tool_to_board,
+                    ),
+                ),
             ):
-                if method_name in solver_matrices:
+                if method_name in solver_results:
                     continue
                 try:
-                    solver_matrices[method_name] = method_builder()
+                    result = method_builder()
+                    if isinstance(result, tuple) and len(result) == 2:
+                        matrix_result, tool_matrix_result = result
+                    else:
+                        matrix_result, tool_matrix_result = result, configured_tool_to_board
+                    solver_results[method_name] = (
+                        np.asarray(matrix_result, dtype=np.float64).reshape(4, 4),
+                        np.asarray(tool_matrix_result, dtype=np.float64).reshape(4, 4),
+                    )
                 except Exception:
-                    solver_matrices[method_name] = None
+                    solver_results[method_name] = None
 
             residuals = evaluate_eye_to_hand_residuals(
                 solved_matrix,
                 [sample.base_to_tool_matrix for sample in self.samples],
                 [sample.camera_to_board_matrix for sample in self.samples],
-                tool_to_board,
+                solved_tool_to_board,
             )
             solver_residuals = {}
-            for method_name, matrix in solver_matrices.items():
-                if matrix is None:
+            for method_name, result in solver_results.items():
+                if result is None:
                     solver_residuals[method_name] = {"status": "failed"}
                     continue
+                matrix, tool_to_board = result
                 summary = evaluate_eye_to_hand_residuals(
                     matrix,
                     [sample.base_to_tool_matrix for sample in self.samples],
                     [sample.camera_to_board_matrix for sample in self.samples],
                     tool_to_board,
                 )
-                solver_residuals[method_name] = asdict(summary)
+                solver_residuals[method_name] = {
+                    **asdict(summary),
+                    "tool_to_board": self._tool_to_board_payload(tool_to_board),
+                }
 
             translation = solved_matrix[:3, 3]
             rotation = solved_matrix[:3, :3]
             transform = make_transform_struct(translation, rotation, "robot_base", "camera")
+            solved_tool_payload = self._tool_to_board_payload(solved_tool_to_board)
             # 保存当前求解结果。
             self.current_solution = EyeToHandCalibrationSolution(
                 status="ok",
@@ -419,8 +459,8 @@ class EyeToHandCalibrationNode(Node):
                 sample_count=len(self.samples),
                 message="Eye-to-hand calibration solved successfully.",
                 base_to_camera=transform,
-                tool_to_board_translation_m=list(self.tool_to_board_translation),
-                tool_to_board_rotation_rpy_deg=list(self.tool_to_board_rotation_rpy),
+                tool_to_board_translation_m=solved_tool_payload["translation_m"],
+                tool_to_board_rotation_rpy_deg=solved_tool_payload["rotation_rpy_deg"],
                 method=solve_method,
             )
             response.success = True
@@ -431,6 +471,8 @@ class EyeToHandCalibrationNode(Node):
                 {
                     "method": solve_method,
                     "base_to_camera_translation_m": transform.translation_m,
+                    "tool_to_board_translation_m": self.current_solution.tool_to_board_translation_m,
+                    "tool_to_board_rotation_rpy_deg": self.current_solution.tool_to_board_rotation_rpy_deg,
                     "residuals": asdict(residuals),
                     "solver_residuals": solver_residuals,
                 },

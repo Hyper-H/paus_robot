@@ -82,6 +82,8 @@ class FairinoLinuxClient:
     def _normalize_pose_result(self, result: object, method_name: str) -> tuple[int, list[float]]:
         if not isinstance(result, Sequence):
             raise RuntimeError(f"{method_name} returned non-sequence result: {result!r}")
+        if len(result) == 2 and result[1] is None:
+            return int(result[0]), []
         if len(result) == 2 and isinstance(result[1], Sequence):
             error = int(result[0])
             values = result[1]
@@ -92,10 +94,27 @@ class FairinoLinuxClient:
             raise RuntimeError(f"{method_name} returned unexpected result: {result!r}")
         return error, [float(value) for value in values]
 
+    # 参考当前关节位姿求指定笛卡尔位姿的逆解，返回关节角。
+    def solve_inverse_kin_ref(self, pose_mmdeg: list[float], joint_pos_ref_deg: list[float]) -> tuple[int, list[float]]:
+        self.ensure_connection()
+        result = self.robot.GetInverseKinRef(
+            0,
+            [float(value) for value in pose_mmdeg],
+            [float(value) for value in joint_pos_ref_deg],
+        )
+        return self._normalize_pose_result(result, "GetInverseKinRef")
+
     # 执行关节空间运动。
     def move_j(self, joint_pos: list[float], tool_id: int, user_id: int, vel: float) -> int:
         self.ensure_connection()
         return int(self.robot.MoveJ([float(v) for v in joint_pos], tool=int(tool_id), user=int(user_id), vel=float(vel)))
+
+    # 先求逆解，再执行关节空间运动。
+    def move_j_pose(self, pose_mmdeg: list[float], joint_pos_ref_deg: list[float], tool_id: int, user_id: int, vel: float) -> int:
+        error, joint_pos = self.solve_inverse_kin_ref(pose_mmdeg, joint_pos_ref_deg)
+        if error != 0:
+            return int(error)
+        return self.move_j(joint_pos, tool_id=tool_id, user_id=user_id, vel=vel)
 
     # 执行笛卡尔空间直线运动。
     def move_l(self, pose_mmdeg: list[float], tool_id: int, user_id: int, vel: float) -> int:
