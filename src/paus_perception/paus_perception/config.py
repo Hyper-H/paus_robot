@@ -68,6 +68,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "min_sample_count": 10,
         # 标定结果默认保存路径。
         "output_path": "/home/chen_lab/paus_robot/src/paus_bringup/configs/extrinsics.yaml",
+        # 半自动标定示教轨迹保存路径。
+        "trajectory_path": "/home/chen_lab/paus_robot/src/paus_bringup/configs/eye_to_hand_trajectory.yaml",
+        # 每次半自动标定运行的归档目录根路径。
+        "session_root_path": "/home/chen_lab/paus_robot/calibration_sessions",
+        # 是否保存每个有效样本图像。
+        "save_sample_images": True,
+        # 棋盘 solvePnP 质量过滤阈值。
+        "max_reprojection_error_px": 2.5,
+        "min_board_margin_px": 10.0,
+        # 到点后判定 TCP 稳定的阈值。
+        "stable_position_tolerance_mm": 0.2,
+        "stable_rotation_tolerance_deg": 0.1,
+        "stable_window_s": 0.5,
+        "stable_timeout_s": 10.0,
+        "dwell_s": 0.5,
         # 当前 TCP 到棋盘格中心的固定外参。
         "tool_to_board": {
             "translation_m": [0.0, 0.0, 0.0],

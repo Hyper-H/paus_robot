@@ -62,8 +62,8 @@ class FairinoLinuxClient:
     # 读取当前关节角，单位为度。
     def get_actual_joint_pos_degree(self) -> tuple[int, list[float]]:
         self.ensure_connection()
-        error, values = self.robot.GetActualJointPosDegree()
-        return int(error), [float(value) for value in values]
+        result = self.robot.GetActualJointPosDegree()
+        return self._normalize_pose_result(result, "GetActualJointPosDegree")
 
     # 读取当前 TCP 位姿，位置单位为 mm，姿态单位为 deg。
     def get_actual_tcp_pose(self) -> tuple[int, list[float]]:

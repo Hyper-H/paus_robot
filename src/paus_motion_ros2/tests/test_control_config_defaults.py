@@ -67,7 +67,14 @@ class FairinoLinuxClientTests(unittest.TestCase):
         self.assertEqual(error, 0)
         self.assertEqual(pose, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 
+    def test_normalize_pose_result_accepts_joint_position_shape(self) -> None:
+        client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
+
+        error, joints = client._normalize_pose_result((0, [10, 20, 30, 40, 50, 60]), "GetActualJointPosDegree")
+
+        self.assertEqual(error, 0)
+        self.assertEqual(joints, [10.0, 20.0, 30.0, 40.0, 50.0, 60.0])
+
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -21,6 +21,8 @@ runtime_logs/
 runtime_logs_clean/
 *.log
 *.pid
+calibration_sessions/
+src/paus_bringup/configs/eye_to_hand_trajectory.yaml
 
 # Temporary experiment artifacts
 tmp_*/

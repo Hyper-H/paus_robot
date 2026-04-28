@@ -33,6 +33,16 @@ calibration:
   solver_method: "joint_absolute"
   min_sample_count: 10
   output_path: "/home/chen_lab/paus_robot/src/paus_bringup/configs/extrinsics.yaml"
+  trajectory_path: "/home/chen_lab/paus_robot/src/paus_bringup/configs/eye_to_hand_trajectory.yaml"
+  session_root_path: "/home/chen_lab/paus_robot/calibration_sessions"
+  save_sample_images: true
+  max_reprojection_error_px: 2.5
+  min_board_margin_px: 10.0
+  stable_position_tolerance_mm: 0.2
+  stable_rotation_tolerance_deg: 0.1
+  stable_window_s: 0.5
+  stable_timeout_s: 10.0
+  dwell_s: 0.5
   tool_to_board:
     translation_m: [0.0, 0.0, 0.0]
     rotation_rpy_deg: [0.0, 0.0, 0.0]

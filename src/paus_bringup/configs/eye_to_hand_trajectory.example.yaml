@@ -1,0 +1,17 @@
+version: 1
+tool_id: 0
+user_id: 0
+defaults:
+  motion: movej
+  vel: 10.0
+  acc: 10.0
+  dwell_s: 0.5
+waypoints:
+  - name: waypoint_001
+    motion: movej
+    joint_deg: [0.0, -35.0, 75.0, 0.0, 50.0, 0.0]
+    expected_tcp_pose_mmdeg: [500.0, 0.0, 350.0, 180.0, 0.0, 180.0]
+    vel: 10.0
+    acc: 10.0
+    dwell_s: 0.5
+    capture: true
