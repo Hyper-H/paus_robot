@@ -142,7 +142,7 @@ class EyeToHandCalibrationNode(Node):
         self.declare_parameter("trajectory_path", str(calibration_cfg.get("trajectory_path", bringup_share / "configs" / "eye_to_hand_trajectory.yaml")))
         self.declare_parameter("session_root_path", str(calibration_cfg.get("session_root_path", "/home/chen_lab/paus_robot/calibration_sessions")))
         self.declare_parameter("save_sample_images", bool(calibration_cfg.get("save_sample_images", True)))
-        self.declare_parameter("max_reprojection_error_px", float(calibration_cfg.get("max_reprojection_error_px", 2.5)))
+        self.declare_parameter("max_reprojection_error_px", float(calibration_cfg.get("max_reprojection_error_px", 0.0)))
         self.declare_parameter("min_board_margin_px", float(calibration_cfg.get("min_board_margin_px", 10.0)))
         self.declare_parameter("stable_position_tolerance_mm", float(calibration_cfg.get("stable_position_tolerance_mm", 0.2)))
         self.declare_parameter("stable_rotation_tolerance_deg", float(calibration_cfg.get("stable_rotation_tolerance_deg", 0.1)))
@@ -310,7 +310,7 @@ class EyeToHandCalibrationNode(Node):
         )
 
     # 从指定图像中估计 `camera -> board` 变换。
-    def _estimate_camera_to_board(self, image_bgr: np.ndarray) -> BoardPoseEstimate:
+    def _estimate_camera_to_board(self, image_bgr: np.ndarray, *, apply_quality_filters: bool = True) -> BoardPoseEstimate:
         # 先转成灰度图，再做棋盘格检测。
         gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
         found, corners = cv2.findChessboardCorners(gray, (self.board_cols, self.board_rows))
@@ -345,11 +345,11 @@ class EyeToHandCalibrationNode(Node):
                 height - 1.0 - np.max(corner_points[:, 1]),
             )
         )
-        if reprojection_error_px > self.max_reprojection_error_px:
+        if apply_quality_filters and self.max_reprojection_error_px > 0.0 and reprojection_error_px > self.max_reprojection_error_px:
             raise RuntimeError(
                 f"Chessboard reprojection error {reprojection_error_px:.3f}px exceeds {self.max_reprojection_error_px:.3f}px."
             )
-        if board_margin_px < self.min_board_margin_px:
+        if apply_quality_filters and board_margin_px < self.min_board_margin_px:
             raise RuntimeError(f"Chessboard margin {board_margin_px:.1f}px is below {self.min_board_margin_px:.1f}px.")
         # 将 Rodrigues 旋转向量转成旋转矩阵，再组装成齐次矩阵。
         rotation_matrix, _ = cv2.Rodrigues(rvec)
@@ -409,6 +409,47 @@ class EyeToHandCalibrationNode(Node):
         image_path = self.session_dir / "images" / f"sample_{sample_index:03d}.png"
         cv2.imwrite(str(image_path), image_bgr)
         return str(image_path)
+
+    def _probe_current_board_quality(self) -> dict[str, object]:
+        with self._image_condition:
+            previous_sequence = self.image_sequence
+        try:
+            captured_image = self._wait_for_fresh_image(previous_sequence)
+            estimate = self._estimate_camera_to_board(captured_image.image_bgr, apply_quality_filters=False)
+        except Exception as exc:
+            return {
+                "detected": False,
+                "reason": repr(exc),
+            }
+
+        quality: dict[str, object] = {
+            "detected": True,
+            "image_sequence": captured_image.sequence,
+            "reprojection_error_px": estimate.reprojection_error_px,
+            "board_margin_px": estimate.board_margin_px,
+            "reprojection_filter_enabled": self.max_reprojection_error_px > 0.0,
+            "min_board_margin_px": self.min_board_margin_px,
+            "margin_filter_passed": estimate.board_margin_px >= self.min_board_margin_px,
+        }
+        if self.max_reprojection_error_px > 0.0:
+            quality["max_reprojection_error_px"] = self.max_reprojection_error_px
+            quality["reprojection_filter_passed"] = estimate.reprojection_error_px <= self.max_reprojection_error_px
+        return quality
+
+    def _format_record_quality(self, quality: dict[str, object]) -> str:
+        if not quality.get("detected"):
+            return f"chessboard not detected: {quality.get('reason', 'unknown error')}"
+
+        reprojection_error_px = float(quality["reprojection_error_px"])
+        board_margin_px = float(quality["board_margin_px"])
+        message = f"chessboard reprojection_error_px={reprojection_error_px:.3f}, board_margin_px={board_margin_px:.1f}"
+        if not bool(quality.get("reprojection_filter_enabled", True)):
+            message += ", reprojection filter disabled"
+        elif not bool(quality.get("reprojection_filter_passed", True)):
+            message += f", reprojection would exceed {float(quality['max_reprojection_error_px']):.3f}px"
+        if not bool(quality.get("margin_filter_passed", True)):
+            message += f", margin below {float(quality['min_board_margin_px']):.1f}px"
+        return message
 
     def _capture_one_sample(self) -> CalibrationSample:
         with self._image_condition:
@@ -685,6 +726,7 @@ class EyeToHandCalibrationNode(Node):
             tcp_error, tcp_pose_mmdeg = self.linux_client.get_actual_tcp_pose()
             if tcp_error != 0:
                 raise RuntimeError(f"GetActualTCPPose failed with code {tcp_error}.")
+            record_quality = self._probe_current_board_quality()
             waypoint = build_recorded_waypoint(
                 index=len(self.recorded_trajectory.waypoints) + 1,
                 joint_deg=joint_deg,
@@ -693,13 +735,18 @@ class EyeToHandCalibrationNode(Node):
                 acc=self.move_acc,
                 dwell_s=self.dwell_s,
                 capture=True,
+                record_quality=record_quality,
             )
             self.recorded_trajectory.waypoints.append(waypoint)
             self._write_recorded_trajectory()
             response.success = True
-            response.message = f"Recorded {waypoint.name} to {self.trajectory_path}."
+            response.message = f"Recorded {waypoint.name} to {self.trajectory_path}. {self._format_record_quality(record_quality)}."
             self._append_run_log("waypoint_recorded", waypoint.to_payload())
-            self._publish_status("waypoint_recorded", response.message, {"waypoint_count": len(self.recorded_trajectory.waypoints)})
+            self._publish_status(
+                "waypoint_recorded",
+                response.message,
+                {"waypoint_count": len(self.recorded_trajectory.waypoints), "record_quality": record_quality},
+            )
         except Exception as exc:
             response.success = False
             response.message = repr(exc)

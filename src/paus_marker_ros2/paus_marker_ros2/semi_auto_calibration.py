@@ -27,9 +27,13 @@ class CalibrationWaypoint:
     acc: float
     dwell_s: float
     capture: bool = True
+    record_quality: dict[str, Any] | None = None
 
     def to_payload(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        if payload["record_quality"] is None:
+            payload.pop("record_quality")
+        return payload
 
 
 @dataclass
@@ -92,6 +96,7 @@ def _parse_waypoint(payload: dict[str, Any], defaults: dict[str, Any], index: in
         acc=float(payload.get("acc", defaults.get("acc", 10.0))),
         dwell_s=float(payload.get("dwell_s", defaults.get("dwell_s", 0.5))),
         capture=_coerce_bool(payload.get("capture", True), field_name=f"waypoints[{index}].capture"),
+        record_quality=payload.get("record_quality") if isinstance(payload.get("record_quality"), dict) else None,
     )
 
 
@@ -164,6 +169,7 @@ def build_recorded_waypoint(
     acc: float,
     dwell_s: float,
     capture: bool = True,
+    record_quality: dict[str, Any] | None = None,
 ) -> CalibrationWaypoint:
     return CalibrationWaypoint(
         name=f"waypoint_{index:03d}",
@@ -174,6 +180,7 @@ def build_recorded_waypoint(
         acc=float(acc),
         dwell_s=float(dwell_s),
         capture=bool(capture),
+        record_quality=record_quality,
     )
 
 

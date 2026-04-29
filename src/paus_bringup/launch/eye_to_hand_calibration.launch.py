@@ -161,7 +161,7 @@ def generate_launch_description() -> LaunchDescription:
     default_trajectory_path = str(calibration_cfg.get("trajectory_path", default_config_file.parent / "eye_to_hand_trajectory.yaml"))
     default_session_root_path = str(calibration_cfg.get("session_root_path", "/home/chen_lab/paus_robot/calibration_sessions"))
     default_save_sample_images = str(calibration_cfg.get("save_sample_images", True)).lower()
-    default_max_reprojection_error_px = str(calibration_cfg.get("max_reprojection_error_px", 2.5))
+    default_max_reprojection_error_px = str(calibration_cfg.get("max_reprojection_error_px", 0.0))
     default_min_board_margin_px = str(calibration_cfg.get("min_board_margin_px", 10.0))
     default_stable_position_tolerance_mm = str(calibration_cfg.get("stable_position_tolerance_mm", 0.2))
     default_stable_rotation_tolerance_deg = str(calibration_cfg.get("stable_rotation_tolerance_deg", 0.1))
@@ -227,7 +227,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("trajectory_path", default_value=default_trajectory_path, description="Semi-auto MoveJ trajectory YAML path."),
             DeclareLaunchArgument("session_root_path", default_value=default_session_root_path, description="Directory where calibration sessions are archived."),
             DeclareLaunchArgument("save_sample_images", default_value=default_save_sample_images, description="Whether to save accepted sample images in the session directory."),
-            DeclareLaunchArgument("max_reprojection_error_px", default_value=default_max_reprojection_error_px, description="Maximum accepted chessboard reprojection error in pixels."),
+            DeclareLaunchArgument("max_reprojection_error_px", default_value=default_max_reprojection_error_px, description="Maximum accepted chessboard reprojection error in pixels. Set <= 0 to disable this filter."),
             DeclareLaunchArgument("min_board_margin_px", default_value=default_min_board_margin_px, description="Minimum chessboard corner margin from image border in pixels."),
             DeclareLaunchArgument("stable_position_tolerance_mm", default_value=default_stable_position_tolerance_mm, description="TCP position delta threshold for stable sampling."),
             DeclareLaunchArgument("stable_rotation_tolerance_deg", default_value=default_stable_rotation_tolerance_deg, description="TCP rotation delta threshold for stable sampling."),

@@ -35,6 +35,11 @@ class SemiAutoCalibrationTrajectoryTests(unittest.TestCase):
                     vel=8.0,
                     acc=9.0,
                     dwell_s=0.7,
+                    record_quality={
+                        "detected": True,
+                        "reprojection_error_px": 3.2,
+                        "board_margin_px": 42.0,
+                    },
                 )
             )
             path = Path(temp_dir) / "eye_to_hand_trajectory.yaml"
@@ -48,6 +53,7 @@ class SemiAutoCalibrationTrajectoryTests(unittest.TestCase):
             self.assertEqual(loaded.waypoints[0].motion, "movej")
             self.assertEqual(loaded.waypoints[0].joint_deg, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
             self.assertEqual(loaded.waypoints[0].expected_tcp_pose_mmdeg, [100.0, 200.0, 300.0, 10.0, 20.0, 30.0])
+            self.assertEqual(loaded.waypoints[0].record_quality["reprojection_error_px"], 3.2)
 
     def test_invalid_motion_mode_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

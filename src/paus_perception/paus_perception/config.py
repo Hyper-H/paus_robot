@@ -78,7 +78,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # 是否保存每个有效样本图像。
         "save_sample_images": True,
         # 棋盘 solvePnP 质量过滤阈值。
-        "max_reprojection_error_px": 2.5,
+        "max_reprojection_error_px": 0.0,
         "min_board_margin_px": 10.0,
         # 到点后判定 TCP 稳定的阈值。
         "stable_position_tolerance_mm": 0.2,
