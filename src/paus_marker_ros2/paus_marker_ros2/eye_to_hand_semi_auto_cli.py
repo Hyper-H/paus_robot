@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+import time
 from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 import rclpy
 from rclpy.node import Node
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from paus_perception import load_config, resolve_config_path
@@ -25,18 +28,61 @@ def _resolve_default_trajectory_path() -> str:
     return str(config["calibration"].get("trajectory_path", default_config.parent / "eye_to_hand_trajectory.yaml"))
 
 
-def _call_trigger(node: Node, service_name: str, timeout_s: float) -> Trigger.Response:
+def _format_status(payload: dict[str, object]) -> str:
+    status = str(payload.get("status", "status"))
+    message = str(payload.get("message", ""))
+    prefix_parts = [status]
+    if "waypoint_index" in payload and "waypoint_count" in payload:
+        prefix_parts.append(f"{payload['waypoint_index']}/{payload['waypoint_count']}")
+    if "sample_count" in payload:
+        prefix_parts.append(f"samples={payload['sample_count']}")
+    if "captured_count" in payload or "skipped_count" in payload:
+        prefix_parts.append(f"accepted={payload.get('captured_count', '-')}")
+        prefix_parts.append(f"skipped={payload.get('skipped_count', '-')}")
+    if "reprojection_error_px" in payload:
+        prefix_parts.append(f"reproj={float(payload['reprojection_error_px']):.3f}px")
+    if "board_margin_px" in payload:
+        prefix_parts.append(f"margin={float(payload['board_margin_px']):.1f}px")
+    if status == "solved" and isinstance(payload.get("residuals"), dict):
+        residuals = payload["residuals"]
+        prefix_parts.append(f"rms={float(residuals.get('translation_rms_mm', 0.0)):.2f}mm")
+        prefix_parts.append(f"rot={float(residuals.get('rotation_rms_deg', 0.0)):.2f}deg")
+    return f"[STATUS] {' '.join(prefix_parts)} | {message}"
+
+
+def _print_status_message(message: String) -> None:
+    try:
+        payload = json.loads(message.data)
+    except json.JSONDecodeError:
+        print(f"[STATUS] {message.data}", flush=True)
+        return
+    if isinstance(payload, dict):
+        print(_format_status(payload), flush=True)
+    else:
+        print(f"[STATUS] {message.data}", flush=True)
+
+
+def _call_trigger(node: Node, service_name: str, timeout_s: float, *, echo_status: bool = False) -> Trigger.Response:
     client = node.create_client(Trigger, service_name)
-    if not client.wait_for_service(timeout_sec=timeout_s):
+    if not client.wait_for_service(timeout_sec=min(timeout_s, 30.0)):
         raise RuntimeError(f"Service is not available: {service_name}")
+    subscription = None
+    if echo_status:
+        subscription = node.create_subscription(String, "/eye_to_hand/status", _print_status_message, 10)
     future = client.call_async(Trigger.Request())
-    rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_s)
-    if not future.done():
-        raise RuntimeError(f"Service timed out: {service_name}")
-    response = future.result()
-    if response is None:
-        raise RuntimeError(f"Service returned no response: {service_name}")
-    return response
+    deadline = time.monotonic() + timeout_s
+    try:
+        while rclpy.ok() and not future.done():
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"Service timed out: {service_name}")
+            rclpy.spin_once(node, timeout_sec=0.2)
+        response = future.result()
+        if response is None:
+            raise RuntimeError(f"Service returned no response: {service_name}")
+        return response
+    finally:
+        if subscription is not None:
+            node.destroy_subscription(subscription)
 
 
 def _print_response(response: Trigger.Response) -> None:
@@ -74,7 +120,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--record", action="store_true", help="Enter waypoint recording mode before running.")
     parser.add_argument("--record-only", action="store_true", help="Record/save trajectory and do not run calibration.")
     parser.add_argument("--run-only", action="store_true", help="Do not enter recorder even if the trajectory file is missing.")
-    parser.add_argument("--timeout-s", type=float, default=30.0, help="Service wait/call timeout in seconds.")
+    parser.add_argument("--timeout-s", type=float, default=3600.0, help="Service call timeout in seconds.")
+    parser.add_argument("--quiet-status", action="store_true", help="Do not print /eye_to_hand/status messages while running calibration.")
     return parser.parse_args(argv)
 
 
@@ -96,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
         if args.record_only:
             return 0
-        response = _call_trigger(node, "/eye_to_hand/run_semi_auto_calibration", args.timeout_s)
+        response = _call_trigger(node, "/eye_to_hand/run_semi_auto_calibration", args.timeout_s, echo_status=not args.quiet_status)
         _print_response(response)
         return 0 if response.success else 1
     finally:

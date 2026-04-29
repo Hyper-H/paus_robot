@@ -831,9 +831,24 @@ class EyeToHandCalibrationNode(Node):
 
             captured_count = 0
             skipped_count = 0
-            for waypoint in trajectory.waypoints:
+            waypoint_count = len(trajectory.waypoints)
+            for waypoint_index, waypoint in enumerate(trajectory.waypoints, start=1):
                 if waypoint.motion != "movej":
                     raise RuntimeError(f"Unsupported waypoint motion: {waypoint.motion}")
+                waypoint_progress = {
+                    "waypoint_name": waypoint.name,
+                    "waypoint_index": waypoint_index,
+                    "waypoint_count": waypoint_count,
+                    "captured_count": captured_count,
+                    "skipped_count": skipped_count,
+                    "waypoint": waypoint.to_payload(),
+                }
+                self._append_run_log("waypoint_motion_started", waypoint_progress)
+                self._publish_status(
+                    "waypoint_motion_started",
+                    f"Moving to {waypoint.name} ({waypoint_index}/{waypoint_count}).",
+                    waypoint_progress,
+                )
                 move_error = self.linux_client.move_j(
                     waypoint.joint_deg,
                     tool_id=trajectory.tool_id,
@@ -842,12 +857,27 @@ class EyeToHandCalibrationNode(Node):
                 )
                 if move_error != 0:
                     raise RuntimeError(f"MoveJ failed at {waypoint.name} with code {move_error}.")
+                self._publish_status(
+                    "waypoint_waiting_stable",
+                    f"Waiting for TCP stability at {waypoint.name} ({waypoint_index}/{waypoint_count}).",
+                    waypoint_progress,
+                )
                 stable_pose = self._wait_until_tcp_stable()
                 time.sleep(max(0.0, waypoint.dwell_s))
                 self._append_run_log("waypoint_reached", {"waypoint": waypoint.to_payload(), "stable_tcp_pose_mmdeg": stable_pose})
+                self._publish_status(
+                    "waypoint_reached",
+                    f"Reached {waypoint.name} ({waypoint_index}/{waypoint_count}).",
+                    {**waypoint_progress, "stable_tcp_pose_mmdeg": stable_pose},
+                )
                 if waypoint.capture:
+                    self._publish_status(
+                        "waypoint_capture_started",
+                        f"Capturing chessboard at {waypoint.name} ({waypoint_index}/{waypoint_count}).",
+                        waypoint_progress,
+                    )
                     try:
-                        self._capture_one_sample()
+                        sample = self._capture_one_sample()
                     except Exception as exc:
                         skipped_count += 1
                         self._append_run_log(
@@ -869,6 +899,23 @@ class EyeToHandCalibrationNode(Node):
                         )
                         continue
                     captured_count += 1
+                    self._publish_status(
+                        "waypoint_sample_captured",
+                        (
+                            f"Captured sample #{len(self.samples)} at {waypoint.name}: "
+                            f"reprojection_error_px={sample.reprojection_error_px:.3f}, "
+                            f"board_margin_px={sample.board_margin_px:.1f}."
+                        ),
+                        {
+                            **waypoint_progress,
+                            "captured_count": captured_count,
+                            "skipped_count": skipped_count,
+                            "sample_index": len(self.samples),
+                            "reprojection_error_px": sample.reprojection_error_px,
+                            "board_margin_px": sample.board_margin_px,
+                            "image_path": sample.image_path,
+                        },
+                    )
 
             if len(self.samples) < self.min_sample_count:
                 response.success = False
