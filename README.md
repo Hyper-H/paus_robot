@@ -66,7 +66,25 @@ paus_robot/
 
 ```bash
 source /opt/ros/humble/setup.bash
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate paus_robot
 colcon build --symlink-install
+source install/setup.bash
+```
+
+实验室主机当前功能开发 worktree 路径是：
+
+```bash
+cd ~/worktrees/paus_robot_handeye
+```
+
+每个新终端运行 ROS 命令前，先进入项目并加载环境：
+
+```bash
+cd ~/worktrees/paus_robot_handeye
+source /opt/ros/humble/setup.bash
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate paus_robot
 source install/setup.bash
 ```
 
@@ -97,25 +115,28 @@ ros2 launch paus_bringup online_stack.launch.py \
 
 ```bash
 ros2 launch paus_bringup eye_to_hand_calibration.launch.py \
-  board_rows:=6 \
-  board_cols:=9 \
-  square_size_m:=0.01
+  board_rows:=8 \
+  board_cols:=11 \
+  square_size_m:=0.02
 ```
 
 默认情况下，上面这些参数会优先从下面这个配置文件读取：
 
-- [default.yaml](/root/projects/ag-repro/src/paus_bringup/configs/default.yaml)
+- `src/paus_bringup/configs/default.yaml`
 
 对应配置段是：
 
 ```yaml
 calibration:
-  board_rows: 6
-  board_cols: 9
-  square_size_m: 0.01
-  solver_method: "opencv_handeye_park"
+  board_rows: 8
+  board_cols: 11
+  square_size_m: 0.02
+  solver_method: "joint_absolute"
   min_sample_count: 10
-  output_path: "/home/chen_lab/paus_robot/src/paus_bringup/configs/extrinsics.yaml"
+  output_path: "src/paus_bringup/configs/extrinsics.yaml"
+  trajectory_path: "src/paus_bringup/configs/eye_to_hand_trajectory.yaml"
+  session_root_path: "calibration_sessions"
+  max_reprojection_error_px: 0.0
   tool_to_board:
     translation_m: [0.0, 0.0, 0.0]
     rotation_rpy_deg: [0.0, 0.0, 0.0]
@@ -131,7 +152,7 @@ ros2 launch paus_bringup eye_to_hand_calibration.launch.py
 所以在日常联调里，你通常不需要再手动写：
 
 ```bash
-config_path:=/root/projects/ag-repro/src/paus_bringup/configs/default.yaml
+config_path:=src/paus_bringup/configs/default.yaml
 ```
 
 只有在你想显式切到另一份配置文件时，才需要传这个参数。
@@ -144,12 +165,12 @@ config_path:=/root/projects/ag-repro/src/paus_bringup/configs/default.yaml
 ros2 launch paus_bringup eye_to_hand_calibration.launch.py \
   camera_ip:=192.168.58.20 \
   camera_config_output:=/tmp/paus_robot/camera.yaml \
-  board_rows:=6 \
-  board_cols:=9 \
-  square_size_m:=0.01 \
-  solver_method:=opencv_handeye_park \
+  board_rows:=8 \
+  board_cols:=11 \
+  square_size_m:=0.02 \
+  solver_method:=joint_absolute \
   min_sample_count:=10 \
-  output_path:=/home/chen_lab/paus_robot/src/paus_bringup/configs/extrinsics.yaml
+  output_path:=src/paus_bringup/configs/extrinsics.yaml
 ```
 
 如果棋盘格中心不在 TCP 上，还可以显式传工具到棋盘的固定偏移：
@@ -164,28 +185,28 @@ ros2 launch paus_bringup eye_to_hand_calibration.launch.py \
   tool_to_board_rz:=0.0
 ```
 
-#### AX = XB 说明
-当前默认手眼求解器已经切换为 OpenCV 官方 `calibrateHandEye` 的 eye-to-hand 用法：
+#### 求解器说明
+当前默认手眼求解器是 `joint_absolute`，用于半自动 eye-to-hand 标定：
 
 - 采样阶段保存每一帧的：
   - `base -> tool`
-  - `target -> camera`
-- 求解阶段会把 `base -> tool` 先取逆，变成 OpenCV 所要求的：
-  - `gripper -> base`
-- 然后调用：
-  - `cv2.calibrateHandEye(..., method=cv2.CALIB_HAND_EYE_PARK)`
-- 在 eye-to-hand 模式下，把返回结果解释为：
+  - `camera -> board`
+- 求解阶段使用多组绝对位姿联合估计：
   - `base -> camera`
+  - `tool/flange -> board`
 
-这和旧版“每个样本直接反推 `base->camera` 然后平均”的方案不同。  
-新方法的优点是：
-- 更接近业界常用的 hand-eye calibration 形式
-- 对多姿态样本利用更充分
-- 严格按照 OpenCV 文档支持的 eye-to-hand 输入语义求解
+核心关系是：
+
+```text
+base_to_tool_i * tool_to_board = base_to_camera * camera_to_board_i
+```
+
+这种方式适合棋盘固定在法兰盘上、但 `tool/flange -> board` 安装偏移未知或不想手工测量的情况。
 
 如果你想回退到旧方法做对照，也可以临时指定：
 
 ```bash
+ros2 launch paus_bringup eye_to_hand_calibration.launch.py solver_method:=opencv_handeye_park
 ros2 launch paus_bringup eye_to_hand_calibration.launch.py solver_method:=board_average
 ```
 
@@ -216,6 +237,83 @@ ros2 service call /eye_to_hand/save std_srvs/srv/Trigger "{}"
 
 ```bash
 ros2 topic echo /eye_to_hand/status
+```
+
+#### 半自动手眼标定
+半自动模式用于“先示教录制安全轨迹，再让程序按轨迹逐点 MoveJ、采图、求解并写入外参”。相机固定，棋盘固定在法兰盘上，第一版默认使用 `joint_absolute` 联合估计 `base -> camera` 和 `flange/TCP -> board`。
+
+录制完成后，直接执行半自动标定需要两个终端。
+
+终端 1：启动标定节点、相机桥和图像接收。真实执行机械臂运动时必须显式打开 `execute_motion:=true`：
+
+```bash
+cd ~/worktrees/paus_robot_handeye
+source /opt/ros/humble/setup.bash
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate paus_robot
+source install/setup.bash
+
+ros2 launch paus_bringup eye_to_hand_calibration.launch.py execute_motion:=true
+```
+
+终端 2：读取已经录制好的 `eye_to_hand_trajectory.yaml` 并开始自动逐点采样、求解、保存：
+
+```bash
+cd ~/worktrees/paus_robot_handeye
+source /opt/ros/humble/setup.bash
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate paus_robot
+source install/setup.bash
+
+ros2 run paus_marker_ros2 eye_to_hand_semi_auto --run-only
+```
+
+正式执行前可以先 dry-run。dry-run 会读取轨迹并打印将执行的 waypoint，但不会驱动机械臂、不会采样、不会求解、不会写入外参：
+
+```bash
+ros2 launch paus_bringup eye_to_hand_calibration.launch.py execute_motion:=false
+ros2 run paus_marker_ros2 eye_to_hand_semi_auto --run-only
+```
+
+如果需要重新录制轨迹，先启动标定节点，然后在另一个终端进入录制模式：
+
+```bash
+ros2 run paus_marker_ros2 eye_to_hand_semi_auto --record --record-only
+```
+
+录制模式下：
+
+```text
+r  记录当前关节角、当前 TCP/法兰位姿，并尝试反馈当前棋盘 reprojection_error_px
+d  删除上一个 waypoint
+f  完成并保存 trajectory YAML
+q  放弃退出
+```
+
+轨迹默认保存到：
+
+```text
+src/paus_bringup/configs/eye_to_hand_trajectory.yaml
+```
+
+每次半自动标定会归档到：
+
+```text
+calibration_sessions/<timestamp>/
+```
+
+成功求解并保存后，会更新：
+
+```text
+src/paus_bringup/configs/extrinsics.yaml
+```
+
+当前默认 `max_reprojection_error_px: 0.0` 表示先关闭单张棋盘重投影误差过滤，只记录误差值。正式标定时可以重新打开，例如：
+
+```bash
+ros2 launch paus_bringup eye_to_hand_calibration.launch.py \
+  execute_motion:=true \
+  max_reprojection_error_px:=2.5
 ```
 
 ### 最基本运行顺序
