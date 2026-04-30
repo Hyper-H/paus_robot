@@ -115,37 +115,38 @@ Execution and verification must be planned around the lab Linux host. Local WSL 
 ## MUTABLE SECTION
 <!-- Update each round with justification for changes -->
 
-### Plan Version: 1 (Updated: Round 0)
+### Plan Version: 1 (Updated: Round 1)
 
 #### Plan Evolution Log
 <!-- Document any changes to the plan with justification -->
 | Round | Change | Reason | Impact on AC |
 |-------|--------|--------|--------------|
 | 0 | Initial tracker populated from `docs/handeye_ui_improvement_plan_humanize.md` | Required RLCR initialization | Establishes AC and task mapping |
+| 1 | Marked task1, task6, task8, task10, and task14 completed after direct Codex verification; kept the remaining completion claims pending and logged the blocking gaps discovered in review | Round 1 made real progress, but several completion claims were not fully delivered | Keeps AC-2, AC-4, AC-6, AC-8, and AC-9 progress accurate while AC-3, AC-5, AC-7, and part of AC-8 remain open |
 
 #### Active Tasks
 <!-- Map each task to its target Acceptance Criterion and routing tag -->
 | Task | Target AC | Status | Tag | Owner | Notes |
 |------|-----------|--------|-----|-------|-------|
-| task1: Audit current UI route behavior and document which endpoints provide each panel's data | AC-8 | pending | analyze | codex | From plan task1 |
 | task2: Add/adjust backend response shaping for status, current waypoint, progress, sessions, and friendly errors | AC-3, AC-7, AC-8 | pending | coding | claude | From plan task2 |
 | task3: Add frontend WebSocket fallback and remove visible duplicate event spam | AC-8 | pending | coding | claude | From plan task3 |
 | task4: Refactor page markup into the target single-screen workbench regions | AC-1 | pending | coding | claude | From plan task4 |
 | task5: Rework CSS for fixed viewport layout, internal scrolling, compact panels, and status chips | AC-1, AC-4 | pending | coding | claude | From plan task5 |
-| task6: Improve live image overlay rendering and detection failure empty states | AC-2 | pending | coding | claude | From plan task6 |
 | task7: Implement current waypoint panel with workflow progression, TCP table, `T_camera_board`, and board angle | AC-3 | pending | coding | claude | From plan task7 |
-| task8: Strengthen control behavior and confirmation copy for true motion | AC-4 | pending | coding | claude | From plan task8 |
 | task9: Rebuild waypoint table rendering with state colors, threshold highlighting, selected row, and stats | AC-5 | pending | coding | claude | From plan task9 |
-| task10: Link waypoint selection to sample preview and add preview metrics/empty states | AC-6 | pending | coding | claude | From plan task10 |
 | task11: Rework result summary to choose latest valid report and display residual comparisons | AC-7 | pending | coding | claude | From plan task11 |
 | task12: Run UI-only API smoke tests and browser screenshot comparison on the lab host against the reference target | AC-1, AC-2, AC-8, AC-9 | pending | analyze | codex | From plan task12 |
 | task13: Polish spacing, color hierarchy, button risk levels, and log presentation | AC-1, AC-4, AC-8 | pending | coding | claude | From plan task13 |
-| task14: Update operator docs and launch notes so all ROS2/camera/robot/UI acceptance commands target the lab host, while WSL is documented as edit/static-analysis only | AC-9 | pending | coding | claude | From plan task14 |
 
 ### Completed and Verified
 <!-- Only move tasks here after Codex verification -->
 | AC | Task | Completed Round | Verified Round | Evidence |
 |----|------|-----------------|----------------|----------|
+| AC-8 | task1: Audit current UI route behavior and document which endpoints provide each panel's data | 1 | 1 | `.humanize/skill/2026-04-30_11-59-52-4050280-1ed5b0bc/output.md` captures the route audit and missing-field analysis used in Round 1 |
+| AC-2 | task6: Improve live image overlay rendering and detection failure empty states | 1 | 1 | `src/paus_ui/paus_ui/overlay.py` now separates `raw`/`overlay`/`pose`, supports the axes switch, and maps failures through `operator_messages.py`; `src/paus_ui/tests/test_overlay.py` covers the friendly-failure and raw-render behavior |
+| AC-4 | task8: Strengthen control behavior and confirmation copy for true motion | 1 | 1 | `src/paus_ui/paus_ui/static/app.js` adds a true-motion confirmation dialog with waypoint count, motion mode, velocity, and acceleration; `src/paus_ui/paus_ui/ros_bridge.py` exposes motion summary and honest stop limitations |
+| AC-6 | task10: Link waypoint selection to sample preview and add preview metrics/empty states | 1 | 1 | `src/paus_ui/paus_ui/static/app.js` selects rows, switches preview image modes, shows metrics, and renders explicit empty-state text when no sample image is available |
+| AC-9 | task14: Update operator docs and launch notes so all ROS2/camera/robot/UI acceptance commands target the lab host, while WSL is documented as edit/static-analysis only | 1 | 1 | `README.md` documents lab-host login/build/launch flow, `conda activate paus_robot`, and Windows access via `http://192.168.58.183:8080` |
 
 ### Explicitly Deferred
 <!-- Items here require strong justification -->
@@ -156,3 +157,7 @@ Execution and verification must be planned around the lab Linux host. Local WSL 
 <!-- Issues discovered during implementation -->
 | Issue | Discovered Round | Blocking AC | Resolution Path |
 |-------|-----------------|-------------|-----------------|
+| Polling fallback is incomplete: when `/ws/events` is down, the UI still polls the event log but does not refresh waypoint or report data | 1 | AC-8 | Make the polling path trigger the same `refreshStatus`/`refreshWaypoints`/`refreshReport` updates that the WebSocket path performs, or add equivalent periodic fallback refreshes |
+| The current-waypoint workflow display is incomplete and `/api/status` still omits `T_camera_board`, `board_angle`, and empty-state fields for the panel | 1 | AC-3 | Expand shaped status payloads and update the flow renderer to cover detect, skipped, solve, and finished states with explicit empty reasons |
+| The waypoint table still omits the required `result` column even though backend rows already provide `result` | 1 | AC-5 | Add the `result` column to the table markup and row renderer, and keep its styling aligned with accepted/skipped/running states |
+| Result-session selection still treats any `report.yaml` as a valid solved session and does not render an explicit unsolved-session state | 1 | AC-7 | Prefer `has_solution` when selecting the default session and render a clear unsolved/report-incomplete message instead of blank residual metrics |

@@ -492,7 +492,7 @@ p {
 
 .flow {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 4px;
 }
 
@@ -649,6 +649,25 @@ tbody tr.selected td {
   display: inline-flex;
 }
 
+.result-pill {
+  border-radius: 999px;
+  padding: 3px 7px;
+  font-size: 11px;
+  display: inline-flex;
+  color: var(--muted);
+  background: #edf2ef;
+}
+
+.result-pill.ok {
+  color: var(--green);
+  background: rgba(22, 134, 77, 0.12);
+}
+
+.result-pill.fail {
+  color: var(--red);
+  background: rgba(208, 68, 55, 0.1);
+}
+
 .status-pill.accepted {
   color: var(--green);
   background: rgba(22, 134, 77, 0.12);
@@ -745,6 +764,16 @@ tbody tr.selected td {
   gap: 8px;
   padding: 10px;
   border-bottom: 1px solid var(--line);
+}
+
+.empty-card {
+  grid-column: 1 / -1;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  padding: 10px;
+  color: var(--muted);
+  background: #fbfcfb;
+  font-size: 12px;
 }
 
 .bar-list {

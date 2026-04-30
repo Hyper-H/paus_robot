@@ -60,6 +60,9 @@ class SessionStore:
     def latest_valid_session_id(self) -> str | None:
         sessions = self.list_sessions()
         for session in sessions:
+            if session.get("has_solution"):
+                return str(session["id"])
+        for session in sessions:
             if session.get("has_report"):
                 return str(session["id"])
         return str(sessions[0]["id"]) if sessions else None
@@ -72,21 +75,23 @@ class SessionStore:
         events = self._read_jsonl(session_path / "run.log")
         counts = self._counts_for_session(path=session_path, report=report, samples=samples, events=events)
         residuals = report.get("residuals", {}) if isinstance(report.get("residuals"), dict) else {}
+        has_report = report_path.exists()
+        has_solution = bool(report.get("base_to_camera") or residuals)
         shaped = dict(report)
         shaped.update(
             {
                 "session_id": session_id,
                 "session_dir": str(session_path),
                 "report_path": str(report_path),
-                "has_report": report_path.exists(),
-                "has_solution": bool(report.get("base_to_camera") or residuals),
+                "has_report": has_report,
+                "has_solution": has_solution,
                 "sample_count": int(report.get("sample_count", counts["sample_count"]) or counts["sample_count"]),
                 "accepted_count": counts["accepted"],
                 "skipped_count": counts["skipped"],
                 "pending_count": counts["pending"],
                 "residuals": residuals,
                 "residual_comparison": self._residual_comparison(residuals),
-                "empty_reason": None if report_path.exists() else "该 session 暂无 report.yaml。",
+                "empty_reason": None if has_solution else ("report.yaml 存在，但该 session 尚未完成求解。" if has_report else "该 session 暂无 report.yaml。"),
             }
         )
         return shaped

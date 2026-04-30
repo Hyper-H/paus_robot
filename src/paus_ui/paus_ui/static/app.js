@@ -129,6 +129,21 @@ async function refreshStatus() {
   renderFlow(workflow.stage);
   const tcp = current.stable_tcp_pose_mmdeg || current.tcp_pose_mmdeg || [];
   renderPoseGrid(els.tcpPoseGrid, ["x", "y", "z", "rx", "ry", "rz"], tcp, ["mm", "mm", "mm", "deg", "deg", "deg"]);
+  const boardTranslation = current.camera_to_board_translation_m || [];
+  const boardRotation = current.camera_to_board_rotation_rpy_deg || [];
+  if (boardTranslation.length || boardRotation.length) {
+    renderPoseGrid(els.cameraBoardGrid, ["x", "y", "z", "rx", "ry", "rz"], [
+      boardTranslation[0],
+      boardTranslation[1],
+      boardTranslation[2],
+      ...boardRotation,
+    ], ["m", "m", "m", "deg", "deg", "deg"]);
+  }
+  if (current.board_angle_deg !== null && current.board_angle_deg !== undefined) {
+    els.boardAngle.textContent = fmt(current.board_angle_deg, 2, " deg");
+  } else if (current.empty_reason) {
+    els.boardAngle.textContent = current.empty_reason;
+  }
   if (session.session_id && !state.selectedSession) {
     state.selectedSession = session.latest_valid_session_id || session.session_id;
   }
@@ -167,12 +182,13 @@ async function refreshQuality() {
 async function refreshSessions() {
   const sessions = await getJson("/api/sessions", []);
   state.sessions = sessions;
-  if (!state.selectedSession && sessions.length) {
-    const preferred = sessions.find((session) => session.has_report) || sessions[0];
+  const selectedStillExists = sessions.some((session) => session.id === state.selectedSession);
+  if ((!state.selectedSession || !selectedStillExists) && sessions.length) {
+    const preferred = sessions.find((session) => session.has_solution) || sessions.find((session) => session.has_report) || sessions[0];
     state.selectedSession = preferred.id;
   }
   const options = sessions.map((session) => {
-    const label = `${session.id} (${session.sample_count || 0})${session.has_report ? "" : " 未求解"}`;
+    const label = `${session.id} (${session.sample_count || 0})${session.has_solution ? "" : session.has_report ? " unsolved" : " no report"}`;
     return `<option value="${escapeHtml(session.id)}">${escapeHtml(label)}</option>`;
   });
   if (!options.length) options.push('<option value="">无 session</option>');
@@ -195,6 +211,11 @@ async function refreshReport() {
   els.acceptedCount.textContent = report.accepted_count ?? "--";
   els.skippedCount.textContent = report.skipped_count ?? "--";
   els.pendingCount.textContent = report.pending_count ?? "--";
+  if (!report.has_solution) {
+    els.residualGrid.innerHTML = `<div class="empty-card">report.yaml exists, but this session has not produced a solved calibration result yet.</div>`;
+    els.residualBars.innerHTML = "";
+    return;
+  }
   const residuals = report.residuals || {};
   els.residualGrid.innerHTML = [
     ["translation_rms_mm", "trans_rms", "mm"],
@@ -265,6 +286,7 @@ function renderWaypointRow(item, index) {
     <tr data-name="${escapeHtml(item.name || waypoint.name || "")}" data-row="${item.sample_row_index || ""}">
       <td title="${escapeHtml(item.name || waypoint.name || "")}">${escapeHtml(item.name || waypoint.name || "--")}</td>
       <td><span class="status-pill ${escapeHtml(status)}">${escapeHtml(status)}</span></td>
+      <td><span class="result-pill ${escapeHtml(String(item.result || "-").toLowerCase())}">${escapeHtml(item.result || "-")}</span></td>
       <td class="${reprojClass}">${fmt(item.reprojection_error_px, 3)}</td>
       <td class="${marginClass}">${fmt(item.board_margin_px, 1)}</td>
       <td>${fmt(t[2], 3)}</td>
@@ -328,14 +350,32 @@ function renderFlow(activeStage) {
     ["movej", "MoveJ"],
     ["wait_stable", "等待稳定"],
     ["capture", "拍照"],
+    ["detect", "detect"],
     ["accepted", "accepted"],
+    ["skipped", "skipped"],
+    ["solve", "solve"],
     ["finished", "完成"],
   ];
-  const activeIndex = Math.max(0, steps.findIndex(([stage]) => stage === activeStage));
+  const normalizedStage = normalizeWorkflowStage(activeStage);
+  const activeIndex = Math.max(0, steps.findIndex(([stage]) => stage === normalizedStage));
   els.workflowFlow.innerHTML = steps.map(([stage, label], index) => {
-    const cls = stage === activeStage ? "active" : index < activeIndex ? "done" : "";
+    const cls = stage === normalizedStage ? "active" : index < activeIndex ? "done" : "";
     return `<span class="flow-step ${cls}">${label}</span>`;
   }).join("");
+}
+
+function normalizeWorkflowStage(stage) {
+  const aliases = {
+    idle: "",
+    recorded: "",
+    dry_run: "movej",
+    reached: "wait_stable",
+    detecting: "detect",
+    detected: "detect",
+    solved: "solve",
+    error: "skipped",
+  };
+  return aliases[stage] !== undefined ? aliases[stage] : stage;
 }
 
 async function refreshAll() {
@@ -382,7 +422,13 @@ function addEvent(event) {
 async function pollEvents() {
   const payload = await getJson(`/api/events?since=${state.lastEventId}`, { events: [], last_id: state.lastEventId });
   state.lastEventId = payload.last_id || state.lastEventId;
-  (payload.events || []).forEach(addEvent);
+  const events = payload.events || [];
+  events.forEach(addEvent);
+  if (events.some((event) => event.type === "eye_to_hand_status" || event.type === "ui_command_result")) {
+    refreshStatus();
+    refreshWaypoints();
+    refreshReport();
+  }
 }
 
 function connectEvents() {
@@ -492,3 +538,9 @@ window.setInterval(refreshSessions, 5000);
 window.setInterval(() => {
   if (!state.wsConnected) pollEvents();
 }, 2000);
+window.setInterval(() => {
+  if (!state.wsConnected) {
+    refreshWaypoints();
+    refreshReport();
+  }
+}, 5000);

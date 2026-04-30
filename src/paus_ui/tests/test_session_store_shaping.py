@@ -116,3 +116,24 @@ def test_session_store_shapes_counts_reasons_and_thresholds(tmp_path: Path) -> N
     assert waypoints[0]["camera_to_board_translation_m"] == [0.1, 0.2, 0.3]
     assert waypoints[1]["reason_code"] == "chessboard_not_detected"
     assert "棋盘未检测到" in waypoints[1]["reason_display"]
+
+
+def test_latest_valid_session_prefers_solved_report(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
+    _write_trajectory(trajectory_path)
+    session_root = tmp_path / "calibration_sessions"
+    solved = session_root / "2026-04-29_120000"
+    unsolved = session_root / "2026-04-29_130000"
+    solved.mkdir(parents=True)
+    unsolved.mkdir(parents=True)
+    (solved / "report.yaml").write_text(
+        yaml.safe_dump({"sample_count": 2, "residuals": {"translation_rms_mm": 3.0}}),
+        encoding="utf-8",
+    )
+    (unsolved / "report.yaml").write_text(yaml.safe_dump({"sample_count": 0}), encoding="utf-8")
+
+    store = SessionStore(session_root_path=session_root, trajectory_path=trajectory_path)
+
+    assert store.latest_valid_session_id() == "2026-04-29_120000"
+    assert store.read_report("2026-04-29_130000")["has_solution"] is False
+    assert "尚未完成求解" in store.read_report("2026-04-29_130000")["empty_reason"]

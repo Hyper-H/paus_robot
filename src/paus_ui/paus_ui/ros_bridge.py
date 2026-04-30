@@ -172,6 +172,19 @@ class UiRosBridge(Node):
             last_status_age_s = (time.monotonic() - self._last_status_time_s) if self._last_status_time_s else None
         camera_age_s = (time.monotonic() - latest_image.received_time_s) if latest_image else None
         shaped_status = self._shape_status_payload(last_status)
+        current_waypoint = dict(shaped_status["current_waypoint"])
+        quality = self.get_latest_quality()
+        current_waypoint.update(
+            {
+                "camera_to_board_translation_m": quality.get("camera_to_board_translation_m"),
+                "camera_to_board_rotation_rpy_deg": quality.get("camera_to_board_rotation_rpy_deg"),
+                "board_angle_deg": quality.get("board_angle_deg"),
+                "quality_detected": quality.get("detected"),
+                "quality_reason_code": quality.get("reason_code"),
+                "empty_reason": None if quality.get("detected") else quality.get("operator_message"),
+                "image_sequence": quality.get("image_sequence"),
+            }
+        )
         latest_session = self.session_store.latest_valid_session_id()
         return {
             "ui": {
@@ -200,7 +213,7 @@ class UiRosBridge(Node):
                 "last_command_result": self._last_command_result,
                 "run_active": bool(self._run_thread and self._run_thread.is_alive()),
                 "workflow": shaped_status["workflow"],
-                "current_waypoint": shaped_status["current_waypoint"],
+                "current_waypoint": current_waypoint,
                 "session": shaped_status["session"] | {"latest_valid_session_id": latest_session},
                 "motion": self._motion_summary(),
                 "stop": self._stop_status(),
@@ -427,9 +440,13 @@ class UiRosBridge(Node):
             "waypoint_waiting_stable": ("wait_stable", "等待机械臂稳定"),
             "waypoint_reached": ("reached", "已到达采样点"),
             "waypoint_capture_started": ("capture", "正在采集图像"),
+            "waypoint_detection_started": ("detect", "正在检测棋盘"),
+            "waypoint_chessboard_detected": ("detect", "棋盘已检测到"),
+            "waypoint_pose_estimated": ("detect", "棋盘位姿已估计"),
             "waypoint_capture_skipped": ("skipped", "该点已跳过"),
             "waypoint_sample_captured": ("accepted", "样本已接受"),
             "semi_auto_insufficient_samples": ("error", "有效样本不足"),
+            "solving": ("solve", "正在求解手眼标定"),
             "solved": ("solve", "标定已求解"),
             "semi_auto_finished": ("finished", "半自动标定完成"),
             "semi_auto_finished_with_skips": ("finished", "半自动标定完成，存在跳过点"),
