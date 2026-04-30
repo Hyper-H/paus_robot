@@ -9,6 +9,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 UI_PACKAGE_ROOT = PROJECT_ROOT / "src" / "paus_ui"
@@ -373,6 +374,42 @@ def test_archived_sample_overlay_uses_saved_metadata_without_live_detector() -> 
         assert raw.startswith(b"\xff\xd8")
         assert overlay.startswith(b"\xff\xd8")
         assert overlay != raw
+
+
+def test_missing_archived_sample_image_raises_not_found() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        trajectory_path = root / "trajectory.yaml"
+        trajectory_path.write_text("version: 1\nwaypoints: []\n", encoding="utf-8")
+        session_root = root / "sessions"
+        session_path = session_root / "2026-04-29_120000"
+        session_path.mkdir(parents=True)
+        with (session_path / "samples.jsonl").open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"sample_index": 1}) + "\n")
+        bridge = UiRosBridge.__new__(UiRosBridge)
+        bridge.trajectory_path = trajectory_path
+        bridge.session_root_path = session_root
+        bridge.max_reprojection_error_px = 0.0
+        bridge.min_board_margin_px = 10.0
+        bridge.execute_motion = False
+        bridge.effective_trajectory_path = bridge.trajectory_path
+        bridge.effective_session_root_path = bridge.session_root_path
+        bridge.effective_max_reprojection_error_px = bridge.max_reprojection_error_px
+        bridge.effective_min_board_margin_px = bridge.min_board_margin_px
+        bridge.effective_execute_motion = bridge.execute_motion
+        bridge._service_clients = {"run": _ServiceClient(False)}
+        bridge._last_status_lock = threading.Lock()
+        bridge._last_status = None
+        bridge._last_status_time_s = None
+        bridge.session_store = SessionStore(
+            session_root_path=session_root,
+            trajectory_path=trajectory_path,
+            max_reprojection_error_px=bridge.max_reprojection_error_px,
+            min_board_margin_px=bridge.min_board_margin_px,
+        )
+
+        with pytest.raises(FileNotFoundError):
+            UiRosBridge.get_sample_jpeg(bridge, session_id=session_path.name, row_index=1, mode="overlay")
 
 
 def test_workflow_maps_backend_dry_run_waypoint_status() -> None:

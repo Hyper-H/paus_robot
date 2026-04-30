@@ -395,14 +395,14 @@ class UiRosBridge(Node):
         self._sync_backend_state()
         sample = self.session_store.sample_for_row(session_id, row_index)
         if sample is None:
-            return encode_jpeg(make_placeholder_image("Sample image not found"))
+            raise FileNotFoundError(f"Sample row {row_index} was not found in session {session_id}.")
         image_path_value = sample.get("image_path")
         image_path = Path(str(image_path_value)) if image_path_value else None
         if image_path is None or not image_path.exists():
-            return encode_jpeg(make_placeholder_image("Sample image not found"))
+            raise FileNotFoundError(f"Sample image is not available for row {row_index} in session {session_id}.")
         image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
         if image_bgr is None:
-            return encode_jpeg(make_placeholder_image("Failed to read sample image"))
+            raise ValueError(f"Failed to read sample image: {image_path}")
         if mode == "raw":
             return encode_jpeg(image_bgr)
         rendered = self._render_archived_sample_overlay(image_bgr, sample, mode=mode, row_index=row_index, show_axes=show_axes)

@@ -1,6 +1,6 @@
 """PAUS Robot perception core public exports."""
 
-from .config import load_config, resolve_config_path
+from .config import load_config, resolve_config_artifact_path, resolve_config_path, resolve_runtime_data_path
 from .calibration import CameraCalibration, CalibrationResult, calibrate_camera_from_directory, load_camera_calibration, save_camera_calibration
 from .detection import (
     MarkerDetection,
@@ -94,7 +94,9 @@ __all__ = [
     "read_runtime_calibration",
     "recv_frame_packet",
     "resolve_camera_index",
+    "resolve_config_artifact_path",
     "resolve_config_path",
+    "resolve_runtime_data_path",
     "render_visualization",
     "result_to_dict",
     "rotation_matrix_to_quaternion_xyzw",

@@ -44,7 +44,8 @@ from paus_perception import (
     rotation_matrix_to_rpy_deg,
     rpy_deg_to_rotation_matrix,
     save_eye_to_hand_solution,
-    resolve_config_path,
+    resolve_config_artifact_path,
+    resolve_runtime_data_path,
     solve_eye_to_hand_joint_absolute,
     solve_eye_to_hand_opencv_handeye,
     solve_ax_xb_hand_eye_park,
@@ -167,8 +168,8 @@ class EyeToHandCalibrationNode(Node):
         self.solver_method = self.get_parameter("solver_method").get_parameter_value().string_value.strip().lower()
         self.fresh_image_timeout_s = float(self.get_parameter("fresh_image_timeout_s").get_parameter_value().double_value)
         sample_log_path_value = self.get_parameter("sample_log_path").get_parameter_value().string_value.strip()
-        self.trajectory_path = Path(resolve_config_path(self.get_parameter("trajectory_path").get_parameter_value().string_value, self.config_path))
-        self.session_root_path = Path(resolve_config_path(self.get_parameter("session_root_path").get_parameter_value().string_value, self.config_path))
+        self.trajectory_path = Path(resolve_config_artifact_path(self.get_parameter("trajectory_path").get_parameter_value().string_value, self.config_path))
+        self.session_root_path = Path(resolve_runtime_data_path(self.get_parameter("session_root_path").get_parameter_value().string_value, self.config_path))
         self.save_sample_images = bool(self.get_parameter("save_sample_images").get_parameter_value().bool_value)
         self.max_reprojection_error_px = float(self.get_parameter("max_reprojection_error_px").get_parameter_value().double_value)
         self.min_board_margin_px = float(self.get_parameter("min_board_margin_px").get_parameter_value().double_value)
@@ -180,7 +181,7 @@ class EyeToHandCalibrationNode(Node):
         self.tool_to_board_translation = [float(value) for value in self.get_parameter("tool_to_board.translation_m").get_parameter_value().double_array_value]
         self.tool_to_board_rotation_rpy = [float(value) for value in self.get_parameter("tool_to_board.rotation_rpy_deg").get_parameter_value().double_array_value]
         self.min_sample_count = int(self.get_parameter("min_sample_count").get_parameter_value().integer_value)
-        self.output_path = Path(resolve_config_path(self.get_parameter("output_path").get_parameter_value().string_value, self.config_path))
+        self.output_path = Path(resolve_config_artifact_path(self.get_parameter("output_path").get_parameter_value().string_value, self.config_path))
         self.robot_ip = self.get_parameter("robot_ip").get_parameter_value().string_value
         self.linux_fairino_sdk_root = self.get_parameter("linux_fairino_sdk_root").get_parameter_value().string_value
         self.tool_id = int(self.get_parameter("tool_id").get_parameter_value().integer_value)
@@ -189,7 +190,7 @@ class EyeToHandCalibrationNode(Node):
         self.move_acc = float(self.get_parameter("move_acc").get_parameter_value().double_value)
         self.execute_motion = bool(self.get_parameter("execute_motion").get_parameter_value().bool_value)
         self.session_dir: Path | None = None
-        self.sample_log_path_override = Path(resolve_config_path(sample_log_path_value, self.config_path)) if sample_log_path_value else None
+        self.sample_log_path_override = Path(resolve_runtime_data_path(sample_log_path_value, self.config_path)) if sample_log_path_value else None
         self.sample_log_path: Path | None = None
         self.report_path: Path | None = None
         self.run_log_path: Path | None = None

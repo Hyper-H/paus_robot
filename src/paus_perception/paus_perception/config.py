@@ -199,6 +199,10 @@ def _resolve_config_artifact_path(path_value: str | Path, config_path: str | Pat
     return resolve_config_path(path, config_path)
 
 
+def resolve_config_artifact_path(path_value: str | Path, config_path: str | Path) -> str:
+    return _resolve_config_artifact_path(path_value, config_path)
+
+
 def _resolve_runtime_data_path(path_value: str | Path, config_path: str | Path) -> str:
     path_text = os.path.expandvars(str(path_value)).strip()
     path = Path(path_text).expanduser()
@@ -208,6 +212,10 @@ def _resolve_runtime_data_path(path_value: str | Path, config_path: str | Path) 
     if "install" in resolved_config_path.parts:
         return str((_runtime_root() / path).resolve())
     return resolve_config_path(path, config_path)
+
+
+def resolve_runtime_data_path(path_value: str | Path, config_path: str | Path) -> str:
+    return _resolve_runtime_data_path(path_value, config_path)
 
 
 def _resolve_project_paths(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
