@@ -29,6 +29,15 @@ def _resolve_default_config_path(bringup_share: Path) -> Path:
     return source_config if source_config.exists() else bringup_share / "configs" / "default.yaml"
 
 
+def _as_bool(value: str) -> bool:
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _arg_or_config(raw_value: str, config_value) -> str:
+    stripped = raw_value.strip()
+    return str(config_value).lower() if stripped == "" and isinstance(config_value, bool) else (str(config_value) if stripped == "" else raw_value)
+
+
 # 真正组装标定链启动动作。
 def _launch_setup(context, *args, **kwargs):
     # 当前函数不使用额外参数，显式丢弃即可。
@@ -44,32 +53,38 @@ def _launch_setup(context, *args, **kwargs):
 
     # 读取 launch 参数。
     config_path = LaunchConfiguration("config_path").perform(context)
+    config_payload = load_config(config_path)
+    calibration_cfg = config_payload.get("calibration", {})
+    control_cfg = config_payload.get("control", {})
+    tool_to_board_cfg = calibration_cfg.get("tool_to_board", {}) if isinstance(calibration_cfg.get("tool_to_board", {}), dict) else {}
+    default_tool_to_board_translation = tool_to_board_cfg.get("translation_m", [0.0, 0.0, 0.0])
+    default_tool_to_board_rotation = tool_to_board_cfg.get("rotation_rpy_deg", [0.0, 0.0, 0.0])
     camera_config_output = LaunchConfiguration("camera_config_output").perform(context)
     camera_ip = LaunchConfiguration("camera_ip").perform(context).strip()
     camera_index = LaunchConfiguration("camera_index").perform(context).strip()
-    board_rows = int(LaunchConfiguration("board_rows").perform(context))
-    board_cols = int(LaunchConfiguration("board_cols").perform(context))
-    square_size_m = float(LaunchConfiguration("square_size_m").perform(context))
-    solver_method = LaunchConfiguration("solver_method").perform(context).strip()
-    min_sample_count = int(LaunchConfiguration("min_sample_count").perform(context))
-    output_path = LaunchConfiguration("output_path").perform(context)
-    trajectory_path = LaunchConfiguration("trajectory_path").perform(context)
-    session_root_path = LaunchConfiguration("session_root_path").perform(context)
-    save_sample_images = LaunchConfiguration("save_sample_images").perform(context).strip().lower() in ("1", "true", "yes", "on")
-    max_reprojection_error_px = float(LaunchConfiguration("max_reprojection_error_px").perform(context))
-    min_board_margin_px = float(LaunchConfiguration("min_board_margin_px").perform(context))
-    stable_position_tolerance_mm = float(LaunchConfiguration("stable_position_tolerance_mm").perform(context))
-    stable_rotation_tolerance_deg = float(LaunchConfiguration("stable_rotation_tolerance_deg").perform(context))
-    stable_window_s = float(LaunchConfiguration("stable_window_s").perform(context))
-    stable_timeout_s = float(LaunchConfiguration("stable_timeout_s").perform(context))
-    dwell_s = float(LaunchConfiguration("dwell_s").perform(context))
-    execute_motion = LaunchConfiguration("execute_motion").perform(context).strip().lower() in ("1", "true", "yes", "on")
-    tool_to_board_tx = float(LaunchConfiguration("tool_to_board_tx").perform(context))
-    tool_to_board_ty = float(LaunchConfiguration("tool_to_board_ty").perform(context))
-    tool_to_board_tz = float(LaunchConfiguration("tool_to_board_tz").perform(context))
-    tool_to_board_rx = float(LaunchConfiguration("tool_to_board_rx").perform(context))
-    tool_to_board_ry = float(LaunchConfiguration("tool_to_board_ry").perform(context))
-    tool_to_board_rz = float(LaunchConfiguration("tool_to_board_rz").perform(context))
+    board_rows = int(_arg_or_config(LaunchConfiguration("board_rows").perform(context), calibration_cfg.get("board_rows", 6)))
+    board_cols = int(_arg_or_config(LaunchConfiguration("board_cols").perform(context), calibration_cfg.get("board_cols", 9)))
+    square_size_m = float(_arg_or_config(LaunchConfiguration("square_size_m").perform(context), calibration_cfg.get("square_size_m", 0.01)))
+    solver_method = _arg_or_config(LaunchConfiguration("solver_method").perform(context), calibration_cfg.get("solver_method", "joint_absolute")).strip()
+    min_sample_count = int(_arg_or_config(LaunchConfiguration("min_sample_count").perform(context), calibration_cfg.get("min_sample_count", 10)))
+    output_path = _arg_or_config(LaunchConfiguration("output_path").perform(context), calibration_cfg.get("output_path", "extrinsics.yaml"))
+    trajectory_path = _arg_or_config(LaunchConfiguration("trajectory_path").perform(context), calibration_cfg.get("trajectory_path", "eye_to_hand_trajectory.yaml"))
+    session_root_path = _arg_or_config(LaunchConfiguration("session_root_path").perform(context), calibration_cfg.get("session_root_path", "calibration_sessions"))
+    save_sample_images = _as_bool(_arg_or_config(LaunchConfiguration("save_sample_images").perform(context), calibration_cfg.get("save_sample_images", True)))
+    max_reprojection_error_px = float(_arg_or_config(LaunchConfiguration("max_reprojection_error_px").perform(context), calibration_cfg.get("max_reprojection_error_px", 0.0)))
+    min_board_margin_px = float(_arg_or_config(LaunchConfiguration("min_board_margin_px").perform(context), calibration_cfg.get("min_board_margin_px", 10.0)))
+    stable_position_tolerance_mm = float(_arg_or_config(LaunchConfiguration("stable_position_tolerance_mm").perform(context), calibration_cfg.get("stable_position_tolerance_mm", 0.2)))
+    stable_rotation_tolerance_deg = float(_arg_or_config(LaunchConfiguration("stable_rotation_tolerance_deg").perform(context), calibration_cfg.get("stable_rotation_tolerance_deg", 0.1)))
+    stable_window_s = float(_arg_or_config(LaunchConfiguration("stable_window_s").perform(context), calibration_cfg.get("stable_window_s", 0.5)))
+    stable_timeout_s = float(_arg_or_config(LaunchConfiguration("stable_timeout_s").perform(context), calibration_cfg.get("stable_timeout_s", 10.0)))
+    dwell_s = float(_arg_or_config(LaunchConfiguration("dwell_s").perform(context), calibration_cfg.get("dwell_s", 0.5)))
+    execute_motion = _as_bool(_arg_or_config(LaunchConfiguration("execute_motion").perform(context), control_cfg.get("execute_motion", False)))
+    tool_to_board_tx = float(_arg_or_config(LaunchConfiguration("tool_to_board_tx").perform(context), default_tool_to_board_translation[0]))
+    tool_to_board_ty = float(_arg_or_config(LaunchConfiguration("tool_to_board_ty").perform(context), default_tool_to_board_translation[1]))
+    tool_to_board_tz = float(_arg_or_config(LaunchConfiguration("tool_to_board_tz").perform(context), default_tool_to_board_translation[2]))
+    tool_to_board_rx = float(_arg_or_config(LaunchConfiguration("tool_to_board_rx").perform(context), default_tool_to_board_rotation[0]))
+    tool_to_board_ry = float(_arg_or_config(LaunchConfiguration("tool_to_board_ry").perform(context), default_tool_to_board_rotation[1]))
+    tool_to_board_rz = float(_arg_or_config(LaunchConfiguration("tool_to_board_rz").perform(context), default_tool_to_board_rotation[2]))
 
     # 拼出相机桥接脚本的命令行。
     camera_bridge_cmd = [
@@ -149,28 +164,6 @@ def generate_launch_description() -> LaunchDescription:
     bringup_share = Path(get_package_share_directory("paus_bringup"))
     default_config_file = _resolve_default_config_path(bringup_share)
     default_config_path = str(default_config_file)
-    config_payload = load_config(default_config_file)
-    calibration_cfg = config_payload.get("calibration", {})
-    tool_to_board_cfg = calibration_cfg.get("tool_to_board", {})
-    default_extrinsics_path = str(calibration_cfg.get("output_path", bringup_share / "configs" / "extrinsics.yaml"))
-    default_board_rows = str(calibration_cfg.get("board_rows", 6))
-    default_board_cols = str(calibration_cfg.get("board_cols", 9))
-    default_square_size_m = str(calibration_cfg.get("square_size_m", 0.01))
-    default_solver_method = str(calibration_cfg.get("solver_method", "joint_absolute"))
-    default_min_sample_count = str(calibration_cfg.get("min_sample_count", 10))
-    default_trajectory_path = str(calibration_cfg.get("trajectory_path", default_config_file.parent / "eye_to_hand_trajectory.yaml"))
-    default_session_root_path = str(calibration_cfg.get("session_root_path", "/home/chen_lab/paus_robot/calibration_sessions"))
-    default_save_sample_images = str(calibration_cfg.get("save_sample_images", True)).lower()
-    default_max_reprojection_error_px = str(calibration_cfg.get("max_reprojection_error_px", 0.0))
-    default_min_board_margin_px = str(calibration_cfg.get("min_board_margin_px", 10.0))
-    default_stable_position_tolerance_mm = str(calibration_cfg.get("stable_position_tolerance_mm", 0.2))
-    default_stable_rotation_tolerance_deg = str(calibration_cfg.get("stable_rotation_tolerance_deg", 0.1))
-    default_stable_window_s = str(calibration_cfg.get("stable_window_s", 0.5))
-    default_stable_timeout_s = str(calibration_cfg.get("stable_timeout_s", 10.0))
-    default_dwell_s = str(calibration_cfg.get("dwell_s", 0.5))
-    default_execute_motion = str(config_payload.get("control", {}).get("execute_motion", False)).lower()
-    default_tool_to_board_translation = tool_to_board_cfg.get("translation_m", [0.0, 0.0, 0.0])
-    default_tool_to_board_rotation = tool_to_board_cfg.get("rotation_rpy_deg", [0.0, 0.0, 0.0])
 
     return LaunchDescription(
         [
@@ -196,51 +189,51 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "board_rows",
-                default_value=default_board_rows,
+                default_value="",
                 description="Chessboard inner-corner rows.",
             ),
             DeclareLaunchArgument(
                 "board_cols",
-                default_value=default_board_cols,
+                default_value="",
                 description="Chessboard inner-corner cols.",
             ),
             DeclareLaunchArgument(
                 "square_size_m",
-                default_value=default_square_size_m,
+                default_value="",
                 description="Chessboard square size in meters.",
             ),
             DeclareLaunchArgument(
                 "solver_method",
-                default_value=default_solver_method,
+                default_value="",
                 description="Hand-eye calibration solver method. joint_absolute jointly estimates base_to_camera and tool_to_board.",
             ),
             DeclareLaunchArgument(
                 "min_sample_count",
-                default_value=default_min_sample_count,
+                default_value="",
                 description="Minimum number of samples before solve.",
             ),
             DeclareLaunchArgument(
                 "output_path",
-                default_value=default_extrinsics_path,
+                default_value="",
                 description="Output path for the solved extrinsics YAML.",
             ),
-            DeclareLaunchArgument("trajectory_path", default_value=default_trajectory_path, description="Semi-auto MoveJ trajectory YAML path."),
-            DeclareLaunchArgument("session_root_path", default_value=default_session_root_path, description="Directory where calibration sessions are archived."),
-            DeclareLaunchArgument("save_sample_images", default_value=default_save_sample_images, description="Whether to save accepted sample images in the session directory."),
-            DeclareLaunchArgument("max_reprojection_error_px", default_value=default_max_reprojection_error_px, description="Maximum accepted chessboard reprojection error in pixels. Set <= 0 to disable this filter."),
-            DeclareLaunchArgument("min_board_margin_px", default_value=default_min_board_margin_px, description="Minimum chessboard corner margin from image border in pixels."),
-            DeclareLaunchArgument("stable_position_tolerance_mm", default_value=default_stable_position_tolerance_mm, description="TCP position delta threshold for stable sampling."),
-            DeclareLaunchArgument("stable_rotation_tolerance_deg", default_value=default_stable_rotation_tolerance_deg, description="TCP rotation delta threshold for stable sampling."),
-            DeclareLaunchArgument("stable_window_s", default_value=default_stable_window_s, description="Required stable TCP window before capture."),
-            DeclareLaunchArgument("stable_timeout_s", default_value=default_stable_timeout_s, description="Timeout for TCP stability wait."),
-            DeclareLaunchArgument("dwell_s", default_value=default_dwell_s, description="Default dwell time after each waypoint stabilizes."),
-            DeclareLaunchArgument("execute_motion", default_value=default_execute_motion, description="When false, semi-auto trajectory execution only dry-runs."),
-            DeclareLaunchArgument("tool_to_board_tx", default_value=str(default_tool_to_board_translation[0]), description="Tool-to-board X translation in meters."),
-            DeclareLaunchArgument("tool_to_board_ty", default_value=str(default_tool_to_board_translation[1]), description="Tool-to-board Y translation in meters."),
-            DeclareLaunchArgument("tool_to_board_tz", default_value=str(default_tool_to_board_translation[2]), description="Tool-to-board Z translation in meters."),
-            DeclareLaunchArgument("tool_to_board_rx", default_value=str(default_tool_to_board_rotation[0]), description="Tool-to-board roll in degrees."),
-            DeclareLaunchArgument("tool_to_board_ry", default_value=str(default_tool_to_board_rotation[1]), description="Tool-to-board pitch in degrees."),
-            DeclareLaunchArgument("tool_to_board_rz", default_value=str(default_tool_to_board_rotation[2]), description="Tool-to-board yaw in degrees."),
+            DeclareLaunchArgument("trajectory_path", default_value="", description="Semi-auto MoveJ trajectory YAML path."),
+            DeclareLaunchArgument("session_root_path", default_value="", description="Directory where calibration sessions are archived."),
+            DeclareLaunchArgument("save_sample_images", default_value="", description="Whether to save accepted sample images in the session directory."),
+            DeclareLaunchArgument("max_reprojection_error_px", default_value="", description="Maximum accepted chessboard reprojection error in pixels. Set <= 0 to disable this filter."),
+            DeclareLaunchArgument("min_board_margin_px", default_value="", description="Minimum chessboard corner margin from image border in pixels."),
+            DeclareLaunchArgument("stable_position_tolerance_mm", default_value="", description="TCP position delta threshold for stable sampling."),
+            DeclareLaunchArgument("stable_rotation_tolerance_deg", default_value="", description="TCP rotation delta threshold for stable sampling."),
+            DeclareLaunchArgument("stable_window_s", default_value="", description="Required stable TCP window before capture."),
+            DeclareLaunchArgument("stable_timeout_s", default_value="", description="Timeout for TCP stability wait."),
+            DeclareLaunchArgument("dwell_s", default_value="", description="Default dwell time after each waypoint stabilizes."),
+            DeclareLaunchArgument("execute_motion", default_value="", description="When false, semi-auto trajectory execution only dry-runs."),
+            DeclareLaunchArgument("tool_to_board_tx", default_value="", description="Tool-to-board X translation in meters."),
+            DeclareLaunchArgument("tool_to_board_ty", default_value="", description="Tool-to-board Y translation in meters."),
+            DeclareLaunchArgument("tool_to_board_tz", default_value="", description="Tool-to-board Z translation in meters."),
+            DeclareLaunchArgument("tool_to_board_rx", default_value="", description="Tool-to-board roll in degrees."),
+            DeclareLaunchArgument("tool_to_board_ry", default_value="", description="Tool-to-board pitch in degrees."),
+            DeclareLaunchArgument("tool_to_board_rz", default_value="", description="Tool-to-board yaw in degrees."),
             OpaqueFunction(function=_launch_setup),
         ]
     )

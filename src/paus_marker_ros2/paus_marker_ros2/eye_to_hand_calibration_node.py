@@ -330,6 +330,16 @@ class EyeToHandCalibrationNode(Node):
             self.sample_log_path = self.sample_log_path_override or self.session_dir / "samples.jsonl"
             self.report_path = self.session_dir / "report.yaml"
             self.run_log_path = self.session_dir / "run.log"
+            self.samples.clear()
+            self.current_solution = None
+
+    def _clear_manual_session_after_save(self) -> None:
+        self.session_dir = None
+        self.sample_log_path = None
+        self.report_path = None
+        self.run_log_path = None
+        self.samples.clear()
+        self.current_solution = None
 
     def _write_recorded_trajectory(self) -> None:
         save_trajectory(self.recorded_trajectory, self.trajectory_path)
@@ -780,11 +790,13 @@ class EyeToHandCalibrationNode(Node):
             self._save_current_solution()
             response.success = True
             response.message = f"Saved extrinsic to {self.output_path}."
+            saved_session_dir = str(self.session_dir) if self.session_dir is not None else None
             self._publish_status(
                 "saved",
                 response.message,
-                {"output_path": str(self.output_path), "session_dir": str(self.session_dir) if self.session_dir is not None else None},
+                {"output_path": str(self.output_path), "session_dir": saved_session_dir},
             )
+            self._clear_manual_session_after_save()
         except Exception as exc:
             response.success = False
             response.message = repr(exc)
