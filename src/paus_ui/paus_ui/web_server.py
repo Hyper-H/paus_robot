@@ -44,7 +44,7 @@ def create_app(bridge: UiRosBridge):
 
     @app.get("/api/handeye/waypoints")
     async def waypoints() -> dict[str, Any]:
-        return await asyncio.to_thread(bridge.session_store.read_waypoints)
+        return await asyncio.to_thread(bridge.get_waypoints)
 
     @app.post("/api/handeye/record_waypoint")
     async def record_waypoint() -> dict[str, Any]:
@@ -65,30 +65,30 @@ def create_app(bridge: UiRosBridge):
 
     @app.get("/api/sessions")
     async def sessions() -> list[dict[str, Any]]:
-        return await asyncio.to_thread(bridge.session_store.list_sessions)
+        return await asyncio.to_thread(bridge.list_sessions)
 
     @app.get("/api/sessions/latest")
     async def latest_session() -> dict[str, Any]:
-        return {"session_id": bridge.session_store.latest_valid_session_id()}
+        return await asyncio.to_thread(bridge.latest_session)
 
     @app.get("/api/sessions/{session_id}/report")
     async def session_report(session_id: str) -> dict[str, Any]:
         try:
-            return await asyncio.to_thread(bridge.session_store.read_report, session_id)
+            return await asyncio.to_thread(bridge.read_session_report, session_id)
         except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/api/sessions/{session_id}/samples")
     async def session_samples(session_id: str) -> list[dict[str, Any]]:
         try:
-            return await asyncio.to_thread(bridge.session_store.read_samples, session_id)
+            return await asyncio.to_thread(bridge.read_session_samples, session_id)
         except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/api/sessions/{session_id}/waypoints")
     async def session_waypoints(session_id: str) -> list[dict[str, Any]]:
         try:
-            return await asyncio.to_thread(bridge.session_store.read_session_waypoints, session_id)
+            return await asyncio.to_thread(bridge.read_session_waypoints, session_id)
         except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

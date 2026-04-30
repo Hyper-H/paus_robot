@@ -14,6 +14,7 @@ from cv_bridge import CvBridge
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
@@ -23,6 +24,9 @@ from paus_perception import load_camera_calibration, load_config, resolve_config
 from .operator_messages import classify_operator_message
 from .overlay import BoardOverlayDetector, encode_jpeg, make_placeholder_image
 from .session_store import SessionStore
+
+
+STATUS_QOS = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 
 @dataclass
@@ -93,14 +97,19 @@ class UiRosBridge(Node):
         self.max_reprojection_error_px = float(self.get_parameter("max_reprojection_error_px").get_parameter_value().double_value)
         self.min_board_margin_px = float(self.get_parameter("min_board_margin_px").get_parameter_value().double_value)
         self.execute_motion = bool(self.get_parameter("execute_motion").get_parameter_value().bool_value)
+        self.effective_trajectory_path = self.trajectory_path
+        self.effective_session_root_path = self.session_root_path
+        self.effective_max_reprojection_error_px = self.max_reprojection_error_px
+        self.effective_min_board_margin_px = self.min_board_margin_px
+        self.effective_execute_motion = self.execute_motion
 
         self.bridge = CvBridge()
         self.events = EventBuffer()
         self.session_store = SessionStore(
-            session_root_path=self.session_root_path,
-            trajectory_path=self.trajectory_path,
-            max_reprojection_error_px=self.max_reprojection_error_px,
-            min_board_margin_px=self.min_board_margin_px,
+            session_root_path=self.effective_session_root_path,
+            trajectory_path=self.effective_trajectory_path,
+            max_reprojection_error_px=self.effective_max_reprojection_error_px,
+            min_board_margin_px=self.effective_min_board_margin_px,
         )
 
         self._image_lock = threading.Lock()
@@ -116,7 +125,7 @@ class UiRosBridge(Node):
         self._last_command_result: dict[str, Any] | None = None
 
         self.create_subscription(Image, self.image_topic, self._image_callback, 10)
-        self.create_subscription(String, self.status_topic, self._status_callback, 10)
+        self.create_subscription(String, self.status_topic, self._status_callback, STATUS_QOS)
         self._service_clients = {
             "record_waypoint": self.create_client(Trigger, "/eye_to_hand/record_waypoint"),
             "delete_last_waypoint": self.create_client(Trigger, "/eye_to_hand/delete_last_waypoint"),
@@ -164,6 +173,44 @@ class UiRosBridge(Node):
             }
         )
 
+    def _sync_backend_state(self, last_status: dict[str, Any] | None = None, last_status_age_s: float | None = None) -> dict[str, Any]:
+        if last_status is None and last_status_age_s is None:
+            with self._last_status_lock:
+                last_status = dict(self._last_status) if self._last_status else None
+                last_status_age_s = (time.monotonic() - self._last_status_time_s) if self._last_status_time_s else None
+        backend_connected = last_status is not None and last_status_age_s is not None and last_status_age_s < 10.0
+        payload = last_status if backend_connected else {}
+        trajectory_path = Path(str(payload.get("trajectory_path") or self.trajectory_path))
+        session_root_path = Path(str(payload.get("session_root_path") or self.session_root_path))
+        max_reprojection_error_px = _to_float(payload.get("max_reprojection_error_px"))
+        min_board_margin_px = _to_float(payload.get("min_board_margin_px"))
+        self.effective_trajectory_path = trajectory_path
+        self.effective_session_root_path = session_root_path
+        self.effective_max_reprojection_error_px = self.max_reprojection_error_px if max_reprojection_error_px is None else max_reprojection_error_px
+        self.effective_min_board_margin_px = self.min_board_margin_px if min_board_margin_px is None else min_board_margin_px
+        self.effective_execute_motion = _to_bool(payload.get("execute_motion"), self.execute_motion)
+        if (
+            self.session_store.trajectory_path != self.effective_trajectory_path
+            or self.session_store.session_root_path != self.effective_session_root_path
+            or self.session_store.max_reprojection_error_px != self.effective_max_reprojection_error_px
+            or self.session_store.min_board_margin_px != self.effective_min_board_margin_px
+        ):
+            self.session_store = SessionStore(
+                session_root_path=self.effective_session_root_path,
+                trajectory_path=self.effective_trajectory_path,
+                max_reprojection_error_px=self.effective_max_reprojection_error_px,
+                min_board_margin_px=self.effective_min_board_margin_px,
+            )
+        return {
+            "backend_connected": backend_connected,
+            "execute_motion": self.effective_execute_motion,
+            "trajectory_path": self.effective_trajectory_path,
+            "session_root_path": self.effective_session_root_path,
+            "max_reprojection_error_px": self.effective_max_reprojection_error_px,
+            "min_board_margin_px": self.effective_min_board_margin_px,
+            "config_source": "backend_status" if backend_connected else "ui_local_fallback",
+        }
+
     def get_status(self) -> dict[str, Any]:
         with self._image_lock:
             latest_image = self._latest_image
@@ -172,6 +219,7 @@ class UiRosBridge(Node):
             last_status_age_s = (time.monotonic() - self._last_status_time_s) if self._last_status_time_s else None
         camera_age_s = (time.monotonic() - latest_image.received_time_s) if latest_image else None
         shaped_status = self._shape_status_payload(last_status)
+        backend_state = self._sync_backend_state(last_status, last_status_age_s)
         current_waypoint = dict(shaped_status["current_waypoint"])
         quality = self.get_latest_quality()
         current_waypoint.update(
@@ -204,12 +252,14 @@ class UiRosBridge(Node):
                 "status_topic": self.status_topic,
                 "last_status": last_status,
                 "last_status_age_s": last_status_age_s,
-                "calibration_node_connected": last_status_age_s is not None and last_status_age_s < 10.0,
-                "execute_motion": self.execute_motion,
-                "trajectory_path": str(self.trajectory_path),
-                "session_root_path": str(self.session_root_path),
-                "max_reprojection_error_px": self.max_reprojection_error_px,
-                "min_board_margin_px": self.min_board_margin_px,
+                "calibration_node_connected": backend_state["backend_connected"],
+                "execute_motion": backend_state["execute_motion"],
+                "requires_motion_confirmation": backend_state["execute_motion"] or not backend_state["backend_connected"],
+                "backend_config_source": backend_state["config_source"],
+                "trajectory_path": str(backend_state["trajectory_path"]),
+                "session_root_path": str(backend_state["session_root_path"]),
+                "max_reprojection_error_px": backend_state["max_reprojection_error_px"],
+                "min_board_margin_px": backend_state["min_board_margin_px"],
                 "last_command_result": self._last_command_result,
                 "run_active": bool(self._run_thread and self._run_thread.is_alive()),
                 "workflow": shaped_status["workflow"],
@@ -277,6 +327,7 @@ class UiRosBridge(Node):
         return encode_jpeg(rendered)
 
     def get_sample_jpeg(self, *, session_id: str, row_index: int, mode: str = "overlay", show_axes: bool = True) -> bytes:
+        self._sync_backend_state()
         image_path = self.session_store.sample_image_path(session_id, row_index)
         if image_path is None:
             return encode_jpeg(make_placeholder_image("Sample image not found"))
@@ -297,13 +348,39 @@ class UiRosBridge(Node):
     def delete_last_waypoint(self) -> dict[str, Any]:
         return self._call_trigger("delete_last_waypoint", timeout_s=5.0)
 
+    def get_waypoints(self) -> dict[str, Any]:
+        self._sync_backend_state()
+        return self.session_store.read_waypoints()
+
+    def list_sessions(self) -> list[dict[str, Any]]:
+        self._sync_backend_state()
+        return self.session_store.list_sessions()
+
+    def latest_session(self) -> dict[str, Any]:
+        self._sync_backend_state()
+        return {"session_id": self.session_store.latest_valid_session_id()}
+
+    def read_session_report(self, session_id: str) -> dict[str, Any]:
+        self._sync_backend_state()
+        return self.session_store.read_report(session_id)
+
+    def read_session_samples(self, session_id: str) -> list[dict[str, Any]]:
+        self._sync_backend_state()
+        return self.session_store.read_samples(session_id)
+
+    def read_session_waypoints(self, session_id: str) -> list[dict[str, Any]]:
+        self._sync_backend_state()
+        return self.session_store.read_session_waypoints(session_id)
+
     def start_semi_auto_run(self, *, confirmed: bool = False) -> dict[str, Any]:
+        backend_state = self._sync_backend_state()
         confirmation = self._motion_summary()
-        if self.execute_motion and not confirmed:
+        requires_confirmation = bool(backend_state["execute_motion"]) or not bool(backend_state["backend_connected"])
+        if requires_confirmation and not confirmed:
             result = self._shape_command_result(
                 "run_semi_auto",
                 False,
-                "execute_motion=true requires UI confirmation before starting.",
+                "Calibration node motion state requires UI confirmation before starting.",
                 extra={"requires_confirmation": True, "confirmation": confirmation},
             )
             self._last_command_result = result
@@ -482,13 +559,13 @@ class UiRosBridge(Node):
         defaults = trajectory.get("defaults", {}) if isinstance(trajectory.get("defaults"), dict) else {}
         motions = {str(item.get("motion", defaults.get("motion", "movej"))).lower() for item in waypoints if isinstance(item, dict)}
         return {
-            "execute_motion": self.execute_motion,
+            "execute_motion": self.effective_execute_motion,
             "waypoint_count": len(waypoints),
             "motion": ",".join(sorted(motions)) if motions else str(defaults.get("motion", "movej")),
             "vel": defaults.get("vel"),
             "acc": defaults.get("acc"),
             "dwell_s": defaults.get("dwell_s"),
-            "trajectory_path": str(self.trajectory_path),
+            "trajectory_path": str(self.effective_trajectory_path),
             "trajectory_error": trajectory.get("error"),
         }
 
@@ -519,12 +596,12 @@ class UiRosBridge(Node):
     def _quality_flags(self, reprojection_error_px: Any, board_margin_px: Any) -> dict[str, Any]:
         reprojection = _to_float(reprojection_error_px)
         margin = _to_float(board_margin_px)
-        reprojection_limit_enabled = self.max_reprojection_error_px > 0.0
-        reprojection_ok = None if reprojection is None or not reprojection_limit_enabled else reprojection <= self.max_reprojection_error_px
-        margin_ok = None if margin is None else margin >= self.min_board_margin_px
+        reprojection_limit_enabled = self.effective_max_reprojection_error_px > 0.0
+        reprojection_ok = None if reprojection is None or not reprojection_limit_enabled else reprojection <= self.effective_max_reprojection_error_px
+        margin_ok = None if margin is None else margin >= self.effective_min_board_margin_px
         return {
-            "max_reprojection_error_px": self.max_reprojection_error_px,
-            "min_board_margin_px": self.min_board_margin_px,
+            "max_reprojection_error_px": self.effective_max_reprojection_error_px,
+            "min_board_margin_px": self.effective_min_board_margin_px,
             "reprojection_limit_enabled": reprojection_limit_enabled,
             "reprojection_ok": reprojection_ok,
             "margin_ok": margin_ok,
@@ -544,3 +621,17 @@ def _to_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _to_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return bool(default)

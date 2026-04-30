@@ -516,26 +516,28 @@ function bindUi() {
   document.getElementById("record-btn").addEventListener("click", () => runCommand("记录当前点", "/api/handeye/record_waypoint"));
   document.getElementById("delete-btn").addEventListener("click", () => runCommand("删除上一个", "/api/handeye/delete_last_waypoint"));
   document.getElementById("dry-run-btn").addEventListener("click", async () => {
-    if (state.status?.handeye?.execute_motion) {
-      setNotice("当前 launch 为 execute_motion=true；dry-run 请重新以 execute_motion:=false 启动。", "bad");
+    const handeye = state.status?.handeye || {};
+    if (handeye.execute_motion || handeye.backend_config_source !== "backend_status") {
+      setNotice("无法确认后端是 dry-run；请确认标定节点状态已连接且 execute_motion=false。", "bad");
       return;
     }
-    await runCommand("Dry-run", "/api/handeye/run", { confirmed: true });
+    await runCommand("Dry-run", "/api/handeye/run", { confirmed: false });
   });
   document.getElementById("run-btn").addEventListener("click", async () => {
     const handeye = state.status?.handeye || {};
     const motion = handeye.motion || {};
-    if (handeye.execute_motion) {
+    if (handeye.requires_motion_confirmation) {
       const message = [
-        "将真实驱动机械臂执行半自动手眼标定。",
+        handeye.execute_motion ? "将真实驱动机械臂执行半自动手眼标定。" : "暂未确认标定节点运动状态，继续前需要人工确认。",
         `waypoint 数量：${motion.waypoint_count ?? "--"}`,
         `运动模式：${motion.motion || "movej"}`,
         `速度/加速度：${motion.vel ?? "--"} / ${motion.acc ?? "--"}`,
+        `轨迹文件：${motion.trajectory_path || handeye.trajectory_path || "--"}`,
         "确认标定板、线缆和工作空间安全后继续。",
       ].join("\n");
       if (!window.confirm(message)) return;
     }
-    await runCommand("开始标定", "/api/handeye/run", { confirmed: Boolean(handeye.execute_motion) });
+    await runCommand("开始标定", "/api/handeye/run", { confirmed: Boolean(handeye.requires_motion_confirmation) });
   });
   document.getElementById("stop-btn").addEventListener("click", () => runCommand("停止", "/api/handeye/stop"));
   document.getElementById("refresh-btn").addEventListener("click", refreshAll);

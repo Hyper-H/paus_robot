@@ -24,6 +24,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 # 导入消息与服务类型。
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
@@ -57,6 +58,9 @@ from paus_marker_ros2.semi_auto_calibration import (
     load_trajectory,
     save_trajectory,
 )
+
+
+STATUS_QOS = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 
 def _wrapped_rotation_delta_norm_deg(current_rpy_deg: list[float], reference_rpy_deg: list[float]) -> float:
@@ -220,7 +224,7 @@ class EyeToHandCalibrationNode(Node):
 
         # 创建图像订阅器与状态发布器。
         self.image_subscription = self.create_subscription(Image, self.image_topic, self._image_callback, 10, callback_group=self.callback_group)
-        self.status_publisher = self.create_publisher(String, self.status_topic, 10)
+        self.status_publisher = self.create_publisher(String, self.status_topic, STATUS_QOS)
 
         # 创建“采样 / 求解 / 保存”三个服务接口。 service是按一下就执行一次的“请求-响应接口”是 node 提供的一次性请求-响应接口。
         self.capture_service = self.create_service(Trigger, "/eye_to_hand/capture_sample", self._capture_sample_callback, callback_group=self.callback_group)
@@ -275,6 +279,12 @@ class EyeToHandCalibrationNode(Node):
             "min_sample_count": self.min_sample_count,
             "solver_method": self.solver_method,
             "session_dir": str(self.session_dir),
+            "trajectory_path": str(self.trajectory_path),
+            "session_root_path": str(self.session_root_path),
+            "output_path": str(self.output_path),
+            "execute_motion": self.execute_motion,
+            "max_reprojection_error_px": self.max_reprojection_error_px,
+            "min_board_margin_px": self.min_board_margin_px,
         }
         if extra:
             payload.update(extra)

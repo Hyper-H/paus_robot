@@ -9,10 +9,14 @@ from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from paus_perception import load_config, resolve_config_path
+
+
+STATUS_QOS = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 
 def _resolve_default_config_path() -> Path:
@@ -68,7 +72,7 @@ def _call_trigger(node: Node, service_name: str, timeout_s: float, *, echo_statu
         raise RuntimeError(f"Service is not available: {service_name}")
     subscription = None
     if echo_status:
-        subscription = node.create_subscription(String, "/eye_to_hand/status", _print_status_message, 10)
+        subscription = node.create_subscription(String, "/eye_to_hand/status", _print_status_message, STATUS_QOS)
     future = client.call_async(Trigger.Request())
     deadline = time.monotonic() + timeout_s
     try:
@@ -88,6 +92,28 @@ def _call_trigger(node: Node, service_name: str, timeout_s: float, *, echo_statu
 def _print_response(response: Trigger.Response) -> None:
     status = "OK" if response.success else "FAIL"
     print(f"[{status}] {response.message}")
+
+
+def _wait_for_backend_status(node: Node, timeout_s: float) -> dict[str, object] | None:
+    latest: dict[str, object] | None = None
+
+    def _capture_status(message: String) -> None:
+        nonlocal latest
+        try:
+            payload = json.loads(message.data)
+        except json.JSONDecodeError:
+            return
+        if isinstance(payload, dict):
+            latest = payload
+
+    subscription = node.create_subscription(String, "/eye_to_hand/status", _capture_status, STATUS_QOS)
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    try:
+        while rclpy.ok() and latest is None and time.monotonic() < deadline:
+            rclpy.spin_once(node, timeout_sec=0.1)
+        return latest
+    finally:
+        node.destroy_subscription(subscription)
 
 
 def _interactive_record(node: Node, timeout_s: float) -> bool:
@@ -116,7 +142,7 @@ def _interactive_record(node: Node, timeout_s: float) -> bool:
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Interactive helper for semi-automatic eye-to-hand calibration.")
-    parser.add_argument("--trajectory-path", default="", help="Trajectory YAML path used by the calibration node.")
+    parser.add_argument("--trajectory-path", default="", help="Require the running calibration node to use this trajectory YAML path.")
     parser.add_argument("--record", action="store_true", help="Enter waypoint recording mode before running.")
     parser.add_argument("--record-only", action="store_true", help="Record/save trajectory and do not run calibration.")
     parser.add_argument("--run-only", action="store_true", help="Do not enter recorder even if the trajectory file is missing.")
@@ -136,6 +162,27 @@ def main(argv: list[str] | None = None) -> int:
     rclpy.init(args=[])
     node = rclpy.create_node("eye_to_hand_semi_auto_cli")
     try:
+        backend_status = _wait_for_backend_status(node, min(args.timeout_s, 2.0))
+        backend_trajectory_value = backend_status.get("trajectory_path") if isinstance(backend_status, dict) else None
+        if backend_trajectory_value:
+            backend_trajectory_path = Path(str(backend_trajectory_value)).expanduser().resolve()
+            if args.trajectory_path and backend_trajectory_path != trajectory_path.expanduser().resolve():
+                print(
+                    (
+                        "--trajectory-path does not match the running calibration node. "
+                        f"requested={trajectory_path} backend={backend_trajectory_path}. "
+                        "Restart the calibration node with trajectory_path:=... before using this CLI option."
+                    ),
+                    file=sys.stderr,
+                )
+                return 2
+            trajectory_path = backend_trajectory_path
+        elif args.trajectory_path:
+            print(
+                "Cannot verify --trajectory-path because no /eye_to_hand/status with trajectory_path was received.",
+                file=sys.stderr,
+            )
+            return 2
         should_record = args.record or (not args.run_only and not trajectory_path.exists())
         if should_record:
             recorded = _interactive_record(node, args.timeout_s)
