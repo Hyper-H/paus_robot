@@ -1,36 +1,137 @@
-# Code Review Phase - Round 24
+# FULL GOAL ALIGNMENT CHECK - Round 24
 
-This file documents the code review invocation for audit purposes.
-Note: `codex review` does not accept prompt input; it performs automated code review based on git diff.
+This is a **mandatory checkpoint** (at configurable intervals). You must conduct a comprehensive goal alignment audit.
 
-## Review Configuration
+## Original Implementation Plan
 
-- **Base Branch**: main
-- **Review Round**: 24
-- **Timestamp**: 2026-04-30T18:50:00Z
+**IMPORTANT**: The original plan that Claude is implementing is located at:
+@docs/handeye_ui_improvement_plan_humanize.md
 
-## What This Phase Does
+You MUST read this plan file first to understand the full scope of work before conducting your review.
 
-1. Runs `codex review --base main` to perform automated code review
-2. Scans output for `[P0-9]` severity markers indicating issues
-3. If issues found: Returns fix prompt to Claude for remediation
-4. If no issues: Transitions to Finalize Phase
+---
+## Claude's Work Summary
+<!-- CLAUDE's WORK SUMMARY START -->
+# Review Round 24 Summary
 
-## Expected Output Format
+## Work Completed
+- Fixed `[P1] Block manual capture while a semi-auto run is active` by rejecting manual capture, solve, and save services while `_semi_auto_active` is true.
+- Fixed `[P2] Derive the node's default output_path from config_path` by declaring `output_path` after loading `default.yaml` and using `calibration.output_path` as the parameter default.
+- Fixed `[P1] Avoid ROS-only imports at test_ros_bridge module scope` by moving UI path resolution into a ROS-free module, adding a ROS-free resolver test, and guarding ROS-specific bridge tests with `pytest.importorskip`.
 
-Codex review outputs issues in this format:
+## Files Changed
+- `src/paus_marker_ros2/paus_marker_ros2/eye_to_hand_calibration_node.py`
+- `src/paus_ui/paus_ui/ros_bridge.py`
+- `src/paus_ui/paus_ui/path_resolvers.py`
+- `src/paus_ui/tests/test_ros_bridge.py`
+- `src/paus_ui/tests/test_path_resolvers.py`
+
+## Validation
+- `python3 -m compileall -q src/paus_marker_ros2/paus_marker_ros2 src/paus_ui/paus_ui src/paus_perception/paus_perception`
+- `PYTHONPATH="$PWD/src/paus_ui:$PWD/src/paus_perception" python3 -m pytest -q src/paus_ui/tests/test_path_resolvers.py src/paus_ui/tests/test_ros_bridge.py` passed: 1 passed, 1 skipped without ROS setup.
+- `PYTHONPATH="$PWD/src/paus_marker_ros2" python3 -m unittest discover -s src/paus_marker_ros2/tests` passed: 10 tests.
+- `PYTHONPATH="$PWD/src/paus_perception" python3 -m pytest -q src/paus_perception/tests/test_config_paths.py` passed: 1 test.
+- `/usr/bin/python3 -m pytest -q src/paus_ui/tests src/paus_perception/tests/test_config_paths.py src/paus_marker_ros2/tests/test_semi_auto_calibration.py src/paus_marker_ros2/tests/test_eye_to_hand_session.py` passed: 38 tests.
+- `colcon build --packages-select paus_perception paus_marker_ros2 paus_ui --symlink-install` passed: 3 packages.
+
+## Remaining Items
+- None.
+
+## BitLesson Delta
+- Action: none
+- Lesson ID(s): NONE
+- Notes: The fixes follow existing locking, config resolution, and test isolation patterns; no durable new lesson is needed.
+<!-- CLAUDE's WORK SUMMARY  END  -->
+---
+
+## Part 1: Goal Tracker Audit (MANDATORY)
+
+Read @/home/chen_lab/worktrees/paus_robot_handeye_rlcr/.humanize/rlcr/2026-04-30_11-21-11/goal-tracker.md and verify:
+
+### 1.1 Acceptance Criteria Status
+For EACH Acceptance Criterion in the IMMUTABLE SECTION:
+| AC | Status | Evidence (if MET) | Blocker (if NOT MET) | Justification (if DEFERRED) |
+|----|--------|-------------------|---------------------|----------------------------|
+| AC-1 | MET / PARTIAL / NOT MET / DEFERRED | ... | ... | ... |
+| ... | ... | ... | ... | ... |
+
+### 1.2 Forgotten Items Detection
+Compare the original plan (@docs/handeye_ui_improvement_plan_humanize.md) with the current goal-tracker:
+- Are there tasks that are neither in "Active", "Completed", nor "Deferred"?
+- Are there tasks marked "complete" in summaries but not verified?
+- List any forgotten items found.
+
+### 1.3 Deferred Items Audit
+For each item in "Explicitly Deferred":
+- Is the deferral justification still valid?
+- Should it be un-deferred based on current progress?
+- Does it contradict the Ultimate Goal?
+
+### 1.4 Goal Completion Summary
 ```
-- [P0] Critical issue description - /path/to/file.py:line-range
-  Detailed explanation of the issue.
-
-- [P1] High priority issue - /path/to/file.py:line-range
-  Detailed explanation.
+Acceptance Criteria: X/Y met (Z deferred)
+Active Tasks: N remaining
+Estimated remaining rounds: ?
+Critical blockers: [list if any]
 ```
 
-## Files Generated
+## Part 2: Implementation Review
 
-- `round-24-review-prompt.md` - This audit file
-- `round-24-review-result.md` - Review output (in loop directory)
-- `round-24-codex-review.cmd` - Command invocation (in cache)
-- `round-24-codex-review.out` - Stdout capture (in cache)
-- `round-24-codex-review.log` - Stderr capture (in cache)
+- Conduct a deep critical review of the implementation
+- Verify Claude's claims match reality
+- Identify any gaps, bugs, or incomplete work
+- Reference @docs for design documents
+
+## Part 3: ## Goal Tracker Update Requests (YOUR RESPONSIBILITY)
+
+**Important**: Claude cannot directly modify `goal-tracker.md` after Round 0. If Claude's summary contains a "Goal Tracker Update Request" section, YOU must:
+
+1. **Evaluate the request**: Is the change justified? Does it serve the Ultimate Goal?
+2. **If approved**: Update @/home/chen_lab/worktrees/paus_robot_handeye_rlcr/.humanize/rlcr/2026-04-30_11-21-11/goal-tracker.md yourself with the requested changes:
+   - Move tasks between Active/Completed/Deferred sections as appropriate
+   - Add entries to "Plan Evolution Log" with round number and justification
+   - Add new issues to "Open Issues" if discovered
+   - **NEVER modify the IMMUTABLE SECTION** (Ultimate Goal and Acceptance Criteria)
+3. **If rejected**: Include in your review why the request was rejected
+
+Common update requests you should handle:
+- Task completion: Move from "Active Tasks" to "Completed and Verified"
+- New issues: Add to "Open Issues" table
+- Plan changes: Add to "Plan Evolution Log" with your assessment
+- Deferrals: Only allow with strong justification; add to "Explicitly Deferred"
+
+## Part 4: Progress Stagnation Check (MANDATORY for Full Alignment Rounds)
+
+To implement the original plan at @docs/handeye_ui_improvement_plan_humanize.md, we have completed **25 iterations** (Round 0 to Round 24).
+
+The project's `.humanize/rlcr/2026-04-30_11-21-11/` directory contains the history of each round's iteration:
+- Round input prompts: `round-N-prompt.md`
+- Round output summaries: `round-N-summary.md`
+- Round review prompts: `round-N-review-prompt.md`
+- Round review results: `round-N-review-result.md`
+
+**How to Access Historical Files**: Read the historical review results and summaries using file paths like:
+- `@.humanize/rlcr/2026-04-30_11-21-11/round-23-review-result.md` (previous round)
+- `@.humanize/rlcr/2026-04-30_11-21-11/round-22-review-result.md` (2 rounds ago)
+- `@.humanize/rlcr/2026-04-30_11-21-11/round-23-summary.md` (previous summary)
+
+**Your Task**: Review the historical review results, especially the **recent rounds** of development progress and review outcomes, to determine if the development has stalled.
+
+**Signs of Stagnation** (circuit breaker triggers):
+- Same issues appearing repeatedly across multiple rounds
+- No meaningful progress on Acceptance Criteria over several rounds
+- Claude making the same mistakes repeatedly
+- Circular discussions without resolution
+- No new code changes despite continued iterations
+- Codex giving similar feedback repeatedly without Claude addressing it
+
+**If development is stagnating**, write **STOP** (as a single word on its own line) as the last line of your review output @/home/chen_lab/worktrees/paus_robot_handeye_rlcr/.humanize/rlcr/2026-04-30_11-21-11/round-24-review-result.md instead of COMPLETE.
+
+## Part 5: Output Requirements
+
+- If issues found OR any AC is NOT MET (including deferred ACs), write your findings to @/home/chen_lab/worktrees/paus_robot_handeye_rlcr/.humanize/rlcr/2026-04-30_11-21-11/round-24-review-result.md
+- Include specific action items for Claude to address
+- **If development is stagnating** (see Part 4), write "STOP" as the last line
+- **CRITICAL**: Only write "COMPLETE" as the last line if ALL ACs from the original plan are FULLY MET with no deferrals
+  - DEFERRED items are considered INCOMPLETE - do NOT output COMPLETE if any AC is deferred
+  - The ONLY condition for COMPLETE is: all original plan tasks are done, all ACs are met, no deferrals allowed
