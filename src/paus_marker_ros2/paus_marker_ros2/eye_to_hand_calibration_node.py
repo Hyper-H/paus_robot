@@ -242,16 +242,19 @@ class EyeToHandCalibrationNode(Node):
     def _wait_for_camera_config(self, camera_config_path: str) -> Path:
         path = Path(camera_config_path)
         deadline = time.monotonic() + max(0.0, self.camera_config_wait_timeout_s)
+        last_error: str | None = None
         while True:
             try:
                 if path.exists() and path.stat().st_size > 0:
+                    load_camera_calibration(path)
                     return path
-            except OSError:
-                pass
+            except Exception as exc:
+                last_error = repr(exc)
             if time.monotonic() >= deadline:
-                raise RuntimeError(
-                    f"camera_config_path does not exist after waiting {self.camera_config_wait_timeout_s:.1f}s: {path}"
-                )
+                message = f"camera_config_path is not readable after waiting {self.camera_config_wait_timeout_s:.1f}s: {path}"
+                if last_error:
+                    message += f" Last parse error: {last_error}"
+                raise RuntimeError(message)
             time.sleep(0.1)
 
     # 接收最新图像。

@@ -146,17 +146,20 @@ async function refreshStatus() {
       boardTranslation[2],
       ...boardRotation,
     ], ["m", "m", "m", "deg", "deg", "deg"]);
+  } else {
+    renderPoseGrid(els.cameraBoardGrid, ["x", "y", "z", "rx", "ry", "rz"], [], ["m", "m", "m", "deg", "deg", "deg"]);
   }
   if (current.board_angle_deg !== null && current.board_angle_deg !== undefined) {
     els.boardAngle.textContent = fmt(current.board_angle_deg, 2, " deg");
   } else if (current.empty_reason) {
     els.boardAngle.textContent = current.empty_reason;
+  } else {
+    els.boardAngle.textContent = "--";
   }
   if (session.session_id && handeye.run_active && !state.userSelectedSession && state.selectedSession !== session.session_id) {
     state.selectedSession = session.session_id;
     state.autoSelectedSession = true;
   } else if (!handeye.run_active && state.autoSelectedSession) {
-    state.selectedSession = "";
     state.autoSelectedSession = false;
   }
   const result = handeye.last_command_result;
