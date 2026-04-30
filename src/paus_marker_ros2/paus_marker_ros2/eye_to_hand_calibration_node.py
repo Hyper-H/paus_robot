@@ -809,7 +809,10 @@ class EyeToHandCalibrationNode(Node):
             self._publish_status("delete_waypoint_failed", response.message)
             return response
         removed = self.recorded_trajectory.waypoints.pop()
-        self._write_recorded_trajectory()
+        if self.recorded_trajectory.waypoints:
+            self._write_recorded_trajectory()
+        elif self.trajectory_path.exists():
+            self.trajectory_path.unlink()
         response.success = True
         response.message = f"Deleted {removed.name} from {self.trajectory_path}."
         self._append_run_log("waypoint_deleted", removed.to_payload())
@@ -921,6 +924,7 @@ class EyeToHandCalibrationNode(Node):
                     tool_id=trajectory.tool_id,
                     user_id=trajectory.user_id,
                     vel=waypoint.vel,
+                    acc=waypoint.acc,
                 )
                 if move_error != 0:
                     raise RuntimeError(f"MoveJ failed at {waypoint.name} with code {move_error}.")

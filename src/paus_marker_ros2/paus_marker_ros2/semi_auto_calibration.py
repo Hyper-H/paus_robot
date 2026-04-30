@@ -154,6 +154,8 @@ def empty_trajectory(*, tool_id: int, user_id: int, default_vel: float, default_
 
 
 def save_trajectory(trajectory: CalibrationTrajectory, path: str | Path) -> None:
+    if not trajectory.waypoints:
+        raise TrajectoryValidationError("Trajectory must contain at least one waypoint.")
     trajectory_path = Path(path)
     trajectory_path.parent.mkdir(parents=True, exist_ok=True)
     with trajectory_path.open("w", encoding="utf-8") as handle:

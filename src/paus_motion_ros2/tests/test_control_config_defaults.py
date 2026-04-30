@@ -95,12 +95,30 @@ class ConfigControlDefaultsTests(unittest.TestCase):
             config = load_config(config_path)
             calibration = config["calibration"]
 
-            self.assertEqual(calibration["output_path"], str(install_config_dir / "extrinsics.yaml"))
-            self.assertEqual(calibration["trajectory_path"], str(install_config_dir / "eye_to_hand_trajectory.yaml"))
+            self.assertEqual(calibration["output_path"], str(Path(temp_dir) / "configs" / "extrinsics.yaml"))
+            self.assertEqual(calibration["trajectory_path"], str(Path(temp_dir) / "configs" / "eye_to_hand_trajectory.yaml"))
             self.assertEqual(calibration["session_root_path"], str(Path(temp_dir) / "calibration_sessions"))
 
 
 class FairinoLinuxClientTests(unittest.TestCase):
+    def test_move_j_forwards_acceleration_when_present(self) -> None:
+        class RobotStub:
+            def __init__(self) -> None:
+                self.kwargs = None
+
+            def MoveJ(self, joint_pos, **kwargs):
+                del joint_pos
+                self.kwargs = kwargs
+                return 0
+
+        client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
+        client.robot = RobotStub()
+
+        error = client.move_j([1, 2, 3, 4, 5, 6], tool_id=0, user_id=0, vel=10.0, acc=7.5)
+
+        self.assertEqual(error, 0)
+        self.assertEqual(client.robot.kwargs["acc"], 7.5)
+
     def test_normalize_pose_result_accepts_sdk_list_shape(self) -> None:
         client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
 

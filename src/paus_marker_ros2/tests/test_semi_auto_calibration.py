@@ -83,13 +83,13 @@ class SemiAutoCalibrationTrajectoryTests(unittest.TestCase):
             with self.assertRaises(TrajectoryValidationError):
                 load_trajectory(path)
 
-    def test_empty_trajectory_is_rejected_for_execution(self) -> None:
+    def test_empty_trajectory_is_rejected_before_save(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "empty.yaml"
-            save_trajectory(empty_trajectory(tool_id=0, user_id=0, default_vel=10.0, default_acc=10.0, default_dwell_s=0.5), path)
 
             with self.assertRaises(TrajectoryValidationError):
-                load_trajectory(path)
+                save_trajectory(empty_trajectory(tool_id=0, user_id=0, default_vel=10.0, default_acc=10.0, default_dwell_s=0.5), path)
+            self.assertFalse(path.exists())
 
     def test_session_dir_uses_timestamp_and_unique_suffix(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

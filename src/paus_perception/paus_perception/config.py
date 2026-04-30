@@ -181,7 +181,10 @@ def _resolve_config_artifact_path(path_value: str | Path, config_path: str | Pat
     if path.is_absolute():
         return str(path)
     if len(path.parts) == 1:
-        return str((Path(config_path).expanduser().resolve().parent / path).resolve())
+        resolved_config_path = Path(config_path).expanduser().resolve()
+        if "install" in resolved_config_path.parts:
+            return str((_infer_project_root(resolved_config_path) / "configs" / path).resolve())
+        return str((resolved_config_path.parent / path).resolve())
     return resolve_config_path(path, config_path)
 
 
