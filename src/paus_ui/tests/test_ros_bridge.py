@@ -16,7 +16,7 @@ UI_PACKAGE_ROOT = PROJECT_ROOT / "src" / "paus_ui"
 if str(UI_PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(UI_PACKAGE_ROOT))
 
-from paus_ui.ros_bridge import CachedImage, UiRosBridge
+from paus_ui.ros_bridge import CachedImage, UiRosBridge, resolve_ui_calibration_paths
 from paus_ui.session_store import SessionStore
 
 
@@ -44,6 +44,21 @@ def test_get_detector_returns_none_for_malformed_camera_yaml() -> None:
         assert UiRosBridge._get_detector(bridge) is None
         assert bridge._detector is None
         assert bridge._detector_mtime_ns is None
+
+
+def test_ui_calibration_paths_match_backend_runtime_resolvers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    config_path = tmp_path / "install" / "paus_bringup" / "share" / "paus_bringup" / "configs" / "default.yaml"
+    monkeypatch.setenv("PAUS_ROBOT_RUNTIME_DIR", str(runtime_dir))
+
+    trajectory_path, session_root_path = resolve_ui_calibration_paths(
+        config_path,
+        "eye_to_hand_trajectory.yaml",
+        "calibration_sessions",
+    )
+
+    assert trajectory_path == runtime_dir / "configs" / "eye_to_hand_trajectory.yaml"
+    assert session_root_path == runtime_dir / "calibration_sessions"
 
 
 def test_backend_status_overrides_ui_local_motion_and_paths() -> None:

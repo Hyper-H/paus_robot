@@ -19,7 +19,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
-from paus_perception import load_camera_calibration, load_config, resolve_config_path
+from paus_perception import load_camera_calibration, load_config, resolve_config_artifact_path, resolve_runtime_data_path
 
 from .operator_messages import classify_operator_message
 from .overlay import BoardOverlayDetector, encode_jpeg, make_placeholder_image
@@ -36,6 +36,13 @@ class CachedImage:
     sequence: int
     header_time_s: float | None
     received_time_s: float
+
+
+def resolve_ui_calibration_paths(config_path: str | Path, trajectory_path: str, session_root_path: str) -> tuple[Path, Path]:
+    return (
+        Path(resolve_config_artifact_path(trajectory_path, config_path)),
+        Path(resolve_runtime_data_path(session_root_path, config_path)),
+    )
 
 
 class EventBuffer:
@@ -93,8 +100,11 @@ class UiRosBridge(Node):
         self.board_rows = int(self.get_parameter("board_rows").get_parameter_value().integer_value)
         self.board_cols = int(self.get_parameter("board_cols").get_parameter_value().integer_value)
         self.square_size_m = float(self.get_parameter("square_size_m").get_parameter_value().double_value)
-        self.trajectory_path = Path(resolve_config_path(self.get_parameter("trajectory_path").get_parameter_value().string_value, self.config_path))
-        self.session_root_path = Path(resolve_config_path(self.get_parameter("session_root_path").get_parameter_value().string_value, self.config_path))
+        self.trajectory_path, self.session_root_path = resolve_ui_calibration_paths(
+            self.config_path,
+            self.get_parameter("trajectory_path").get_parameter_value().string_value,
+            self.get_parameter("session_root_path").get_parameter_value().string_value,
+        )
         self.max_reprojection_error_px = float(self.get_parameter("max_reprojection_error_px").get_parameter_value().double_value)
         self.min_board_margin_px = float(self.get_parameter("min_board_margin_px").get_parameter_value().double_value)
         self.execute_motion = bool(self.get_parameter("execute_motion").get_parameter_value().bool_value)

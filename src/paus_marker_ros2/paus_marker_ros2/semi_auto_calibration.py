@@ -22,6 +22,16 @@ def session_owner_matches(current_owner: str | None, requested_owner: str) -> bo
     return current_owner == requested_owner
 
 
+def sample_log_targets(session_sample_log_path: str | Path, override_sample_log_path: str | Path | None) -> list[Path]:
+    session_path = Path(session_sample_log_path)
+    if override_sample_log_path is None:
+        return [session_path]
+    override_path = Path(override_sample_log_path)
+    if override_path == session_path:
+        return [session_path]
+    return [session_path, override_path]
+
+
 def wrapped_rotation_delta_norm_deg(current_rpy_deg: list[float], reference_rpy_deg: list[float]) -> float:
     if len(current_rpy_deg) != 3 or len(reference_rpy_deg) != 3:
         raise TrajectoryValidationError("current_rpy_deg and reference_rpy_deg must contain 3 values.")

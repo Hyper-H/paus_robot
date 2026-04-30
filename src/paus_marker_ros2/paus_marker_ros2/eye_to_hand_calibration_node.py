@@ -58,6 +58,7 @@ from paus_marker_ros2.semi_auto_calibration import (
     empty_trajectory,
     load_trajectory,
     save_trajectory,
+    sample_log_targets,
     session_owner_matches,
     wrapped_rotation_delta_norm_deg,
 )
@@ -326,7 +327,7 @@ class EyeToHandCalibrationNode(Node):
 
     def _begin_new_semi_auto_session(self) -> None:
         self.session_dir = create_session_dir(self.session_root_path)
-        self.sample_log_path = self.sample_log_path_override or self.session_dir / "samples.jsonl"
+        self.sample_log_path = self.session_dir / "samples.jsonl"
         self.report_path = self.session_dir / "report.yaml"
         self.run_log_path = self.session_dir / "run.log"
         self.session_owner = "semi_auto"
@@ -336,7 +337,7 @@ class EyeToHandCalibrationNode(Node):
     def _ensure_session_started(self, owner: str = "manual") -> None:
         if self.session_dir is None or not session_owner_matches(self.session_owner, owner):
             self.session_dir = create_session_dir(self.session_root_path)
-            self.sample_log_path = self.sample_log_path_override or self.session_dir / "samples.jsonl"
+            self.sample_log_path = self.session_dir / "samples.jsonl"
             self.report_path = self.session_dir / "report.yaml"
             self.run_log_path = self.session_dir / "run.log"
             self.session_owner = owner
@@ -471,9 +472,11 @@ class EyeToHandCalibrationNode(Node):
     def _append_sample_log(self, sample: CalibrationSample) -> None:
         if self.sample_log_path is None:
             raise RuntimeError("Calibration session is not initialized.")
-        self.sample_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.sample_log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(self._sample_to_log_record(sample), ensure_ascii=False) + "\n")
+        record_line = json.dumps(self._sample_to_log_record(sample), ensure_ascii=False) + "\n"
+        for sample_log_path in sample_log_targets(self.sample_log_path, self.sample_log_path_override):
+            sample_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with sample_log_path.open("a", encoding="utf-8") as handle:
+                handle.write(record_line)
 
     def _save_sample_image(self, image_bgr: np.ndarray, sample_index: int) -> str | None:
         if not self.save_sample_images:
