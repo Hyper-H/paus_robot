@@ -190,7 +190,13 @@ class UiRosBridge(Node):
         self.effective_session_root_path = session_root_path
         self.effective_max_reprojection_error_px = self.max_reprojection_error_px if max_reprojection_error_px is None else max_reprojection_error_px
         self.effective_min_board_margin_px = self.min_board_margin_px if min_board_margin_px is None else min_board_margin_px
-        self.effective_execute_motion = _to_bool(payload.get("execute_motion"), self.execute_motion)
+        motion_state_known = bool(backend_connected and last_status is not None)
+        if motion_state_known:
+            self.effective_execute_motion = _to_bool(payload.get("execute_motion"), self.execute_motion)
+        elif services_ready:
+            self.effective_execute_motion = True
+        else:
+            self.effective_execute_motion = self.execute_motion
         if (
             self.session_store.trajectory_path != self.effective_trajectory_path
             or self.session_store.session_root_path != self.effective_session_root_path
@@ -213,6 +219,7 @@ class UiRosBridge(Node):
             "config_source": "backend_status" if backend_connected and last_status is not None else ("backend_service_ready" if services_ready else "ui_local_fallback"),
             "services_ready": services_ready,
             "status_recent": status_recent,
+            "motion_state_known": motion_state_known,
         }
 
     def get_status(self) -> dict[str, Any]:
@@ -258,7 +265,8 @@ class UiRosBridge(Node):
                 "last_status_age_s": last_status_age_s,
                 "calibration_node_connected": backend_state["backend_connected"],
                 "execute_motion": backend_state["execute_motion"],
-                "requires_motion_confirmation": backend_state["execute_motion"] or not backend_state["backend_connected"],
+                "requires_motion_confirmation": backend_state["execute_motion"] or not backend_state["backend_connected"] or not backend_state["motion_state_known"],
+                "motion_state_known": backend_state["motion_state_known"],
                 "backend_config_source": backend_state["config_source"],
                 "trajectory_path": str(backend_state["trajectory_path"]),
                 "session_root_path": str(backend_state["session_root_path"]),
@@ -379,7 +387,11 @@ class UiRosBridge(Node):
     def start_semi_auto_run(self, *, confirmed: bool = False) -> dict[str, Any]:
         backend_state = self._sync_backend_state()
         confirmation = self._motion_summary()
-        requires_confirmation = bool(backend_state["execute_motion"]) or not bool(backend_state["backend_connected"])
+        requires_confirmation = (
+            bool(backend_state["execute_motion"])
+            or not bool(backend_state["backend_connected"])
+            or not bool(backend_state["motion_state_known"])
+        )
         if requires_confirmation and not confirmed:
             result = self._shape_command_result(
                 "run_semi_auto",

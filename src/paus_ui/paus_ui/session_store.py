@@ -234,7 +234,9 @@ class SessionStore:
         fallback = self._session_path(session_id) / "images" / f"sample_{row_index:03d}.png"
         return fallback if fallback.exists() else None
 
-    def _read_waypoints_from_path(self, path: Path) -> dict[str, Any]:
+    def _read_waypoints_from_path(self, path: Path | None) -> dict[str, Any]:
+        if path is None:
+            return {"trajectory_path": None, "waypoints": [], "error": None}
         if not path.exists():
             return {"trajectory_path": str(path), "waypoints": [], "error": "Trajectory YAML does not exist."}
         try:
@@ -313,9 +315,9 @@ class SessionStore:
         sample_count = int(report.get("sample_count", 0) or len(samples) or accepted)
         return {"sample_count": sample_count, "accepted": accepted, "skipped": skipped, "pending": pending}
 
-    def _trajectory_path_for_session(self, session_path: Path) -> Path:
+    def _trajectory_path_for_session(self, session_path: Path) -> Path | None:
         used = session_path / "trajectory_used.yaml"
-        return used if used.exists() else self.trajectory_path
+        return used if used.exists() else None
 
     def _quality_flags(self, reprojection_error_px: Any, board_margin_px: Any) -> dict[str, Any]:
         reprojection = _to_float(reprojection_error_px)

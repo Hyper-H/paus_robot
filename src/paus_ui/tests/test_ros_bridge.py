@@ -137,6 +137,35 @@ def test_stale_status_disconnects_when_services_disappear() -> None:
         assert bridge.session_store.trajectory_path == root / "local_trajectory.yaml"
 
 
+def test_service_ready_without_status_requires_motion_confirmation() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        bridge = UiRosBridge.__new__(UiRosBridge)
+        bridge.trajectory_path = root / "local_trajectory.yaml"
+        bridge.session_root_path = root / "local_sessions"
+        bridge.max_reprojection_error_px = 0.0
+        bridge.min_board_margin_px = 10.0
+        bridge.execute_motion = False
+        bridge.effective_trajectory_path = bridge.trajectory_path
+        bridge.effective_session_root_path = bridge.session_root_path
+        bridge.effective_max_reprojection_error_px = bridge.max_reprojection_error_px
+        bridge.effective_min_board_margin_px = bridge.min_board_margin_px
+        bridge.effective_execute_motion = bridge.execute_motion
+        bridge._service_clients = {"run": _ServiceClient(True)}
+        bridge.session_store = SessionStore(
+            session_root_path=bridge.session_root_path,
+            trajectory_path=bridge.trajectory_path,
+            max_reprojection_error_px=bridge.max_reprojection_error_px,
+            min_board_margin_px=bridge.min_board_margin_px,
+        )
+
+        state = UiRosBridge._sync_backend_state(bridge, None, 0.0)
+
+        assert state["backend_connected"] is True
+        assert state["motion_state_known"] is False
+        assert state["execute_motion"] is True
+
+
 def test_successful_run_command_preserves_backend_message() -> None:
     bridge = UiRosBridge.__new__(UiRosBridge)
 
