@@ -166,6 +166,60 @@ def test_service_ready_without_status_requires_motion_confirmation() -> None:
         assert state["execute_motion"] is True
 
 
+def test_backend_status_updates_overlay_detector_settings() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        backend_camera = root / "backend_camera.yaml"
+        bridge = UiRosBridge.__new__(UiRosBridge)
+        bridge.camera_config_path = root / "local_camera.yaml"
+        bridge.board_rows = 6
+        bridge.board_cols = 9
+        bridge.square_size_m = 0.01
+        bridge.trajectory_path = root / "local_trajectory.yaml"
+        bridge.session_root_path = root / "local_sessions"
+        bridge.max_reprojection_error_px = 0.0
+        bridge.min_board_margin_px = 10.0
+        bridge.execute_motion = False
+        bridge.effective_trajectory_path = bridge.trajectory_path
+        bridge.effective_session_root_path = bridge.session_root_path
+        bridge.effective_max_reprojection_error_px = bridge.max_reprojection_error_px
+        bridge.effective_min_board_margin_px = bridge.min_board_margin_px
+        bridge.effective_execute_motion = bridge.execute_motion
+        bridge._service_clients = {"run": _ServiceClient(False)}
+        bridge._detector = object()
+        bridge._detector_mtime_ns = 123
+        bridge._detector_signature = ("old", 123, 6, 9, 0.01)
+        bridge.session_store = SessionStore(
+            session_root_path=bridge.session_root_path,
+            trajectory_path=bridge.trajectory_path,
+            max_reprojection_error_px=bridge.max_reprojection_error_px,
+            min_board_margin_px=bridge.min_board_margin_px,
+        )
+
+        state = UiRosBridge._sync_backend_state(
+            bridge,
+            {
+                "execute_motion": False,
+                "camera_config_path": str(backend_camera),
+                "board_rows": 8,
+                "board_cols": 11,
+                "square_size_m": 0.02,
+            },
+            0.1,
+        )
+
+        assert state["board_rows"] == 8
+        assert state["board_cols"] == 11
+        assert state["square_size_m"] == 0.02
+        assert state["camera_config_path"] == backend_camera
+        assert bridge.board_rows == 8
+        assert bridge.board_cols == 11
+        assert bridge.square_size_m == 0.02
+        assert bridge.camera_config_path == backend_camera
+        assert bridge._detector is None
+        assert bridge._detector_signature is None
+
+
 def test_successful_run_command_preserves_backend_message() -> None:
     bridge = UiRosBridge.__new__(UiRosBridge)
 

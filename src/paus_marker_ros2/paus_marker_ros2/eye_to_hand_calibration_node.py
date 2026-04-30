@@ -198,6 +198,7 @@ class EyeToHandCalibrationNode(Node):
         if not camera_config_path:
             raise RuntimeError("camera_config_path is required for eye-to-hand calibration.")
         camera_config_path = str(self._wait_for_camera_config(camera_config_path))
+        self.camera_config_path = camera_config_path
         # 加载相机内参。
         self.camera_calibration = load_camera_calibration(camera_config_path)
 
@@ -280,6 +281,10 @@ class EyeToHandCalibrationNode(Node):
             "execute_motion": self.execute_motion,
             "max_reprojection_error_px": self.max_reprojection_error_px,
             "min_board_margin_px": self.min_board_margin_px,
+            "camera_config_path": self.camera_config_path,
+            "board_rows": self.board_rows,
+            "board_cols": self.board_cols,
+            "square_size_m": self.square_size_m,
         }
         if extra:
             payload.update(extra)

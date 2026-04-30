@@ -107,7 +107,16 @@ class SessionStore:
         for index, sample in enumerate(samples, start=1):
             sample["row_index"] = index
             image_path = sample.get("image_path")
-            sample["has_image"] = bool(image_path and Path(str(image_path)).exists())
+            explicit_image_path = Path(str(image_path)) if image_path else None
+            fallback_image_path = session_path / "images" / f"sample_{index:03d}.png"
+            resolved_image_path = None
+            if explicit_image_path is not None and explicit_image_path.exists():
+                resolved_image_path = explicit_image_path
+            elif fallback_image_path.exists():
+                resolved_image_path = fallback_image_path
+            sample["has_image"] = resolved_image_path is not None
+            if resolved_image_path is not None:
+                sample["image_path"] = str(resolved_image_path)
             sample["camera_to_board_translation_m"] = sample.get("camera_to_board_translation_m") or _matrix_translation(sample.get("camera_to_board_matrix"))
             sample["camera_to_board_rotation_rpy_deg"] = sample.get("camera_to_board_rotation_rpy_deg") or _matrix_rotation_rpy_deg(sample.get("camera_to_board_matrix"))
             sample["capture_time_s"] = sample.get("image_header_time_s") or sample.get("image_received_time_s")

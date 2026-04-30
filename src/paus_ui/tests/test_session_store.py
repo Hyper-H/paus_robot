@@ -282,3 +282,33 @@ def test_manual_session_without_trajectory_has_no_phantom_waypoints(tmp_path: Pa
     assert sessions[0]["sample_count"] == 1
     assert sessions[0]["pending_count"] == 0
     assert store.read_session_waypoints("2026-04-29_123000") == []
+
+
+def test_session_store_detects_fallback_sample_images(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
+    trajectory_path.write_text(
+        yaml.safe_dump({"version": 1, "tool_id": 0, "user_id": 0, "defaults": {"motion": "movej"}, "waypoints": []}),
+        encoding="utf-8",
+    )
+    session_root = tmp_path / "calibration_sessions"
+    session_path = session_root / "2026-04-29_124000"
+    images_path = session_path / "images"
+    images_path.mkdir(parents=True)
+    fallback_image = images_path / "sample_001.png"
+    fallback_image.write_bytes(b"not-a-real-png-but-present")
+    _write_jsonl(
+        session_path / "samples.jsonl",
+        [
+            {
+                "sample_index": 1,
+                "reprojection_error_px": 1.25,
+                "board_margin_px": 50.0,
+            }
+        ],
+    )
+
+    store = SessionStore(session_root_path=session_root, trajectory_path=trajectory_path)
+
+    samples = store.read_samples("2026-04-29_124000")
+    assert samples[0]["has_image"] is True
+    assert samples[0]["image_path"] == str(fallback_image)

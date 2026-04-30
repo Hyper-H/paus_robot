@@ -120,6 +120,7 @@ class UiRosBridge(Node):
         self._last_status_time_s: float | None = None
         self._detector: BoardOverlayDetector | None = None
         self._detector_mtime_ns: int | None = None
+        self._detector_signature: tuple[str, int, int, int, float] | None = None
         self._run_lock = threading.Lock()
         self._run_thread: threading.Thread | None = None
         self._last_command_result: dict[str, Any] | None = None
@@ -186,6 +187,37 @@ class UiRosBridge(Node):
         session_root_path = Path(str(payload.get("session_root_path") or self.session_root_path))
         max_reprojection_error_px = _to_float(payload.get("max_reprojection_error_px"))
         min_board_margin_px = _to_float(payload.get("min_board_margin_px"))
+        board_rows = _to_int(payload.get("board_rows"))
+        board_cols = _to_int(payload.get("board_cols"))
+        square_size_m = _to_float(payload.get("square_size_m"))
+        camera_config_path = payload.get("camera_config_path")
+        if not hasattr(self, "board_rows"):
+            self.board_rows = 6
+        if not hasattr(self, "board_cols"):
+            self.board_cols = 9
+        if not hasattr(self, "square_size_m"):
+            self.square_size_m = 0.01
+        if not hasattr(self, "camera_config_path"):
+            self.camera_config_path = Path("")
+        detector_settings_changed = False
+        if board_rows is not None and board_rows != self.board_rows:
+            self.board_rows = board_rows
+            detector_settings_changed = True
+        if board_cols is not None and board_cols != self.board_cols:
+            self.board_cols = board_cols
+            detector_settings_changed = True
+        if square_size_m is not None and square_size_m != self.square_size_m:
+            self.square_size_m = square_size_m
+            detector_settings_changed = True
+        if camera_config_path:
+            backend_camera_config_path = Path(str(camera_config_path))
+            if backend_camera_config_path != self.camera_config_path:
+                self.camera_config_path = backend_camera_config_path
+                detector_settings_changed = True
+        if detector_settings_changed:
+            self._detector = None
+            self._detector_mtime_ns = None
+            self._detector_signature = None
         self.effective_trajectory_path = trajectory_path
         self.effective_session_root_path = session_root_path
         self.effective_max_reprojection_error_px = self.max_reprojection_error_px if max_reprojection_error_px is None else max_reprojection_error_px
@@ -216,6 +248,10 @@ class UiRosBridge(Node):
             "session_root_path": self.effective_session_root_path,
             "max_reprojection_error_px": self.effective_max_reprojection_error_px,
             "min_board_margin_px": self.effective_min_board_margin_px,
+            "board_rows": self.board_rows,
+            "board_cols": self.board_cols,
+            "square_size_m": self.square_size_m,
+            "camera_config_path": self.camera_config_path,
             "config_source": "backend_status" if backend_connected and last_status is not None else ("backend_service_ready" if services_ready else "ui_local_fallback"),
             "services_ready": services_ready,
             "status_recent": status_recent,
@@ -290,6 +326,7 @@ class UiRosBridge(Node):
         }
 
     def get_latest_quality(self) -> dict[str, Any]:
+        self._sync_backend_state()
         latest_image = self._latest_image_copy()
         if latest_image is None:
             return {
@@ -316,6 +353,7 @@ class UiRosBridge(Node):
         return payload
 
     def get_latest_jpeg(self, *, mode: str = "overlay", show_axes: bool = True) -> bytes:
+        self._sync_backend_state()
         latest_image = self._latest_image_copy()
         if latest_image is None:
             return encode_jpeg(make_placeholder_image("Waiting for /camera/image_bridge"))
@@ -479,28 +517,39 @@ class UiRosBridge(Node):
 
     def _get_detector(self) -> BoardOverlayDetector | None:
         if not self.camera_config_path.exists():
+            self._detector = None
+            self._detector_mtime_ns = None
+            self._detector_signature = None
             return None
         try:
             mtime_ns = self.camera_config_path.stat().st_mtime_ns
         except OSError:
             self._detector = None
             self._detector_mtime_ns = None
+            self._detector_signature = None
             return None
+        board_rows = int(getattr(self, "board_rows", 6))
+        board_cols = int(getattr(self, "board_cols", 9))
+        square_size_m = float(getattr(self, "square_size_m", 0.01))
+        signature = (str(self.camera_config_path), mtime_ns, board_rows, board_cols, square_size_m)
         if self._detector is not None and self._detector_mtime_ns == mtime_ns:
-            return self._detector
+            if getattr(self, "_detector_signature", None) == signature:
+                return self._detector
         try:
             calibration = load_camera_calibration(self.camera_config_path)
         except Exception:
             self._detector = None
             self._detector_mtime_ns = None
+            self._detector_signature = None
             return None
         self._detector = BoardOverlayDetector(
-            board_rows=self.board_rows,
-            board_cols=self.board_cols,
-            square_size_m=self.square_size_m,
+            board_rows=board_rows,
+            board_cols=board_cols,
+            square_size_m=square_size_m,
             camera_calibration=calibration,
         )
         self._detector_mtime_ns = mtime_ns
+        self._detector_signature = signature
         return self._detector
 
     def _shape_status_payload(self, payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -635,6 +684,15 @@ def _to_float(value: Any) -> float | None:
         if value is None:
             return None
         return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
     except (TypeError, ValueError):
         return None
 
