@@ -20,13 +20,13 @@ from paus_marker_ros2.semi_auto_calibration import (
     empty_trajectory,
     load_trajectory,
     save_trajectory,
+    wrapped_rotation_delta_norm_deg,
 )
-from paus_marker_ros2.eye_to_hand_calibration_node import _wrapped_rotation_delta_norm_deg
 
 
 class SemiAutoCalibrationTrajectoryTests(unittest.TestCase):
     def test_wrapped_rotation_delta_handles_boundary_crossing(self) -> None:
-        delta = _wrapped_rotation_delta_norm_deg([0.0, 0.0, -179.9], [0.0, 0.0, 179.9])
+        delta = wrapped_rotation_delta_norm_deg([0.0, 0.0, -179.9], [0.0, 0.0, 179.9])
 
         self.assertLess(delta, 0.3)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from dataclasses import dataclass
 from datetime import datetime
+import math
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,16 @@ SUPPORTED_MOTION_MODES = {"movej"}
 
 class TrajectoryValidationError(ValueError):
     pass
+
+
+def wrapped_rotation_delta_norm_deg(current_rpy_deg: list[float], reference_rpy_deg: list[float]) -> float:
+    if len(current_rpy_deg) != 3 or len(reference_rpy_deg) != 3:
+        raise TrajectoryValidationError("current_rpy_deg and reference_rpy_deg must contain 3 values.")
+    wrapped_squares = []
+    for current, reference in zip(current_rpy_deg, reference_rpy_deg):
+        delta = (float(current) - float(reference) + 180.0) % 360.0 - 180.0
+        wrapped_squares.append(delta * delta)
+    return math.sqrt(sum(wrapped_squares))
 
 
 @dataclass

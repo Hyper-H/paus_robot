@@ -41,6 +41,7 @@ def test_backend_status_overrides_ui_local_motion_and_paths() -> None:
         bridge.effective_max_reprojection_error_px = bridge.max_reprojection_error_px
         bridge.effective_min_board_margin_px = bridge.min_board_margin_px
         bridge.effective_execute_motion = bridge.execute_motion
+        bridge._service_clients = {}
         bridge.session_store = SessionStore(
             session_root_path=bridge.session_root_path,
             trajectory_path=bridge.trajectory_path,
@@ -64,3 +65,31 @@ def test_backend_status_overrides_ui_local_motion_and_paths() -> None:
         assert state["execute_motion"] is True
         assert bridge.session_store.trajectory_path == root / "backend_trajectory.yaml"
         assert bridge.session_store.session_root_path == root / "backend_sessions"
+
+
+def test_backend_status_does_not_expire_when_node_is_idle() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        bridge = UiRosBridge.__new__(UiRosBridge)
+        bridge.trajectory_path = root / "local_trajectory.yaml"
+        bridge.session_root_path = root / "local_sessions"
+        bridge.max_reprojection_error_px = 0.0
+        bridge.min_board_margin_px = 10.0
+        bridge.execute_motion = False
+        bridge.effective_trajectory_path = bridge.trajectory_path
+        bridge.effective_session_root_path = bridge.session_root_path
+        bridge.effective_max_reprojection_error_px = bridge.max_reprojection_error_px
+        bridge.effective_min_board_margin_px = bridge.min_board_margin_px
+        bridge.effective_execute_motion = bridge.execute_motion
+        bridge._service_clients = {}
+        bridge.session_store = SessionStore(
+            session_root_path=bridge.session_root_path,
+            trajectory_path=bridge.trajectory_path,
+            max_reprojection_error_px=bridge.max_reprojection_error_px,
+            min_board_margin_px=bridge.min_board_margin_px,
+        )
+
+        state = UiRosBridge._sync_backend_state(bridge, {"execute_motion": False}, 120.0)
+
+        assert state["backend_connected"] is True
+        assert state["config_source"] == "backend_status"

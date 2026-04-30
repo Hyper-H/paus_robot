@@ -57,16 +57,11 @@ from paus_marker_ros2.semi_auto_calibration import (
     empty_trajectory,
     load_trajectory,
     save_trajectory,
+    wrapped_rotation_delta_norm_deg,
 )
 
 
 STATUS_QOS = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
-
-
-def _wrapped_rotation_delta_norm_deg(current_rpy_deg: list[float], reference_rpy_deg: list[float]) -> float:
-    delta = np.asarray(current_rpy_deg, dtype=np.float64) - np.asarray(reference_rpy_deg, dtype=np.float64)
-    wrapped_delta = (delta + 180.0) % 360.0 - 180.0
-    return float(np.linalg.norm(wrapped_delta))
 
 
 # 保存一次标定采样的结果。
@@ -881,7 +876,7 @@ class EyeToHandCalibrationNode(Node):
                 stable_since = now
             else:
                 position_delta_mm = float(np.linalg.norm(np.asarray(pose[:3], dtype=np.float64) - np.asarray(stable_reference_pose[:3], dtype=np.float64)))
-                rotation_delta_deg = _wrapped_rotation_delta_norm_deg(pose[3:6], stable_reference_pose[3:6])
+                rotation_delta_deg = wrapped_rotation_delta_norm_deg(pose[3:6], stable_reference_pose[3:6])
                 if position_delta_mm <= self.stable_position_tolerance_mm and rotation_delta_deg <= self.stable_rotation_tolerance_deg:
                     stable_since = now if stable_since is None else stable_since
                     if now - stable_since >= self.stable_window_s:
