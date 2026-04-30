@@ -87,6 +87,12 @@ function setNotice(message, tone = "") {
   els.commandResult.className = `notice ${tone}`.trim();
 }
 
+function commandTone(result) {
+  if (result?.success) return "good";
+  if (result?.accepted || result?.queued) return "";
+  return "bad";
+}
+
 async function getJson(url, fallback) {
   try {
     const response = await fetch(url, { cache: "no-store" });
@@ -152,7 +158,7 @@ async function refreshStatus() {
   }
   const result = handeye.last_command_result;
   if (result) {
-    setNotice(result.operator_message || result.message, result.success ? "good" : "bad");
+    setNotice(result.operator_message || result.message, commandTone(result));
   }
   if (motion.trajectory_path) {
     els.trajectoryPath.textContent = motion.trajectory_path;
@@ -416,7 +422,7 @@ async function runCommand(label, url, body = {}) {
       setNotice(result.operator_message || result.message, "bad");
       return result;
     }
-    setNotice(result.operator_message || result.message, result.success ? "good" : "bad");
+    setNotice(result.operator_message || result.message, commandTone(result));
     await refreshAll();
     return result;
   } catch (error) {

@@ -204,6 +204,8 @@ class EyeToHandCalibrationNode(Node):
         # 保存已采集样本和当前求解结果。
         self.samples: list[CalibrationSample] = []
         self.current_solution: EyeToHandCalibrationSolution | None = None
+        self._semi_auto_lock = threading.Lock()
+        self._semi_auto_active = False
         self.recorded_trajectory = self._load_or_create_trajectory_for_recording()
         self.callback_group = ReentrantCallbackGroup()
         # 建立 Linux SDK 客户端，用于直接读取当前 TCP。
@@ -814,28 +816,41 @@ class EyeToHandCalibrationNode(Node):
     def _wait_until_tcp_stable(self) -> list[float]:
         deadline = time.monotonic() + self.stable_timeout_s
         stable_since: float | None = None
-        previous_pose: list[float] | None = None
+        stable_reference_pose: list[float] | None = None
         last_pose: list[float] | None = None
         while time.monotonic() < deadline:
             error, pose = self.linux_client.get_actual_tcp_pose()
             if error != 0:
                 raise RuntimeError(f"GetActualTCPPose failed with code {error}.")
             last_pose = pose
-            if previous_pose is not None:
-                position_delta_mm = float(np.linalg.norm(np.asarray(pose[:3], dtype=np.float64) - np.asarray(previous_pose[:3], dtype=np.float64)))
-                rotation_delta_deg = float(np.linalg.norm(np.asarray(pose[3:6], dtype=np.float64) - np.asarray(previous_pose[3:6], dtype=np.float64)))
+            now = time.monotonic()
+            if self.stable_window_s <= 0.0:
+                return pose
+            if stable_reference_pose is None:
+                stable_reference_pose = pose
+                stable_since = now
+            else:
+                position_delta_mm = float(np.linalg.norm(np.asarray(pose[:3], dtype=np.float64) - np.asarray(stable_reference_pose[:3], dtype=np.float64)))
+                rotation_delta_deg = float(np.linalg.norm(np.asarray(pose[3:6], dtype=np.float64) - np.asarray(stable_reference_pose[3:6], dtype=np.float64)))
                 if position_delta_mm <= self.stable_position_tolerance_mm and rotation_delta_deg <= self.stable_rotation_tolerance_deg:
-                    stable_since = time.monotonic() if stable_since is None else stable_since
-                    if time.monotonic() - stable_since >= self.stable_window_s:
+                    stable_since = now if stable_since is None else stable_since
+                    if now - stable_since >= self.stable_window_s:
                         return pose
                 else:
-                    stable_since = None
-            previous_pose = pose
+                    stable_reference_pose = pose
+                    stable_since = now
             time.sleep(0.05)
         raise RuntimeError(f"TCP did not become stable within {self.stable_timeout_s:.3f}s. Last pose: {last_pose!r}")
 
     def _run_semi_auto_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         del request
+        with self._semi_auto_lock:
+            if self._semi_auto_active:
+                response.success = False
+                response.message = "Semi-auto calibration is already running."
+                self._publish_status("semi_auto_rejected", response.message)
+                return response
+            self._semi_auto_active = True
         try:
             if not self.trajectory_path.exists():
                 response.success = False
@@ -1004,6 +1019,9 @@ class EyeToHandCalibrationNode(Node):
             response.message = repr(exc)
             self._append_run_log("semi_auto_failed", {"error": response.message})
             self._publish_status("semi_auto_failed", response.message, {"session_dir": str(self.session_dir)})
+        finally:
+            with self._semi_auto_lock:
+                self._semi_auto_active = False
         return response
 
 

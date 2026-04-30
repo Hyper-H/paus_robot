@@ -70,9 +70,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # 求解前最少需要的样本数。
         "min_sample_count": 10,
         # 标定结果默认保存路径。
-        "output_path": "src/paus_bringup/configs/extrinsics.yaml",
+        "output_path": "extrinsics.yaml",
         # 半自动标定示教轨迹保存路径。
-        "trajectory_path": "src/paus_bringup/configs/eye_to_hand_trajectory.yaml",
+        "trajectory_path": "eye_to_hand_trajectory.yaml",
         # 每次半自动标定运行的归档目录根路径。
         "session_root_path": "calibration_sessions",
         # 是否保存每个有效样本图像。
@@ -175,11 +175,25 @@ def resolve_config_path(path_value: str | Path, config_path: str | Path) -> str:
     return str((_infer_project_root(Path(config_path)) / path).resolve())
 
 
+def _resolve_config_artifact_path(path_value: str | Path, config_path: str | Path) -> str:
+    path_text = os.path.expandvars(str(path_value)).strip()
+    path = Path(path_text).expanduser()
+    if path.is_absolute():
+        return str(path)
+    if len(path.parts) == 1:
+        return str((Path(config_path).expanduser().resolve().parent / path).resolve())
+    return resolve_config_path(path, config_path)
+
+
 def _resolve_project_paths(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
     calibration = config.get("calibration", {})
     if not isinstance(calibration, dict):
         return config
-    for field_name in ("output_path", "trajectory_path", "session_root_path"):
+    for field_name in ("output_path", "trajectory_path"):
+        value = calibration.get(field_name)
+        if value:
+            calibration[field_name] = _resolve_config_artifact_path(value, config_path)
+    for field_name in ("session_root_path",):
         value = calibration.get(field_name)
         if value:
             calibration[field_name] = resolve_config_path(value, config_path)

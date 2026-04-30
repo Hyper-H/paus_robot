@@ -313,9 +313,20 @@ class UiRosBridge(Node):
                 result = self._shape_command_result("run_semi_auto", False, "Semi-auto calibration is already running.")
                 self._last_command_result = result
                 return result
+            client = self._service_clients["run_semi_auto"]
+            if not client.wait_for_service(timeout_sec=2.0):
+                result = self._shape_command_result("run_semi_auto", False, f"Service is unavailable: {client.srv_name}")
+                self._last_command_result = result
+                return result
             self._run_thread = threading.Thread(target=self._run_semi_auto_worker, daemon=True)
             self._run_thread.start()
-        result = self._shape_command_result("run_semi_auto", True, "Semi-auto calibration request started.", extra={"confirmation": confirmation})
+        result = self._shape_command_result(
+            "run_semi_auto",
+            False,
+            "Semi-auto calibration request queued.",
+            extra={"accepted": True, "queued": True, "confirmation": confirmation},
+        )
+        result["operator_message"] = "半自动标定请求已排队，等待标定节点确认。"
         self._last_command_result = result
         return result
 

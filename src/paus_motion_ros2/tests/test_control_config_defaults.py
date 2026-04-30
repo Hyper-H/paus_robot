@@ -73,6 +73,32 @@ class ConfigControlDefaultsTests(unittest.TestCase):
 
             self.assertEqual(resolved, str(project_root / "calibration_sessions"))
 
+    def test_default_yaml_paths_are_install_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            install_config_dir = Path(temp_dir) / "install" / "paus_bringup" / "share" / "paus_bringup" / "configs"
+            install_config_dir.mkdir(parents=True, exist_ok=True)
+            config_path = install_config_dir / "default.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "calibration": {
+                            "output_path": "extrinsics.yaml",
+                            "trajectory_path": "eye_to_hand_trajectory.yaml",
+                            "session_root_path": "calibration_sessions",
+                        }
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+            calibration = config["calibration"]
+
+            self.assertEqual(calibration["output_path"], str(install_config_dir / "extrinsics.yaml"))
+            self.assertEqual(calibration["trajectory_path"], str(install_config_dir / "eye_to_hand_trajectory.yaml"))
+            self.assertEqual(calibration["session_root_path"], str(Path(temp_dir) / "calibration_sessions"))
+
 
 class FairinoLinuxClientTests(unittest.TestCase):
     def test_normalize_pose_result_accepts_sdk_list_shape(self) -> None:
