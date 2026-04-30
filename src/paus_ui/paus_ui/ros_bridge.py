@@ -19,10 +19,11 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
-from paus_perception import load_camera_calibration, load_config, resolve_config_artifact_path, resolve_runtime_data_path
+from paus_perception import load_camera_calibration, load_config
 
 from .operator_messages import classify_operator_message
 from .overlay import BoardOverlayDetector, encode_jpeg, make_placeholder_image
+from .path_resolvers import resolve_ui_calibration_paths
 from .session_store import SessionStore
 
 
@@ -36,13 +37,6 @@ class CachedImage:
     sequence: int
     header_time_s: float | None
     received_time_s: float
-
-
-def resolve_ui_calibration_paths(config_path: str | Path, trajectory_path: str, session_root_path: str) -> tuple[Path, Path]:
-    return (
-        Path(resolve_config_artifact_path(trajectory_path, config_path)),
-        Path(resolve_runtime_data_path(session_root_path, config_path)),
-    )
 
 
 class EventBuffer:

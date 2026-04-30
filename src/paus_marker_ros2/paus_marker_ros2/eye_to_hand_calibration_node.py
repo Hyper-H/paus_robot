@@ -133,7 +133,6 @@ class EyeToHandCalibrationNode(Node):
         self.declare_parameter("tool_to_board.translation_m", [0.0, 0.0, 0.0])
         self.declare_parameter("tool_to_board.rotation_rpy_deg", [0.0, 0.0, 0.0])
         self.declare_parameter("min_sample_count", 10)
-        self.declare_parameter("output_path", str(bringup_share / "configs" / "extrinsics.yaml"))
 
         # 读取参数值。
         self.config_path = self.get_parameter("config_path").get_parameter_value().string_value
@@ -148,6 +147,7 @@ class EyeToHandCalibrationNode(Node):
         self.declare_parameter("move_vel", float(control_cfg["move_vel"]))
         self.declare_parameter("move_acc", float(control_cfg["move_acc"]))
         self.declare_parameter("execute_motion", bool(control_cfg["execute_motion"]))
+        self.declare_parameter("output_path", str(calibration_cfg.get("output_path", "extrinsics.yaml")))
         self.declare_parameter("trajectory_path", str(calibration_cfg.get("trajectory_path", bringup_share / "configs" / "eye_to_hand_trajectory.yaml")))
         self.declare_parameter("session_root_path", str(calibration_cfg.get("session_root_path", "/home/chen_lab/paus_robot/calibration_sessions")))
         self.declare_parameter("save_sample_images", bool(calibration_cfg.get("save_sample_images", True)))
@@ -352,6 +352,22 @@ class EyeToHandCalibrationNode(Node):
         self.session_owner = None
         self.samples.clear()
         self.current_solution = None
+
+    def _reject_manual_service_if_semi_auto_active(
+        self,
+        response: Trigger.Response,
+        *,
+        status: str,
+        operation: str,
+    ) -> bool:
+        with self._semi_auto_lock:
+            semi_auto_active = self._semi_auto_active
+        if not semi_auto_active:
+            return False
+        response.success = False
+        response.message = f"Semi-auto calibration is running; manual {operation} is disabled."
+        self._publish_status(status, response.message)
+        return True
 
     def _write_recorded_trajectory(self) -> None:
         save_trajectory(self.recorded_trajectory, self.trajectory_path)
@@ -583,6 +599,8 @@ class EyeToHandCalibrationNode(Node):
     # 采集一次样本。
     def _capture_sample_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         del request
+        if self._reject_manual_service_if_semi_auto_active(response, status="capture_rejected", operation="capture"):
+            return response
         try:
             sample = self._capture_one_sample()
             response.success = True
@@ -606,6 +624,8 @@ class EyeToHandCalibrationNode(Node):
     # 用已有样本求解外参。
     def _solve_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         del request
+        if self._reject_manual_service_if_semi_auto_active(response, status="solve_rejected", operation="solve"):
+            return response
         # 样本不足时直接拒绝求解。
         if len(self.samples) < self.min_sample_count:
             response.success = False
@@ -794,6 +814,8 @@ class EyeToHandCalibrationNode(Node):
 
     def _save_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         del request
+        if self._reject_manual_service_if_semi_auto_active(response, status="save_rejected", operation="save"):
+            return response
         # 如果还没有求解成功，就不允许保存。
         if self.current_solution is None or not self.current_solution.success:
             response.success = False
