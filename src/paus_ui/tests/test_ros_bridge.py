@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -16,8 +17,12 @@ from paus_ui.session_store import SessionStore
 class _ServiceClient:
     def __init__(self, ready: bool) -> None:
         self._ready = ready
+        self.srv_name = "/eye_to_hand/test"
 
     def service_is_ready(self) -> bool:
+        return self._ready
+
+    def wait_for_service(self, timeout_sec: float) -> bool:
         return self._ready
 
 
@@ -231,3 +236,40 @@ def test_successful_run_command_preserves_backend_message() -> None:
     )
 
     assert result["operator_message"] == result["message"]
+
+
+def test_start_run_reports_queued_request_as_pending_not_success() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        bridge = UiRosBridge.__new__(UiRosBridge)
+        bridge.trajectory_path = root / "trajectory.yaml"
+        bridge.session_root_path = root / "sessions"
+        bridge.max_reprojection_error_px = 0.0
+        bridge.min_board_margin_px = 10.0
+        bridge.execute_motion = False
+        bridge.effective_trajectory_path = bridge.trajectory_path
+        bridge.effective_session_root_path = bridge.session_root_path
+        bridge.effective_max_reprojection_error_px = bridge.max_reprojection_error_px
+        bridge.effective_min_board_margin_px = bridge.min_board_margin_px
+        bridge.effective_execute_motion = bridge.execute_motion
+        bridge._last_status_lock = threading.Lock()
+        bridge._last_status = {"execute_motion": False}
+        bridge._last_status_time_s = None
+        bridge._service_clients = {"run_semi_auto": _ServiceClient(True)}
+        bridge._run_lock = threading.Lock()
+        bridge._run_thread = None
+        bridge._last_command_result = None
+        bridge._run_semi_auto_worker = lambda: None
+        bridge.session_store = SessionStore(
+            session_root_path=bridge.session_root_path,
+            trajectory_path=bridge.trajectory_path,
+            max_reprojection_error_px=bridge.max_reprojection_error_px,
+            min_board_margin_px=bridge.min_board_margin_px,
+        )
+
+        result = UiRosBridge.start_semi_auto_run(bridge, confirmed=True)
+
+        assert result["accepted"] is True
+        assert result["queued"] is True
+        assert result["success"] is False
+        assert bridge._last_command_result == result

@@ -192,6 +192,7 @@ class EyeToHandCalibrationNode(Node):
         self.sample_log_path: Path | None = None
         self.report_path: Path | None = None
         self.run_log_path: Path | None = None
+        self.session_owner: str | None = None
 
         # 标定节点必须有相机内参文件，否则没法 solvePnP。
         ##runtimeerror表示运行时报错，即运行到这里时，状态不满足要求，所以不能继续
@@ -326,15 +327,17 @@ class EyeToHandCalibrationNode(Node):
         self.sample_log_path = self.sample_log_path_override or self.session_dir / "samples.jsonl"
         self.report_path = self.session_dir / "report.yaml"
         self.run_log_path = self.session_dir / "run.log"
+        self.session_owner = "semi_auto"
         self.samples.clear()
         self.current_solution = None
 
     def _ensure_session_started(self) -> None:
-        if self.session_dir is None:
+        if self.session_dir is None or self.session_owner != "manual":
             self.session_dir = create_session_dir(self.session_root_path)
             self.sample_log_path = self.sample_log_path_override or self.session_dir / "samples.jsonl"
             self.report_path = self.session_dir / "report.yaml"
             self.run_log_path = self.session_dir / "run.log"
+            self.session_owner = "manual"
             self.samples.clear()
             self.current_solution = None
 
@@ -343,6 +346,7 @@ class EyeToHandCalibrationNode(Node):
         self.sample_log_path = None
         self.report_path = None
         self.run_log_path = None
+        self.session_owner = None
         self.samples.clear()
         self.current_solution = None
 
