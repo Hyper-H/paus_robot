@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
+
+import cv2
+import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 UI_PACKAGE_ROOT = PROJECT_ROOT / "src" / "paus_ui"
 if str(UI_PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(UI_PACKAGE_ROOT))
 
-from paus_ui.ros_bridge import UiRosBridge
+from paus_ui.ros_bridge import CachedImage, UiRosBridge
 from paus_ui.session_store import SessionStore
 
 
@@ -273,3 +278,98 @@ def test_start_run_reports_queued_request_as_pending_not_success() -> None:
         assert result["queued"] is True
         assert result["success"] is False
         assert bridge._last_command_result == result
+
+
+def test_latest_quality_treats_stale_cached_image_as_unavailable() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        bridge = UiRosBridge.__new__(UiRosBridge)
+        bridge.trajectory_path = root / "trajectory.yaml"
+        bridge.session_root_path = root / "sessions"
+        bridge.max_reprojection_error_px = 0.0
+        bridge.min_board_margin_px = 10.0
+        bridge.execute_motion = False
+        bridge.effective_trajectory_path = bridge.trajectory_path
+        bridge.effective_session_root_path = bridge.session_root_path
+        bridge.effective_max_reprojection_error_px = bridge.max_reprojection_error_px
+        bridge.effective_min_board_margin_px = bridge.min_board_margin_px
+        bridge.effective_execute_motion = bridge.execute_motion
+        bridge._service_clients = {"run": _ServiceClient(False)}
+        bridge._last_status_lock = threading.Lock()
+        bridge._last_status = None
+        bridge._last_status_time_s = None
+        bridge._image_lock = threading.Lock()
+        bridge._latest_image = CachedImage(
+            image_bgr=np.zeros((32, 32, 3), dtype=np.uint8),
+            sequence=7,
+            header_time_s=None,
+            received_time_s=time.monotonic() - 10.0,
+        )
+        bridge.session_store = SessionStore(
+            session_root_path=bridge.session_root_path,
+            trajectory_path=bridge.trajectory_path,
+            max_reprojection_error_px=bridge.max_reprojection_error_px,
+            min_board_margin_px=bridge.min_board_margin_px,
+        )
+
+        quality = UiRosBridge.get_latest_quality(bridge)
+
+        assert quality["detected"] is False
+        assert quality["reason_code"] == "stale_image"
+        assert quality["image_sequence"] == 7
+
+
+def test_archived_sample_overlay_uses_saved_metadata_without_live_detector() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        trajectory_path = root / "trajectory.yaml"
+        trajectory_path.write_text("version: 1\nwaypoints: []\n", encoding="utf-8")
+        session_root = root / "sessions"
+        session_path = session_root / "2026-04-29_120000"
+        images_path = session_path / "images"
+        images_path.mkdir(parents=True)
+        image_path = images_path / "sample_001.png"
+        cv2.imwrite(str(image_path), np.full((96, 128, 3), 210, dtype=np.uint8))
+        with (session_path / "samples.jsonl").open("w", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "sample_index": 1,
+                        "image_path": str(image_path),
+                        "image_sequence": 42,
+                        "reprojection_error_px": 2.5,
+                        "board_margin_px": 120.0,
+                        "camera_to_board_translation_m": [0.1, 0.2, 0.3],
+                        "camera_to_board_rotation_rpy_deg": [1.0, 2.0, 3.0],
+                    }
+                )
+                + "\n"
+            )
+        bridge = UiRosBridge.__new__(UiRosBridge)
+        bridge.trajectory_path = trajectory_path
+        bridge.session_root_path = session_root
+        bridge.max_reprojection_error_px = 0.0
+        bridge.min_board_margin_px = 10.0
+        bridge.execute_motion = False
+        bridge.effective_trajectory_path = bridge.trajectory_path
+        bridge.effective_session_root_path = bridge.session_root_path
+        bridge.effective_max_reprojection_error_px = bridge.max_reprojection_error_px
+        bridge.effective_min_board_margin_px = bridge.min_board_margin_px
+        bridge.effective_execute_motion = bridge.execute_motion
+        bridge._service_clients = {"run": _ServiceClient(False)}
+        bridge._last_status_lock = threading.Lock()
+        bridge._last_status = None
+        bridge._last_status_time_s = None
+        bridge.session_store = SessionStore(
+            session_root_path=session_root,
+            trajectory_path=trajectory_path,
+            max_reprojection_error_px=bridge.max_reprojection_error_px,
+            min_board_margin_px=bridge.min_board_margin_px,
+        )
+
+        raw = UiRosBridge.get_sample_jpeg(bridge, session_id=session_path.name, row_index=1, mode="raw")
+        overlay = UiRosBridge.get_sample_jpeg(bridge, session_id=session_path.name, row_index=1, mode="overlay")
+
+        assert raw.startswith(b"\xff\xd8")
+        assert overlay.startswith(b"\xff\xd8")
+        assert overlay != raw

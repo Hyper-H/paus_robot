@@ -66,7 +66,7 @@ class SessionStore:
         for session in sessions:
             if session.get("has_report"):
                 return str(session["id"])
-        return str(sessions[0]["id"]) if sessions else None
+        return None
 
     def read_report(self, session_id: str) -> dict[str, Any]:
         session_path = self._session_path(session_id)
@@ -122,6 +122,12 @@ class SessionStore:
             sample["capture_time_s"] = sample.get("image_header_time_s") or sample.get("image_received_time_s")
             sample["thresholds"] = self._quality_flags(sample.get("reprojection_error_px"), sample.get("board_margin_px"))
         return samples
+
+    def sample_for_row(self, session_id: str, row_index: int) -> dict[str, Any] | None:
+        samples = self.read_samples(session_id)
+        if row_index < 1 or row_index > len(samples):
+            return None
+        return samples[row_index - 1]
 
     def read_run_events(self, session_id: str) -> list[dict[str, Any]]:
         return self._read_jsonl(self._session_path(session_id) / "run.log")
@@ -231,10 +237,9 @@ class SessionStore:
         return self._read_waypoints_from_path(self.trajectory_path)
 
     def sample_image_path(self, session_id: str, row_index: int) -> Path | None:
-        samples = self.read_samples(session_id)
-        if row_index < 1 or row_index > len(samples):
+        sample = self.sample_for_row(session_id, row_index)
+        if sample is None:
             return None
-        sample = samples[row_index - 1]
         image_path = sample.get("image_path")
         if image_path:
             candidate = Path(str(image_path))

@@ -27,6 +27,7 @@ from .session_store import SessionStore
 
 
 STATUS_QOS = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+CAMERA_FRESHNESS_S = 3.0
 
 
 @dataclass
@@ -264,7 +265,7 @@ class UiRosBridge(Node):
         with self._last_status_lock:
             last_status = dict(self._last_status) if self._last_status else None
             last_status_age_s = (time.monotonic() - self._last_status_time_s) if self._last_status_time_s else None
-        camera_age_s = (time.monotonic() - latest_image.received_time_s) if latest_image else None
+        camera_age_s = self._image_age_s(latest_image)
         shaped_status = self._shape_status_payload(last_status)
         backend_state = self._sync_backend_state(last_status, last_status_age_s)
         current_waypoint = dict(shaped_status["current_waypoint"])
@@ -288,7 +289,7 @@ class UiRosBridge(Node):
                 "url": f"http://{self.ui_host}:{self.ui_port}",
             },
             "camera": {
-                "connected": camera_age_s is not None and camera_age_s < 3.0,
+                "connected": camera_age_s is not None and camera_age_s < CAMERA_FRESHNESS_S,
                 "image_sequence": latest_image.sequence if latest_image else 0,
                 "age_s": camera_age_s,
                 "topic": self.image_topic,
@@ -337,6 +338,17 @@ class UiRosBridge(Node):
                 "image_sequence": 0,
                 "thresholds": self._quality_flags(None, None),
             }
+        image_age_s = self._image_age_s(latest_image)
+        if image_age_s is None or image_age_s >= CAMERA_FRESHNESS_S:
+            return {
+                "detected": False,
+                "reason": "Latest image is stale.",
+                "reason_code": "stale_image",
+                "operator_message": "Camera image is stale; check the camera stream.",
+                "image_sequence": latest_image.sequence,
+                "image_age_s": image_age_s,
+                "thresholds": self._quality_flags(None, None),
+            }
         detector = self._get_detector()
         if detector is None:
             return {
@@ -357,6 +369,9 @@ class UiRosBridge(Node):
         latest_image = self._latest_image_copy()
         if latest_image is None:
             return encode_jpeg(make_placeholder_image("Waiting for /camera/image_bridge"))
+        image_age_s = self._image_age_s(latest_image)
+        if image_age_s is None or image_age_s >= CAMERA_FRESHNESS_S:
+            return encode_jpeg(make_placeholder_image("Camera stream is stale"))
         if mode == "raw":
             return encode_jpeg(latest_image.image_bgr)
         detector = self._get_detector()
@@ -378,18 +393,19 @@ class UiRosBridge(Node):
 
     def get_sample_jpeg(self, *, session_id: str, row_index: int, mode: str = "overlay", show_axes: bool = True) -> bytes:
         self._sync_backend_state()
-        image_path = self.session_store.sample_image_path(session_id, row_index)
-        if image_path is None:
+        sample = self.session_store.sample_for_row(session_id, row_index)
+        if sample is None:
+            return encode_jpeg(make_placeholder_image("Sample image not found"))
+        image_path_value = sample.get("image_path")
+        image_path = Path(str(image_path_value)) if image_path_value else None
+        if image_path is None or not image_path.exists():
             return encode_jpeg(make_placeholder_image("Sample image not found"))
         image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
         if image_bgr is None:
             return encode_jpeg(make_placeholder_image("Failed to read sample image"))
         if mode == "raw":
             return encode_jpeg(image_bgr)
-        detector = self._get_detector()
-        if detector is None:
-            return encode_jpeg(image_bgr)
-        rendered, _ = detector.render(image_bgr, mode=mode, image_sequence=row_index, show_axes=show_axes)
+        rendered = self._render_archived_sample_overlay(image_bgr, sample, mode=mode, row_index=row_index, show_axes=show_axes)
         return encode_jpeg(rendered)
 
     def record_waypoint(self) -> dict[str, Any]:
@@ -514,6 +530,9 @@ class UiRosBridge(Node):
                 header_time_s=latest.header_time_s,
                 received_time_s=latest.received_time_s,
             )
+
+    def _image_age_s(self, image: CachedImage | None) -> float | None:
+        return (time.monotonic() - image.received_time_s) if image is not None else None
 
     def _get_detector(self) -> BoardOverlayDetector | None:
         if not self.camera_config_path.exists():
@@ -640,6 +659,57 @@ class UiRosBridge(Node):
             "operator_message": "当前停止按钮只能给出提示；如需立即停止真实运动，请使用实体急停或终端中断。",
         }
 
+    def _render_archived_sample_overlay(
+        self,
+        image_bgr: np.ndarray,
+        sample: dict[str, Any],
+        *,
+        mode: str,
+        row_index: int,
+        show_axes: bool,
+    ) -> np.ndarray:
+        output = image_bgr.copy()
+        translation = sample.get("camera_to_board_translation_m") or [None, None, None]
+        rotation = sample.get("camera_to_board_rotation_rpy_deg") or [None, None, None]
+        lines = [
+            f"archived_sample: {row_index}",
+            f"mode: {mode if mode in {'overlay', 'pose'} else 'overlay'}",
+            f"image_sequence: {sample.get('image_sequence', '-')}",
+            f"reprojection_error_px: {_format_optional_float(sample.get('reprojection_error_px'), 3)}",
+            f"board_margin_px: {_format_optional_float(sample.get('board_margin_px'), 1)}",
+            "T_camera_board: "
+            f"x={_format_optional_float(translation[0], 3)} "
+            f"y={_format_optional_float(translation[1], 3)} "
+            f"z={_format_optional_float(translation[2], 3)} m",
+        ]
+        if mode == "pose":
+            lines.append(
+                "rpy_deg: "
+                f"rx={_format_optional_float(rotation[0], 3)} "
+                f"ry={_format_optional_float(rotation[1], 3)} "
+                f"rz={_format_optional_float(rotation[2], 3)}"
+            )
+            lines.append(f"axes: {'metadata only' if show_axes else 'off'}")
+
+        line_height = 24
+        panel_width = min(max(620, int(output.shape[1] * 0.45)), output.shape[1] - 20)
+        panel_height = 18 + line_height * len(lines)
+        panel = output.copy()
+        cv2.rectangle(panel, (12, 12), (12 + panel_width, 12 + panel_height), (15, 22, 33), -1)
+        cv2.addWeighted(panel, 0.72, output, 0.28, 0.0, output)
+        for index, line in enumerate(lines):
+            cv2.putText(
+                output,
+                line[:88],
+                (26, 42 + line_height * index),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.62,
+                (238, 247, 246),
+                2,
+                cv2.LINE_AA,
+            )
+        return output
+
     def _shape_command_result(self, command: str, success: bool, message: str, *, extra: dict[str, Any] | None = None) -> dict[str, Any]:
         info = classify_operator_message(message)
         success_messages = {
@@ -686,6 +756,11 @@ def _to_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _format_optional_float(value: Any, digits: int) -> str:
+    number = _to_float(value)
+    return "--" if number is None else f"{number:.{digits}f}"
 
 
 def _to_int(value: Any) -> int | None:

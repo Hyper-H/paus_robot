@@ -312,3 +312,38 @@ def test_session_store_detects_fallback_sample_images(tmp_path: Path) -> None:
     samples = store.read_samples("2026-04-29_124000")
     assert samples[0]["has_image"] is True
     assert samples[0]["image_path"] == str(fallback_image)
+
+
+def test_latest_valid_session_skips_newer_archives_without_report(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
+    trajectory_path.write_text(
+        yaml.safe_dump({"version": 1, "tool_id": 0, "user_id": 0, "defaults": {"motion": "movej"}, "waypoints": []}),
+        encoding="utf-8",
+    )
+    session_root = tmp_path / "calibration_sessions"
+    older_report = session_root / "2026-04-29_120000"
+    newer_empty = session_root / "2026-04-29_130000"
+    older_report.mkdir(parents=True)
+    newer_empty.mkdir(parents=True)
+    (older_report / "report.yaml").write_text(
+        yaml.safe_dump({"sample_count": 1, "method": "joint_absolute"}),
+        encoding="utf-8",
+    )
+
+    store = SessionStore(session_root_path=session_root, trajectory_path=trajectory_path)
+
+    assert store.latest_valid_session_id() == "2026-04-29_120000"
+
+
+def test_latest_valid_session_returns_none_for_only_no_report_archives(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
+    trajectory_path.write_text(
+        yaml.safe_dump({"version": 1, "tool_id": 0, "user_id": 0, "defaults": {"motion": "movej"}, "waypoints": []}),
+        encoding="utf-8",
+    )
+    session_root = tmp_path / "calibration_sessions"
+    (session_root / "2026-04-29_130000").mkdir(parents=True)
+
+    store = SessionStore(session_root_path=session_root, trajectory_path=trajectory_path)
+
+    assert store.latest_valid_session_id() is None
