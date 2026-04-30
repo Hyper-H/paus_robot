@@ -865,9 +865,8 @@ class EyeToHandCalibrationNode(Node):
                 record_quality=record_quality,
             )
             self.recorded_trajectory.waypoints.append(waypoint)
-            self._write_recorded_trajectory()
             response.success = True
-            response.message = f"Recorded {waypoint.name} to {self.trajectory_path}. {self._format_record_quality(record_quality)}."
+            response.message = f"Recorded {waypoint.name} in memory. Press finish/save to write {self.trajectory_path}. {self._format_record_quality(record_quality)}."
             self._append_run_log("waypoint_recorded", waypoint.to_payload())
             self._publish_status(
                 "waypoint_recorded",
@@ -890,12 +889,8 @@ class EyeToHandCalibrationNode(Node):
             self._publish_status("delete_waypoint_failed", response.message)
             return response
         removed = self.recorded_trajectory.waypoints.pop()
-        if self.recorded_trajectory.waypoints:
-            self._write_recorded_trajectory()
-        elif self.trajectory_path.exists():
-            self.trajectory_path.unlink()
         response.success = True
-        response.message = f"Deleted {removed.name} from {self.trajectory_path}."
+        response.message = f"Deleted {removed.name} from the in-memory recording."
         self._append_run_log("waypoint_deleted", removed.to_payload())
         self._publish_status("waypoint_deleted", response.message, {"waypoint_count": len(self.recorded_trajectory.waypoints)})
         return response

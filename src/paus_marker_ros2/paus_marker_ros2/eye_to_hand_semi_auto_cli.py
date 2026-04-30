@@ -191,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        should_record = args.record or (not args.run_only and not trajectory_path.exists())
+        should_record = args.record or args.record_only or (not args.run_only and not trajectory_path.exists())
         if should_record:
             recorded = _interactive_record(node, args.timeout_s)
             if not recorded:
