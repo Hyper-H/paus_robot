@@ -75,3 +75,8 @@ Read `.humanize/bitlesson.md` before implementation. `bitlesson-select.sh` retur
 
 ### Justification:
 Round 1 addresses the blocker from Round 0 by implementing the planned UI/data work, validating it on the lab Linux host without touching the true robot path, and preserving the project requirement that ROS2/camera/robot execution stays on `chen_lab@192.168.58.183`.
+
+## BitLesson Delta
+- Action: none
+- Lesson ID(s): NONE
+- Notes: No reusable failure/fix lesson was added in this round. All selected tasks returned `LESSON_IDS: NONE` because `.humanize/bitlesson.md` currently contains only the template and no prior entries.
