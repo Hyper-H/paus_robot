@@ -113,6 +113,7 @@ class EyeToHandCalibrationNode(Node):
         # 声明节点参数。如果用户用 launch 文件覆盖参数，这些默认值就会被覆盖掉。
         self.declare_parameter("config_path", str(default_config_path))
         self.declare_parameter("camera_config_path", "/tmp/paus_robot/camera.yaml")
+        self.declare_parameter("camera_config_wait_timeout_s", 15.0)
         self.declare_parameter("image_topic", "/camera/image_bridge")
         self.declare_parameter("status_topic", "/eye_to_hand/status")
         self.declare_parameter("board_rows", 6)
@@ -151,6 +152,7 @@ class EyeToHandCalibrationNode(Node):
         self.declare_parameter("dwell_s", float(calibration_cfg.get("dwell_s", 0.5)))
 
         camera_config_path = self.get_parameter("camera_config_path").get_parameter_value().string_value
+        self.camera_config_wait_timeout_s = float(self.get_parameter("camera_config_wait_timeout_s").get_parameter_value().double_value)
         self.image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
         self.status_topic = self.get_parameter("status_topic").get_parameter_value().string_value
         self.board_rows = int(self.get_parameter("board_rows").get_parameter_value().integer_value)
@@ -189,6 +191,7 @@ class EyeToHandCalibrationNode(Node):
         ##runtimeerror表示运行时报错，即运行到这里时，状态不满足要求，所以不能继续
         if not camera_config_path:
             raise RuntimeError("camera_config_path is required for eye-to-hand calibration.")
+        camera_config_path = str(self._wait_for_camera_config(camera_config_path))
         # 加载相机内参。
         self.camera_calibration = load_camera_calibration(camera_config_path)
 
@@ -224,6 +227,21 @@ class EyeToHandCalibrationNode(Node):
         self._append_run_log("node_started", {"session_dir": str(self.session_dir), "trajectory_path": str(self.trajectory_path)})
         self._publish_status("ready", "Eye-to-hand calibration node started.", {"session_dir": str(self.session_dir), "trajectory_path": str(self.trajectory_path)})
 
+    def _wait_for_camera_config(self, camera_config_path: str) -> Path:
+        path = Path(camera_config_path)
+        deadline = time.monotonic() + max(0.0, self.camera_config_wait_timeout_s)
+        while True:
+            try:
+                if path.exists() and path.stat().st_size > 0:
+                    return path
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"camera_config_path does not exist after waiting {self.camera_config_wait_timeout_s:.1f}s: {path}"
+                )
+            time.sleep(0.1)
+
     # 接收最新图像。
     def _image_callback(self, message: Image) -> None:
         image_bgr = self.bridge.imgmsg_to_cv2(message, desired_encoding="bgr8")
@@ -248,6 +266,7 @@ class EyeToHandCalibrationNode(Node):
             "sample_count": len(self.samples),
             "min_sample_count": self.min_sample_count,
             "solver_method": self.solver_method,
+            "session_dir": str(self.session_dir),
         }
         if extra:
             payload.update(extra)
@@ -281,6 +300,14 @@ class EyeToHandCalibrationNode(Node):
             default_acc=self.move_acc,
             default_dwell_s=self.dwell_s,
         )
+
+    def _begin_new_semi_auto_session(self) -> None:
+        self.session_dir = create_session_dir(self.session_root_path)
+        self.sample_log_path = self.session_dir / "samples.jsonl"
+        self.report_path = self.session_dir / "report.yaml"
+        self.run_log_path = self.session_dir / "run.log"
+        self.samples.clear()
+        self.current_solution = None
 
     def _write_recorded_trajectory(self) -> None:
         save_trajectory(self.recorded_trajectory, self.trajectory_path)
@@ -816,8 +843,14 @@ class EyeToHandCalibrationNode(Node):
                 self._publish_status("semi_auto_failed", response.message)
                 return response
             trajectory = load_trajectory(self.trajectory_path)
+            self._begin_new_semi_auto_session()
             shutil.copy2(self.trajectory_path, self.session_dir / "trajectory_used.yaml")
             self._append_run_log("semi_auto_started", {"trajectory_path": str(self.trajectory_path), "execute_motion": self.execute_motion})
+            self._publish_status(
+                "semi_auto_started",
+                "Semi-auto calibration run started.",
+                {"trajectory_path": str(self.trajectory_path), "execute_motion": self.execute_motion},
+            )
 
             if not self.execute_motion:
                 for waypoint in trajectory.waypoints:

@@ -37,6 +37,7 @@ def _launch_setup(context, *args, **kwargs):
     camera_index = LaunchConfiguration("camera_index").perform(context).strip()
     image_topic = LaunchConfiguration("image_topic").perform(context)
     status_topic = LaunchConfiguration("status_topic").perform(context)
+    camera_config_wait_timeout_s = float(LaunchConfiguration("camera_config_wait_timeout_s").perform(context))
     ui_host = LaunchConfiguration("ui_host").perform(context)
     ui_port = int(LaunchConfiguration("ui_port").perform(context))
     board_rows = int(LaunchConfiguration("board_rows").perform(context))
@@ -89,6 +90,11 @@ def _launch_setup(context, *args, **kwargs):
                 executable="image_receiver_node",
                 name="image_receiver_node",
                 output="screen",
+                parameters=[
+                    {
+                        "image_topic": image_topic,
+                    }
+                ],
             )
         )
     if start_camera_bridge:
@@ -106,37 +112,44 @@ def _launch_setup(context, *args, **kwargs):
             )
         )
     if start_calibration_node:
+        calibration_node = Node(
+            package="paus_marker_ros2",
+            executable="eye_to_hand_calibration_node",
+            name="eye_to_hand_calibration_node",
+            output="screen",
+            parameters=[
+                {
+                    "config_path": config_path,
+                    "camera_config_path": camera_config_output,
+                    "camera_config_wait_timeout_s": camera_config_wait_timeout_s,
+                    "image_topic": image_topic,
+                    "status_topic": status_topic,
+                    "board_rows": board_rows,
+                    "board_cols": board_cols,
+                    "square_size_m": square_size_m,
+                    "solver_method": solver_method,
+                    "min_sample_count": min_sample_count,
+                    "output_path": output_path,
+                    "trajectory_path": trajectory_path,
+                    "session_root_path": session_root_path,
+                    "save_sample_images": save_sample_images,
+                    "max_reprojection_error_px": max_reprojection_error_px,
+                    "min_board_margin_px": min_board_margin_px,
+                    "stable_position_tolerance_mm": stable_position_tolerance_mm,
+                    "stable_rotation_tolerance_deg": stable_rotation_tolerance_deg,
+                    "stable_window_s": stable_window_s,
+                    "stable_timeout_s": stable_timeout_s,
+                    "dwell_s": dwell_s,
+                    "execute_motion": execute_motion,
+                    "tool_to_board.translation_m": [tool_to_board_tx, tool_to_board_ty, tool_to_board_tz],
+                    "tool_to_board.rotation_rpy_deg": [tool_to_board_rx, tool_to_board_ry, tool_to_board_rz],
+                }
+            ],
+        )
         actions.append(
-            Node(
-                package="paus_marker_ros2",
-                executable="eye_to_hand_calibration_node",
-                name="eye_to_hand_calibration_node",
-                output="screen",
-                parameters=[
-                    {
-                        "config_path": config_path,
-                        "camera_config_path": camera_config_output,
-                        "board_rows": board_rows,
-                        "board_cols": board_cols,
-                        "square_size_m": square_size_m,
-                        "solver_method": solver_method,
-                        "min_sample_count": min_sample_count,
-                        "output_path": output_path,
-                        "trajectory_path": trajectory_path,
-                        "session_root_path": session_root_path,
-                        "save_sample_images": save_sample_images,
-                        "max_reprojection_error_px": max_reprojection_error_px,
-                        "min_board_margin_px": min_board_margin_px,
-                        "stable_position_tolerance_mm": stable_position_tolerance_mm,
-                        "stable_rotation_tolerance_deg": stable_rotation_tolerance_deg,
-                        "stable_window_s": stable_window_s,
-                        "stable_timeout_s": stable_timeout_s,
-                        "dwell_s": dwell_s,
-                        "execute_motion": execute_motion,
-                        "tool_to_board.translation_m": [tool_to_board_tx, tool_to_board_ty, tool_to_board_tz],
-                        "tool_to_board.rotation_rpy_deg": [tool_to_board_rx, tool_to_board_ry, tool_to_board_rz],
-                    }
-                ],
+            TimerAction(
+                period=2.0 if start_camera_bridge else 0.0,
+                actions=[calibration_node],
             )
         )
 
@@ -204,6 +217,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("camera_index", default_value="", description="Optional camera index. Leave empty to use auto-selection."),
             DeclareLaunchArgument("image_topic", default_value="/camera/image_bridge", description="Image topic used by the UI preview."),
             DeclareLaunchArgument("status_topic", default_value="/eye_to_hand/status", description="Eye-to-hand JSON status topic."),
+            DeclareLaunchArgument("camera_config_wait_timeout_s", default_value="15.0", description="How long the calibration node waits for camera.yaml to be written."),
             DeclareLaunchArgument("ui_host", default_value="0.0.0.0", description="UI bind host."),
             DeclareLaunchArgument("ui_port", default_value="8080", description="UI HTTP port."),
             DeclareLaunchArgument("board_rows", default_value=str(calibration_cfg.get("board_rows", 6)), description="Chessboard inner-corner rows."),

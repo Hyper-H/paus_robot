@@ -9,6 +9,7 @@ const state = {
   quality: null,
   sessions: [],
   waypoints: [],
+  userSelectedSession: false,
   lastEventId: 0,
   wsConnected: false,
   eventDedupe: new Map(),
@@ -144,8 +145,10 @@ async function refreshStatus() {
   } else if (current.empty_reason) {
     els.boardAngle.textContent = current.empty_reason;
   }
-  if (session.session_id && !state.selectedSession) {
-    state.selectedSession = session.latest_valid_session_id || session.session_id;
+  if (session.session_id && !state.userSelectedSession && state.selectedSession !== session.session_id) {
+    state.selectedSession = session.session_id;
+  } else if (!state.selectedSession) {
+    state.selectedSession = session.latest_valid_session_id || session.session_id || "";
   }
   const result = handeye.last_command_result;
   if (result) {
@@ -183,6 +186,9 @@ async function refreshSessions() {
   const sessions = await getJson("/api/sessions", []);
   state.sessions = sessions;
   const selectedStillExists = sessions.some((session) => session.id === state.selectedSession);
+  if (!selectedStillExists) {
+    state.userSelectedSession = false;
+  }
   if ((!state.selectedSession || !selectedStillExists) && sessions.length) {
     const preferred = sessions.find((session) => session.has_solution) || sessions.find((session) => session.has_report) || sessions[0];
     state.selectedSession = preferred.id;
@@ -528,6 +534,7 @@ function bindUi() {
   document.getElementById("stop-btn").addEventListener("click", () => runCommand("停止", "/api/handeye/stop"));
   document.getElementById("refresh-btn").addEventListener("click", refreshAll);
   els.sessionSelect.addEventListener("change", () => {
+    state.userSelectedSession = true;
     state.selectedSession = els.sessionSelect.value;
     state.selectedWaypointName = "";
     state.selectedSampleRow = null;

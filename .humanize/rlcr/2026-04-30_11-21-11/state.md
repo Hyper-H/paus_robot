@@ -1,5 +1,5 @@
 ---
-current_round: 3
+current_round: 4
 max_iterations: 42
 codex_model: gpt-5.4
 codex_effort: high
@@ -11,7 +11,7 @@ plan_tracked: true
 start_branch: codex/handeye-ui-rlcr
 base_branch: main
 base_commit: ebb8088c6a6e5360ed5659073e1a627cc48ad0b2
-review_started: false
+review_started: true
 ask_codex_question: true
 session_id:
 agent_teams: false
