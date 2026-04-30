@@ -239,6 +239,61 @@ def test_backend_status_updates_overlay_detector_settings() -> None:
         assert bridge._detector_signature is None
 
 
+def test_get_status_does_not_recompute_latest_quality() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        trajectory_path = root / "trajectory.yaml"
+        trajectory_path.write_text("version: 1\nwaypoints: []\n", encoding="utf-8")
+        bridge = UiRosBridge.__new__(UiRosBridge)
+        bridge.ui_host = "0.0.0.0"
+        bridge.ui_port = 8080
+        bridge.image_topic = "/camera/image_bridge"
+        bridge.status_topic = "/eye_to_hand/status"
+        bridge.camera_config_path = root / "camera.yaml"
+        bridge.config_path = str(root / "default.yaml")
+        bridge.board_rows = 6
+        bridge.board_cols = 9
+        bridge.square_size_m = 0.01
+        bridge._image_lock = threading.Lock()
+        bridge._latest_image = None
+        bridge._last_status_lock = threading.Lock()
+        bridge._last_status = {
+            "status": "waypoint_pose_estimated",
+            "camera_to_board_translation_m": [0.1, 0.2, 0.3],
+            "camera_to_board_rotation_rpy_deg": [1.0, 2.0, 3.0],
+            "board_angle_deg": 12.0,
+            "quality_detected": True,
+            "image_sequence": 42,
+        }
+        bridge._last_status_time_s = time.monotonic()
+        bridge._last_command_result = None
+        bridge._run_thread = None
+        bridge.session_store = SessionStore(
+            session_root_path=root / "sessions",
+            trajectory_path=trajectory_path,
+            max_reprojection_error_px=0.0,
+            min_board_margin_px=10.0,
+        )
+        bridge._sync_backend_state = lambda *_args: {
+            "backend_connected": True,
+            "execute_motion": False,
+            "motion_state_known": True,
+            "config_source": "backend_status",
+            "trajectory_path": trajectory_path,
+            "session_root_path": root / "sessions",
+            "max_reprojection_error_px": 0.0,
+            "min_board_margin_px": 10.0,
+        }
+        bridge._motion_summary = lambda: {}
+        bridge._stop_status = lambda: {}
+        bridge.get_latest_quality = lambda: (_ for _ in ()).throw(AssertionError("get_status must stay cheap"))
+
+        status = UiRosBridge.get_status(bridge)
+
+        assert status["handeye"]["current_waypoint"]["camera_to_board_translation_m"] == [0.1, 0.2, 0.3]
+        assert status["handeye"]["current_waypoint"]["image_sequence"] == 42
+
+
 def test_successful_run_command_preserves_backend_message() -> None:
     bridge = UiRosBridge.__new__(UiRosBridge)
 

@@ -273,16 +273,16 @@ class UiRosBridge(Node):
         shaped_status = self._shape_status_payload(last_status)
         backend_state = self._sync_backend_state(last_status, last_status_age_s)
         current_waypoint = dict(shaped_status["current_waypoint"])
-        quality = self.get_latest_quality()
+        status_payload = last_status or {}
         current_waypoint.update(
             {
-                "camera_to_board_translation_m": quality.get("camera_to_board_translation_m"),
-                "camera_to_board_rotation_rpy_deg": quality.get("camera_to_board_rotation_rpy_deg"),
-                "board_angle_deg": quality.get("board_angle_deg"),
-                "quality_detected": quality.get("detected"),
-                "quality_reason_code": quality.get("reason_code"),
-                "empty_reason": None if quality.get("detected") else quality.get("operator_message"),
-                "image_sequence": quality.get("image_sequence"),
+                "camera_to_board_translation_m": status_payload.get("camera_to_board_translation_m"),
+                "camera_to_board_rotation_rpy_deg": status_payload.get("camera_to_board_rotation_rpy_deg"),
+                "board_angle_deg": status_payload.get("board_angle_deg"),
+                "quality_detected": status_payload.get("quality_detected", status_payload.get("detected")),
+                "quality_reason_code": status_payload.get("quality_reason_code", status_payload.get("reason_code")),
+                "empty_reason": status_payload.get("empty_reason"),
+                "image_sequence": status_payload.get("image_sequence"),
             }
         )
         latest_session = self.session_store.latest_valid_session_id()

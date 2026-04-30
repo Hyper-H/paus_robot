@@ -841,6 +841,8 @@ class EyeToHandCalibrationNode(Node):
 
     def _record_waypoint_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         del request
+        if self._reject_manual_service_if_semi_auto_active(response, status="record_waypoint_rejected", operation="waypoint recording"):
+            return response
         try:
             joint_error, joint_deg = self.linux_client.get_actual_joint_pos_degree()
             if joint_error != 0:
@@ -877,6 +879,8 @@ class EyeToHandCalibrationNode(Node):
 
     def _delete_last_waypoint_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         del request
+        if self._reject_manual_service_if_semi_auto_active(response, status="delete_waypoint_rejected", operation="waypoint deletion"):
+            return response
         if not self.recorded_trajectory.waypoints:
             response.success = False
             response.message = "No recorded waypoint to delete."
@@ -895,6 +899,8 @@ class EyeToHandCalibrationNode(Node):
 
     def _save_trajectory_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         del request
+        if self._reject_manual_service_if_semi_auto_active(response, status="save_trajectory_rejected", operation="trajectory save"):
+            return response
         if not self.recorded_trajectory.waypoints:
             response.success = False
             response.message = "No recorded waypoints to save."
