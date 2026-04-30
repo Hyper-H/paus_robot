@@ -10,6 +10,7 @@ const state = {
   sessions: [],
   waypoints: [],
   userSelectedSession: false,
+  autoSelectedSession: false,
   lastEventId: 0,
   wsConnected: false,
   eventDedupe: new Map(),
@@ -153,6 +154,10 @@ async function refreshStatus() {
   }
   if (session.session_id && handeye.run_active && !state.userSelectedSession && state.selectedSession !== session.session_id) {
     state.selectedSession = session.session_id;
+    state.autoSelectedSession = true;
+  } else if (!handeye.run_active && state.autoSelectedSession) {
+    state.selectedSession = "";
+    state.autoSelectedSession = false;
   }
   const result = handeye.last_command_result;
   if (result) {
@@ -192,6 +197,7 @@ async function refreshSessions() {
   const selectedStillExists = sessions.some((session) => session.id === state.selectedSession);
   if (state.selectedSession && !selectedStillExists) {
     state.selectedSession = "";
+    state.autoSelectedSession = false;
     state.userSelectedSession = false;
   }
   const options = ['<option value="">当前示教轨迹</option>'];
@@ -538,6 +544,7 @@ function bindUi() {
   document.getElementById("refresh-btn").addEventListener("click", refreshAll);
   els.sessionSelect.addEventListener("change", () => {
     state.userSelectedSession = true;
+    state.autoSelectedSession = false;
     state.selectedSession = els.sessionSelect.value;
     state.selectedWaypointName = "";
     state.selectedSampleRow = null;

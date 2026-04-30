@@ -57,6 +57,7 @@ from paus_marker_ros2.semi_auto_calibration import (
     empty_trajectory,
     load_trajectory,
     save_trajectory,
+    session_owner_matches,
     wrapped_rotation_delta_norm_deg,
 )
 
@@ -332,7 +333,7 @@ class EyeToHandCalibrationNode(Node):
         self.current_solution = None
 
     def _ensure_session_started(self, owner: str = "manual") -> None:
-        if self.session_dir is None or self.session_owner != owner:
+        if self.session_dir is None or not session_owner_matches(self.session_owner, owner):
             self.session_dir = create_session_dir(self.session_root_path)
             self.sample_log_path = self.sample_log_path_override or self.session_dir / "samples.jsonl"
             self.report_path = self.session_dir / "report.yaml"

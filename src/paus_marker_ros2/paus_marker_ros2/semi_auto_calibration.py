@@ -18,6 +18,10 @@ class TrajectoryValidationError(ValueError):
     pass
 
 
+def session_owner_matches(current_owner: str | None, requested_owner: str) -> bool:
+    return current_owner == requested_owner
+
+
 def wrapped_rotation_delta_norm_deg(current_rpy_deg: list[float], reference_rpy_deg: list[float]) -> float:
     if len(current_rpy_deg) != 3 or len(reference_rpy_deg) != 3:
         raise TrajectoryValidationError("current_rpy_deg and reference_rpy_deg must contain 3 values.")
