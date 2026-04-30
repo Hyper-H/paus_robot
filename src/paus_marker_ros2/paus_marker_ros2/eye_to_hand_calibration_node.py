@@ -626,6 +626,9 @@ class EyeToHandCalibrationNode(Node):
         del request
         if self._reject_manual_service_if_semi_auto_active(response, status="solve_rejected", operation="solve"):
             return response
+        return self._solve_samples(response)
+
+    def _solve_samples(self, response: Trigger.Response) -> Trigger.Response:
         # 样本不足时直接拒绝求解。
         if len(self.samples) < self.min_sample_count:
             response.success = False
@@ -1130,7 +1133,7 @@ class EyeToHandCalibrationNode(Node):
                 )
                 return response
 
-            solve_response = self._solve_callback(Trigger.Request(), Trigger.Response())
+            solve_response = self._solve_samples(Trigger.Response())
             if not solve_response.success:
                 raise RuntimeError(solve_response.message)
             self._save_current_solution()
