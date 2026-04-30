@@ -13,6 +13,14 @@ from paus_ui.ros_bridge import UiRosBridge
 from paus_ui.session_store import SessionStore
 
 
+class _ServiceClient:
+    def __init__(self, ready: bool) -> None:
+        self._ready = ready
+
+    def service_is_ready(self) -> bool:
+        return self._ready
+
+
 def test_get_detector_returns_none_for_malformed_camera_yaml() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         camera_yaml = Path(temp_dir) / "camera.yaml"
@@ -41,7 +49,7 @@ def test_backend_status_overrides_ui_local_motion_and_paths() -> None:
         bridge.effective_max_reprojection_error_px = bridge.max_reprojection_error_px
         bridge.effective_min_board_margin_px = bridge.min_board_margin_px
         bridge.effective_execute_motion = bridge.execute_motion
-        bridge._service_clients = {}
+        bridge._service_clients = {"run": _ServiceClient(False)}
         bridge.session_store = SessionStore(
             session_root_path=bridge.session_root_path,
             trajectory_path=bridge.trajectory_path,
@@ -81,7 +89,7 @@ def test_backend_status_does_not_expire_when_node_is_idle() -> None:
         bridge.effective_max_reprojection_error_px = bridge.max_reprojection_error_px
         bridge.effective_min_board_margin_px = bridge.min_board_margin_px
         bridge.effective_execute_motion = bridge.execute_motion
-        bridge._service_clients = {}
+        bridge._service_clients = {"run": _ServiceClient(True)}
         bridge.session_store = SessionStore(
             session_root_path=bridge.session_root_path,
             trajectory_path=bridge.trajectory_path,
@@ -93,3 +101,37 @@ def test_backend_status_does_not_expire_when_node_is_idle() -> None:
 
         assert state["backend_connected"] is True
         assert state["config_source"] == "backend_status"
+
+
+def test_stale_status_disconnects_when_services_disappear() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        bridge = UiRosBridge.__new__(UiRosBridge)
+        bridge.trajectory_path = root / "local_trajectory.yaml"
+        bridge.session_root_path = root / "local_sessions"
+        bridge.max_reprojection_error_px = 0.0
+        bridge.min_board_margin_px = 10.0
+        bridge.execute_motion = False
+        bridge.effective_trajectory_path = bridge.trajectory_path
+        bridge.effective_session_root_path = bridge.session_root_path
+        bridge.effective_max_reprojection_error_px = bridge.max_reprojection_error_px
+        bridge.effective_min_board_margin_px = bridge.min_board_margin_px
+        bridge.effective_execute_motion = bridge.execute_motion
+        bridge._service_clients = {"run": _ServiceClient(False)}
+        bridge.session_store = SessionStore(
+            session_root_path=bridge.session_root_path,
+            trajectory_path=bridge.trajectory_path,
+            max_reprojection_error_px=bridge.max_reprojection_error_px,
+            min_board_margin_px=bridge.min_board_margin_px,
+        )
+
+        state = UiRosBridge._sync_backend_state(
+            bridge,
+            {"execute_motion": True, "trajectory_path": str(root / "stale_backend.yaml")},
+            120.0,
+        )
+
+        assert state["backend_connected"] is False
+        assert state["execute_motion"] is False
+        assert state["config_source"] == "ui_local_fallback"
+        assert bridge.session_store.trajectory_path == root / "local_trajectory.yaml"

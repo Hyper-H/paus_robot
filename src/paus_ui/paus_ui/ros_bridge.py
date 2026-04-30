@@ -179,8 +179,9 @@ class UiRosBridge(Node):
                 last_status = dict(self._last_status) if self._last_status else None
                 last_status_age_s = (time.monotonic() - self._last_status_time_s) if self._last_status_time_s else None
         services_ready = any(client.service_is_ready() for client in self._service_clients.values())
-        backend_connected = services_ready or last_status is not None
-        payload = last_status if last_status is not None else {}
+        status_recent = last_status is not None and (last_status_age_s is None or last_status_age_s < 10.0)
+        backend_connected = services_ready or status_recent
+        payload = last_status if backend_connected and last_status is not None else {}
         trajectory_path = Path(str(payload.get("trajectory_path") or self.trajectory_path))
         session_root_path = Path(str(payload.get("session_root_path") or self.session_root_path))
         max_reprojection_error_px = _to_float(payload.get("max_reprojection_error_px"))
@@ -209,8 +210,9 @@ class UiRosBridge(Node):
             "session_root_path": self.effective_session_root_path,
             "max_reprojection_error_px": self.effective_max_reprojection_error_px,
             "min_board_margin_px": self.effective_min_board_margin_px,
-            "config_source": "backend_status" if last_status is not None else ("backend_service_ready" if services_ready else "ui_local_fallback"),
+            "config_source": "backend_status" if backend_connected and last_status is not None else ("backend_service_ready" if services_ready else "ui_local_fallback"),
             "services_ready": services_ready,
+            "status_recent": status_recent,
         }
 
     def get_status(self) -> dict[str, Any]:

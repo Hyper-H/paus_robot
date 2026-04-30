@@ -198,6 +198,17 @@ def _resolve_config_artifact_path(path_value: str | Path, config_path: str | Pat
     return resolve_config_path(path, config_path)
 
 
+def _resolve_runtime_data_path(path_value: str | Path, config_path: str | Path) -> str:
+    path_text = os.path.expandvars(str(path_value)).strip()
+    path = Path(path_text).expanduser()
+    if path.is_absolute():
+        return str(path)
+    resolved_config_path = Path(config_path).expanduser().resolve()
+    if "install" in resolved_config_path.parts:
+        return str((_runtime_root() / path).resolve())
+    return resolve_config_path(path, config_path)
+
+
 def _resolve_project_paths(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
     calibration = config.get("calibration", {})
     if not isinstance(calibration, dict):
@@ -209,7 +220,7 @@ def _resolve_project_paths(config: dict[str, Any], config_path: Path) -> dict[st
     for field_name in ("session_root_path",):
         value = calibration.get(field_name)
         if value:
-            calibration[field_name] = resolve_config_path(value, config_path)
+            calibration[field_name] = _resolve_runtime_data_path(value, config_path)
     return config
 
 

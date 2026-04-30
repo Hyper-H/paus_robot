@@ -102,7 +102,7 @@ class ConfigControlDefaultsTests(unittest.TestCase):
 
                 self.assertEqual(calibration["output_path"], str(runtime_root / "configs" / "extrinsics.yaml"))
                 self.assertEqual(calibration["trajectory_path"], str(runtime_root / "configs" / "eye_to_hand_trajectory.yaml"))
-                self.assertEqual(calibration["session_root_path"], str(Path(temp_dir) / "calibration_sessions"))
+                self.assertEqual(calibration["session_root_path"], str(runtime_root / "calibration_sessions"))
             finally:
                 if old_runtime_root is None:
                     os.environ.pop("PAUS_ROBOT_RUNTIME_DIR", None)
