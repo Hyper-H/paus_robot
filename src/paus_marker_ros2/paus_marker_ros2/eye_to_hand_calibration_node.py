@@ -331,13 +331,13 @@ class EyeToHandCalibrationNode(Node):
         self.samples.clear()
         self.current_solution = None
 
-    def _ensure_session_started(self) -> None:
-        if self.session_dir is None or self.session_owner != "manual":
+    def _ensure_session_started(self, owner: str = "manual") -> None:
+        if self.session_dir is None or self.session_owner != owner:
             self.session_dir = create_session_dir(self.session_root_path)
             self.sample_log_path = self.sample_log_path_override or self.session_dir / "samples.jsonl"
             self.report_path = self.session_dir / "report.yaml"
             self.run_log_path = self.session_dir / "run.log"
-            self.session_owner = "manual"
+            self.session_owner = owner
             self.samples.clear()
             self.current_solution = None
 
@@ -525,8 +525,8 @@ class EyeToHandCalibrationNode(Node):
             message += f", margin below {float(quality['min_board_margin_px']):.1f}px"
         return message
 
-    def _capture_one_sample(self) -> CalibrationSample:
-        self._ensure_session_started()
+    def _capture_one_sample(self, *, session_owner: str = "manual") -> CalibrationSample:
+        self._ensure_session_started(session_owner)
         with self._image_condition:
             previous_sequence = self.image_sequence
         captured_image = self._wait_for_fresh_image(previous_sequence)
@@ -1006,7 +1006,7 @@ class EyeToHandCalibrationNode(Node):
                         waypoint_progress,
                     )
                     try:
-                        sample = self._capture_one_sample()
+                        sample = self._capture_one_sample(session_owner="semi_auto")
                     except Exception as exc:
                         skipped_count += 1
                         self._append_run_log(
