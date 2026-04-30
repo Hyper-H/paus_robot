@@ -436,6 +436,33 @@ ros2 launch paus_bringup eye_to_hand_calibration.launch.py \
   square_size_m:=0.01
 ```
 
+### UI console
+The new browser-based control entry point is:
+
+```bash
+cd ~/worktrees/paus_robot_handeye
+source /opt/ros/humble/setup.bash
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate paus_robot
+python -m pip install fastapi uvicorn websockets
+colcon build --packages-select paus_ui paus_bringup paus_marker_ros2 --symlink-install
+source install/setup.bash
+
+ros2 launch paus_bringup ui.launch.py
+```
+
+The UI listens on all host network interfaces by default. From a Windows machine on the same lab network, open:
+
+```text
+http://192.168.58.183:8080
+```
+
+Default behavior is dry-run monitoring. To enable real robot motion, launch with:
+
+```bash
+ros2 launch paus_bringup ui.launch.py execute_motion:=true
+```
+
 Capture, solve, and save:
 
 ```bash

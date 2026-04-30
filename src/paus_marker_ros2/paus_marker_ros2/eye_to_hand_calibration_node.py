@@ -380,10 +380,10 @@ class EyeToHandCalibrationNode(Node):
         rotation_matrix = rpy_deg_to_rotation_matrix(self.tool_to_board_rotation_rpy)
         return make_transform_matrix(self.tool_to_board_translation, rotation_matrix)
 
-    def _sample_to_log_record(self, sample: CalibrationSample) -> dict[str, object]:
+    def _sample_to_log_record(self, sample: CalibrationSample, *, sample_index: int | None = None) -> dict[str, object]:
         tcp_mid_time_s = (sample.tcp_read_start_time_s + sample.tcp_read_end_time_s) * 0.5
         return {
-            "sample_index": len(self.samples),
+            "sample_index": len(self.samples) if sample_index is None else sample_index,
             "image_sequence": sample.image_sequence,
             "image_header_time_s": sample.image_header_time_s,
             "image_received_time_s": sample.image_received_time_s,
@@ -654,7 +654,10 @@ class EyeToHandCalibrationNode(Node):
                 "tool_to_board": solved_tool_payload,
                 "residuals": asdict(residuals),
                 "solver_residuals": solver_residuals,
-                "samples": [self._sample_to_log_record(sample) for sample in self.samples],
+                "samples": [
+                    self._sample_to_log_record(sample, sample_index=sample_index)
+                    for sample_index, sample in enumerate(self.samples, start=1)
+                ],
             }
             self._write_report(report_payload)
             self._append_run_log("solved", {"report_path": str(self.report_path), "method": solve_method, "sample_count": len(self.samples)})
@@ -899,6 +902,16 @@ class EyeToHandCalibrationNode(Node):
                         )
                         continue
                     captured_count += 1
+                    sample_progress = {
+                        **waypoint_progress,
+                        "captured_count": captured_count,
+                        "skipped_count": skipped_count,
+                        "sample_index": len(self.samples),
+                        "reprojection_error_px": sample.reprojection_error_px,
+                        "board_margin_px": sample.board_margin_px,
+                        "image_path": sample.image_path,
+                    }
+                    self._append_run_log("waypoint_sample_captured", sample_progress)
                     self._publish_status(
                         "waypoint_sample_captured",
                         (
@@ -906,15 +919,7 @@ class EyeToHandCalibrationNode(Node):
                             f"reprojection_error_px={sample.reprojection_error_px:.3f}, "
                             f"board_margin_px={sample.board_margin_px:.1f}."
                         ),
-                        {
-                            **waypoint_progress,
-                            "captured_count": captured_count,
-                            "skipped_count": skipped_count,
-                            "sample_index": len(self.samples),
-                            "reprojection_error_px": sample.reprojection_error_px,
-                            "board_margin_px": sample.board_margin_px,
-                            "image_path": sample.image_path,
-                        },
+                        sample_progress,
                     )
 
             if len(self.samples) < self.min_sample_count:
