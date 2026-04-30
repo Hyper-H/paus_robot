@@ -582,15 +582,15 @@ class UiRosBridge(Node):
     def _shape_command_result(self, command: str, success: bool, message: str, *, extra: dict[str, Any] | None = None) -> dict[str, Any]:
         info = classify_operator_message(message)
         success_messages = {
-            "run_semi_auto": "半自动标定请求已发送。",
             "record_waypoint": "当前 waypoint 已记录。",
             "delete_last_waypoint": "已删除上一个 waypoint。",
         }
+        operator_message = info["message"] if not success else success_messages.get(command, message or "操作已完成。")
         result = {
             "command": command,
             "success": bool(success),
             "message": message,
-            "operator_message": info["message"] if not success else success_messages.get(command, message or "操作已完成。"),
+            "operator_message": operator_message,
             "message_code": info["code"],
         }
         if extra:

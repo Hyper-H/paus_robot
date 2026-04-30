@@ -83,6 +83,34 @@ class SemiAutoCalibrationTrajectoryTests(unittest.TestCase):
             with self.assertRaises(TrajectoryValidationError):
                 load_trajectory(path)
 
+    def test_duplicate_waypoint_names_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "duplicate.yaml"
+            path.write_text(
+                yaml.safe_dump(
+                    {
+                        "version": 1,
+                        "defaults": {"motion": "movej"},
+                        "waypoints": [
+                            {
+                                "name": "same_name",
+                                "joint_deg": [1, 2, 3, 4, 5, 6],
+                                "expected_tcp_pose_mmdeg": [100, 200, 300, 10, 20, 30],
+                            },
+                            {
+                                "name": "same_name",
+                                "joint_deg": [2, 3, 4, 5, 6, 7],
+                                "expected_tcp_pose_mmdeg": [110, 210, 310, 11, 21, 31],
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(TrajectoryValidationError, "Duplicate waypoint name"):
+                load_trajectory(path)
+
     def test_empty_trajectory_is_rejected_before_save(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "empty.yaml"

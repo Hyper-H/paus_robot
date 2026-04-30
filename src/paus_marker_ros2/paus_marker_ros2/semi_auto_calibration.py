@@ -138,6 +138,11 @@ def load_trajectory(path: str | Path) -> CalibrationTrajectory:
     waypoints = [_parse_waypoint(item, defaults, index) for index, item in enumerate(waypoint_payloads)]
     if not waypoints:
         raise TrajectoryValidationError("Trajectory must contain at least one waypoint.")
+    seen_names: set[str] = set()
+    for waypoint in waypoints:
+        if waypoint.name in seen_names:
+            raise TrajectoryValidationError(f"Duplicate waypoint name: {waypoint.name!r}.")
+        seen_names.add(waypoint.name)
 
     return CalibrationTrajectory(
         version=version,

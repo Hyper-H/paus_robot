@@ -913,11 +913,22 @@ class EyeToHandCalibrationNode(Node):
             )
 
             if not self.execute_motion:
-                for waypoint in trajectory.waypoints:
+                waypoint_count = len(trajectory.waypoints)
+                for waypoint_index, waypoint in enumerate(trajectory.waypoints, start=1):
+                    waypoint_progress = {
+                        "waypoint_name": waypoint.name,
+                        "waypoint_index": waypoint_index,
+                        "waypoint_count": waypoint_count,
+                        "captured_count": 0,
+                        "skipped_count": waypoint_index,
+                        "waypoint": waypoint.to_payload(),
+                        "reason": "dry-run",
+                    }
+                    self._append_run_log("waypoint_dry_run_complete", waypoint_progress)
                     self._publish_status(
-                        "semi_auto_dry_run_waypoint",
+                        "waypoint_dry_run_complete",
                         f"Dry-run waypoint {waypoint.name}.",
-                        {"waypoint": waypoint.to_payload()},
+                        waypoint_progress,
                     )
                 response.success = True
                 response.message = f"Dry-run complete for {len(trajectory.waypoints)} waypoints. No motion, capture, solve, or save was executed."

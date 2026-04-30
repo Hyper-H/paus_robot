@@ -171,10 +171,12 @@ class SessionStore:
                 ),
             )
             event_name = str(event.get("event", ""))
-            if event_name in {"waypoint_capture_skipped", "waypoint_capture_disabled"}:
+            if event_name in {"waypoint_capture_skipped", "waypoint_capture_disabled", "waypoint_dry_run_complete"}:
                 reason = str(event.get("reason", event.get("message", "")))
                 if event_name == "waypoint_capture_disabled" and not reason:
                     reason = "capture=false"
+                if event_name == "waypoint_dry_run_complete" and not reason:
+                    reason = "dry-run"
                 record.update(
                     self._waypoint_record(
                         session_id=session_id,
@@ -182,7 +184,7 @@ class SessionStore:
                         name=name,
                         waypoint=record.get("waypoint", {"name": name}),
                         status="skipped",
-                        result="SKIP" if event_name == "waypoint_capture_disabled" else "FAIL",
+                        result="DRY" if event_name == "waypoint_dry_run_complete" else ("SKIP" if event_name == "waypoint_capture_disabled" else "FAIL"),
                         reason=reason,
                         sample=None,
                         reprojection_error_px=event.get("reprojection_error_px", record.get("reprojection_error_px")),
@@ -302,7 +304,7 @@ class SessionStore:
 
     def _counts_for_session(self, *, path: Path, report: dict[str, Any], samples: list[dict[str, Any]], events: list[dict[str, Any]]) -> dict[str, int]:
         accepted = sum(1 for event in events if event.get("event") == "waypoint_sample_captured")
-        skipped = sum(1 for event in events if event.get("event") in {"waypoint_capture_skipped", "waypoint_capture_disabled"})
+        skipped = sum(1 for event in events if event.get("event") in {"waypoint_capture_skipped", "waypoint_capture_disabled", "waypoint_dry_run_complete"})
         if not accepted:
             accepted = int(report.get("sample_count", 0) or len(samples))
         trajectory = self._read_waypoints_from_path(self._trajectory_path_for_session(path))

@@ -135,3 +135,16 @@ def test_stale_status_disconnects_when_services_disappear() -> None:
         assert state["execute_motion"] is False
         assert state["config_source"] == "ui_local_fallback"
         assert bridge.session_store.trajectory_path == root / "local_trajectory.yaml"
+
+
+def test_successful_run_command_preserves_backend_message() -> None:
+    bridge = UiRosBridge.__new__(UiRosBridge)
+
+    result = UiRosBridge._shape_command_result(
+        bridge,
+        "run_semi_auto",
+        True,
+        "Dry-run complete for 2 waypoints. No motion, capture, solve, or save was executed.",
+    )
+
+    assert result["operator_message"] == result["message"]

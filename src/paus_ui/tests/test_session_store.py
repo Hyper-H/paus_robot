@@ -165,3 +165,69 @@ def test_session_store_marks_capture_disabled_waypoints_terminal(tmp_path: Path)
     assert waypoints[0]["status"] == "skipped"
     assert waypoints[0]["result"] == "SKIP"
     assert waypoints[0]["reason"] == "capture=false"
+
+
+def test_session_store_marks_dry_run_waypoints_terminal(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
+    trajectory_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "tool_id": 0,
+                "user_id": 0,
+                "defaults": {"motion": "movej", "vel": 10.0, "acc": 10.0, "dwell_s": 0.5},
+                "waypoints": [
+                    {
+                        "name": "waypoint_001",
+                        "motion": "movej",
+                        "joint_deg": [0, 0, 0, 0, 0, 0],
+                        "expected_tcp_pose_mmdeg": [1, 2, 3, 4, 5, 6],
+                        "vel": 10.0,
+                        "acc": 10.0,
+                        "dwell_s": 0.5,
+                        "capture": True,
+                    },
+                    {
+                        "name": "waypoint_002",
+                        "motion": "movej",
+                        "joint_deg": [1, 1, 1, 1, 1, 1],
+                        "expected_tcp_pose_mmdeg": [6, 5, 4, 3, 2, 1],
+                        "vel": 10.0,
+                        "acc": 10.0,
+                        "dwell_s": 0.5,
+                        "capture": True,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    session_root = tmp_path / "calibration_sessions"
+    session_path = session_root / "2026-04-29_122000"
+    session_path.mkdir(parents=True)
+    _write_jsonl(
+        session_path / "run.log",
+        [
+            {
+                "event": "waypoint_dry_run_complete",
+                "waypoint_name": "waypoint_001",
+                "waypoint": {"name": "waypoint_001"},
+                "reason": "dry-run",
+            },
+            {
+                "event": "waypoint_dry_run_complete",
+                "waypoint_name": "waypoint_002",
+                "waypoint": {"name": "waypoint_002"},
+                "reason": "dry-run",
+            },
+        ],
+    )
+
+    store = SessionStore(session_root_path=session_root, trajectory_path=trajectory_path)
+
+    sessions = store.list_sessions()
+    assert sessions[0]["skipped_count"] == 2
+    assert sessions[0]["pending_count"] == 0
+    waypoints = store.read_session_waypoints("2026-04-29_122000")
+    assert [waypoint["result"] for waypoint in waypoints] == ["DRY", "DRY"]
+    assert all(waypoint["status"] == "skipped" for waypoint in waypoints)
