@@ -110,6 +110,7 @@ def test_session_store_shapes_counts_reasons_and_thresholds(tmp_path: Path) -> N
     assert report["residual_comparison"][0]["key"] == "translation_rms_mm"
 
     waypoints = store.read_session_waypoints("2026-04-29_120000")
+    assert [item["index"] for item in waypoints] == [1, 2]
     assert waypoints[0]["status"] == "accepted"
     assert waypoints[0]["thresholds"]["reprojection_ok"] is False
     assert waypoints[0]["thresholds"]["margin_ok"] is False

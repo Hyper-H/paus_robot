@@ -93,12 +93,11 @@
                   <div id="tcp-pose-grid" class="pose-grid"></div>
                 </div>
                 <div class="data-card">
-                  <div class="data-title">相机到棋盘位姿 T_camera_board</div>
+                  <div class="data-title split-title">
+                    <span>相机到棋盘位姿 T_camera_board</span>
+                    <strong id="board-angle">--</strong>
+                  </div>
                   <div id="camera-board-grid" class="pose-grid"></div>
-                </div>
-                <div class="data-card">
-                  <div class="data-title">棋盘角度（法向量与相机光轴夹角）</div>
-                  <strong id="board-angle">--</strong>
                 </div>
               </div>
               <div class="control-stack">
@@ -125,6 +124,7 @@
               <table>
                 <thead>
                   <tr>
+                    <th>#</th>
                     <th>waypoint</th>
                     <th>状态</th>
                     <th>result</th>

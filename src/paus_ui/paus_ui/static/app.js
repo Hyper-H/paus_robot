@@ -248,8 +248,9 @@ async function refreshWaypoints() {
     waypoints = await getJson(`/api/sessions/${encodeURIComponent(state.selectedSession)}/waypoints`, []);
   } else {
     const trajectory = await getJson("/api/handeye/waypoints", { waypoints: [] });
-    waypoints = (trajectory.waypoints || []).map((waypoint) => ({
+    waypoints = (trajectory.waypoints || []).map((waypoint, index) => ({
       waypoint,
+      index: index + 1,
       name: waypoint.name,
       status: "pending",
       result: "-",
@@ -277,6 +278,7 @@ function renderWaypointRow(item, index) {
   const status = item.status || "pending";
   const thresholds = item.thresholds || {};
   const t = item.camera_to_board_translation_m || [];
+  const displayIndex = item.index ?? item.display_index ?? index + 1;
   const reprojClass = thresholds.reprojection_ok === false ? "quality-bad" : "";
   const marginClass = thresholds.margin_ok === false ? "quality-bad" : "";
   const thumb = item.has_image && item.sample_row_index
@@ -284,6 +286,7 @@ function renderWaypointRow(item, index) {
     : "-";
   return `
     <tr data-name="${escapeHtml(item.name || waypoint.name || "")}" data-row="${item.sample_row_index || ""}">
+      <td>${escapeHtml(displayIndex)}</td>
       <td title="${escapeHtml(item.name || waypoint.name || "")}">${escapeHtml(item.name || waypoint.name || "--")}</td>
       <td><span class="status-pill ${escapeHtml(status)}">${escapeHtml(status)}</span></td>
       <td><span class="result-pill ${escapeHtml(String(item.result || "-").toLowerCase())}">${escapeHtml(item.result || "-")}</span></td>
@@ -347,19 +350,33 @@ function renderPoseGrid(el, labels, values, units) {
 
 function renderFlow(activeStage) {
   const steps = [
-    ["movej", "MoveJ"],
-    ["wait_stable", "等待稳定"],
-    ["capture", "拍照"],
-    ["detect", "detect"],
-    ["accepted", "accepted"],
-    ["skipped", "skipped"],
-    ["solve", "solve"],
-    ["finished", "完成"],
+    { key: "movej", label: "MoveJ" },
+    { key: "wait_stable", label: "等待稳定" },
+    { key: "capture", label: "拍照" },
+    { key: "detect", label: "detect" },
+    { key: "outcome", label: "结果" },
+    { key: "solve", label: "solve" },
+    { key: "finished", label: "完成" },
   ];
   const normalizedStage = normalizeWorkflowStage(activeStage);
-  const activeIndex = Math.max(0, steps.findIndex(([stage]) => stage === normalizedStage));
-  els.workflowFlow.innerHTML = steps.map(([stage, label], index) => {
-    const cls = stage === normalizedStage ? "active" : index < activeIndex ? "done" : "";
+  const order = {
+    movej: 0,
+    wait_stable: 1,
+    capture: 2,
+    detect: 3,
+    accepted: 4,
+    skipped: 4,
+    solve: 5,
+    finished: 6,
+  };
+  const activeIndex = order[normalizedStage] ?? -1;
+  els.workflowFlow.innerHTML = steps.map((step, index) => {
+    const isOutcome = step.key === "outcome";
+    const isActive = isOutcome ? normalizedStage === "accepted" || normalizedStage === "skipped" : step.key === normalizedStage;
+    const isDone = index < activeIndex;
+    const label = isOutcome && isActive ? normalizedStage : step.label;
+    const branchClass = isOutcome && isActive ? normalizedStage : "";
+    const cls = [isActive ? "active" : "", isDone ? "done" : "", branchClass].filter(Boolean).join(" ");
     return `<span class="flow-step ${cls}">${label}</span>`;
   }).join("");
 }

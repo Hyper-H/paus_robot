@@ -130,13 +130,14 @@ class SessionStore:
                 samples_by_index.setdefault(sample_index, sample)
 
         records: dict[str, dict[str, Any]] = {}
-        for waypoint in trajectory.get("waypoints", []):
+        for display_index, waypoint in enumerate(trajectory.get("waypoints", []), start=1):
             if not isinstance(waypoint, dict):
                 continue
             name = str(waypoint.get("name", ""))
             record_quality = waypoint.get("record_quality") if isinstance(waypoint.get("record_quality"), dict) else {}
             records[name] = self._waypoint_record(
                 session_id=session_id,
+                display_index=display_index,
                 name=name,
                 waypoint=waypoint,
                 status="pending",
@@ -159,6 +160,7 @@ class SessionStore:
                 name,
                 self._waypoint_record(
                     session_id=session_id,
+                    display_index=len(records) + 1,
                     name=name,
                     waypoint=waypoint if isinstance(waypoint, dict) else {"name": name},
                     status="pending",
@@ -173,6 +175,7 @@ class SessionStore:
                 record.update(
                     self._waypoint_record(
                         session_id=session_id,
+                        display_index=record.get("index"),
                         name=name,
                         waypoint=record.get("waypoint", {"name": name}),
                         status="skipped",
@@ -192,6 +195,7 @@ class SessionStore:
                 record.update(
                     self._waypoint_record(
                         session_id=session_id,
+                        display_index=record.get("index"),
                         name=name,
                         waypoint=record.get("waypoint", {"name": name}),
                         status="accepted",
@@ -250,6 +254,7 @@ class SessionStore:
         self,
         *,
         session_id: str,
+        display_index: int | None,
         name: str,
         waypoint: dict[str, Any],
         status: str,
@@ -269,6 +274,7 @@ class SessionStore:
         thumbnail_url = f"/api/sessions/{session_id}/sample-image/{row_index}.jpg?mode=overlay" if row_index and has_image else None
         return {
             "waypoint": waypoint,
+            "index": display_index,
             "name": name,
             "status": status,
             "result": result,
