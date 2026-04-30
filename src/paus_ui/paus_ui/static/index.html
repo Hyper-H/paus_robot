@@ -24,101 +24,93 @@
           <button class="nav-item" type="button">配置管理</button>
           <button class="nav-item" type="button">Sessions</button>
         </nav>
+        <div class="advanced-row">
+          <span>高级模式</span>
+          <label class="switch">
+            <input id="advanced-toggle" type="checkbox" />
+            <span></span>
+          </label>
+        </div>
         <div class="launch-box">
           <div class="mini-label">入口</div>
           <code>ros2 launch paus_bringup ui.launch.py</code>
         </div>
       </aside>
 
-      <main class="workspace">
+      <main class="workbench">
         <header class="topbar">
-          <div>
-            <div class="eyebrow">Eye-to-Hand</div>
-            <h1>半自动手眼标定</h1>
+          <div class="title-block">
+            <button class="menu-button" type="button" aria-label="menu">☰</button>
+            <div>
+              <h1>机器人视觉控制台 / 半自动手眼标定</h1>
+              <div class="status-strip">
+                <span id="camera-chip" class="chip neutral">相机 --</span>
+                <span id="node-chip" class="chip neutral">机器人 --</span>
+                <span id="extrinsics-chip" class="chip neutral">外参 --</span>
+                <span id="motion-chip" class="chip neutral">execute_motion: --</span>
+              </div>
+            </div>
           </div>
-          <div class="status-strip">
-            <span id="camera-chip" class="chip neutral">Camera --</span>
-            <span id="node-chip" class="chip neutral">Node --</span>
-            <span id="motion-chip" class="chip neutral">Motion --</span>
-            <span id="session-chip" class="chip neutral">Session --</span>
+          <div class="top-actions">
+            <button id="log-action" class="ghost-button" type="button">日志</button>
+            <button id="export-action" class="ghost-button" type="button">导出报告</button>
+            <button id="settings-action" class="ghost-button" type="button">设置</button>
+            <span class="user-pill">engineer</span>
           </div>
         </header>
 
-        <section class="grid">
-          <section class="panel image-panel">
-            <div class="panel-header">
-              <div>
-                <h2>实时视角</h2>
-                <p id="image-caption">/camera/image_bridge</p>
-              </div>
+        <section class="dashboard">
+          <section class="panel live-panel">
+            <div class="panel-header compact">
               <div class="segmented">
+                <button class="seg-button" data-image-mode="raw" type="button">原图</button>
                 <button class="seg-button active" data-image-mode="overlay" type="button">Overlay</button>
                 <button class="seg-button" data-image-mode="pose" type="button">Pose</button>
-                <button class="seg-button" data-image-mode="raw" type="button">Raw</button>
               </div>
+              <label class="axis-toggle"><input id="axis-toggle" type="checkbox" checked /> 坐标轴</label>
             </div>
             <div class="image-stage">
               <img id="live-image" src="/api/image/latest.jpg?mode=overlay" alt="latest camera frame" />
+              <div id="live-empty" class="stage-empty hidden">等待相机图像</div>
+              <div class="image-tools">
+                <button class="icon-button" type="button" title="截图">▣</button>
+                <button class="icon-button" type="button" title="放大">＋</button>
+                <button class="icon-button" type="button" title="缩小">－</button>
+                <button class="icon-button" type="button" title="全屏">⛶</button>
+              </div>
             </div>
-            <div class="metric-row" id="quality-metrics">
-              <div class="metric"><span>检测</span><strong>--</strong></div>
-              <div class="metric"><span>重投影 px</span><strong>--</strong></div>
-              <div class="metric"><span>边距 px</span><strong>--</strong></div>
-              <div class="metric"><span>Z m</span><strong>--</strong></div>
-              <div class="metric"><span>棋盘角度</span><strong>--</strong></div>
-            </div>
+            <div class="metric-row" id="quality-metrics"></div>
           </section>
 
-          <section class="panel control-panel">
-            <div class="panel-header">
-              <div>
-                <h2>运行控制</h2>
-                <p id="config-summary">配置加载中</p>
+          <section class="panel current-panel">
+            <div class="split-panel">
+              <div class="waypoint-now">
+                <div class="section-label">当前位姿点</div>
+                <h2 id="current-waypoint">--</h2>
+                <div id="workflow-flow" class="flow"></div>
+                <div class="data-card">
+                  <div class="data-title">实际 TCP 位姿（基坐标系）</div>
+                  <div id="tcp-pose-grid" class="pose-grid"></div>
+                </div>
+                <div class="data-card">
+                  <div class="data-title">相机到棋盘位姿 T_camera_board</div>
+                  <div id="camera-board-grid" class="pose-grid"></div>
+                </div>
+                <div class="data-card">
+                  <div class="data-title">棋盘角度（法向量与相机光轴夹角）</div>
+                  <strong id="board-angle">--</strong>
+                </div>
+              </div>
+              <div class="control-stack">
+                <div class="section-label">控制操作</div>
+                <button id="record-btn" class="action primary" type="button">📷 记录当前点</button>
+                <button id="delete-btn" class="action" type="button">🗑 删除上一个</button>
+                <button id="dry-run-btn" class="action" type="button">▶ Dry-run</button>
+                <button id="run-btn" class="action danger" type="button">▶ 开始标定</button>
+                <button id="stop-btn" class="action stop" type="button">■ 停止</button>
+                <div id="command-result" class="notice">等待操作</div>
               </div>
             </div>
-            <div class="command-grid">
-              <button id="record-btn" class="action primary" type="button">记录当前点</button>
-              <button id="delete-btn" class="action" type="button">删除上一个</button>
-              <button id="dry-run-btn" class="action" type="button">Dry-run</button>
-              <button id="run-btn" class="action danger" type="button">开始标定</button>
-              <button id="stop-btn" class="action warn" type="button">停止</button>
-            </div>
-            <dl class="detail-list">
-              <div>
-                <dt>当前状态</dt>
-                <dd id="last-status">--</dd>
-              </div>
-              <div>
-                <dt>当前 waypoint</dt>
-                <dd id="current-waypoint">--</dd>
-              </div>
-              <div>
-                <dt>实际 TCP</dt>
-                <dd id="tcp-pose">--</dd>
-              </div>
-              <div>
-                <dt>T_camera_board</dt>
-                <dd id="camera-board">--</dd>
-              </div>
-            </dl>
-            <div id="command-result" class="notice">等待操作</div>
-          </section>
-
-          <section class="panel result-panel">
-            <div class="panel-header">
-              <div>
-                <h2>结果摘要</h2>
-                <p id="report-path">尚未选择 session</p>
-              </div>
-              <select id="session-select" class="session-select" aria-label="session"></select>
-            </div>
-            <div class="summary-grid">
-              <div class="summary-cell"><span>Samples</span><strong id="sample-count">--</strong></div>
-              <div class="summary-cell"><span>Skipped</span><strong id="skipped-count">--</strong></div>
-              <div class="summary-cell"><span>Trans mean</span><strong id="trans-mean">--</strong></div>
-              <div class="summary-cell"><span>Rot mean</span><strong id="rot-mean">--</strong></div>
-            </div>
-            <div class="bar-list" id="residual-bars"></div>
           </section>
 
           <section class="panel table-panel">
@@ -127,51 +119,72 @@
                 <h2>Waypoints</h2>
                 <p id="trajectory-path">trajectory YAML</p>
               </div>
-              <button id="refresh-btn" class="icon-button" type="button" title="刷新">刷新</button>
+              <div class="table-stats" id="waypoint-stats">共 0 个点</div>
             </div>
             <div class="table-wrap">
               <table>
                 <thead>
                   <tr>
-                    <th>#</th>
-                    <th>名称</th>
+                    <th>waypoint</th>
                     <th>状态</th>
-                    <th>重投影</th>
-                    <th>边距</th>
-                    <th>Tz</th>
-                    <th>采样</th>
-                    <th>原因</th>
-                    <th>缩略图</th>
+                    <th>reprojection_error_px</th>
+                    <th>margin (px)</th>
+                    <th>T_camera_board z (m)</th>
+                    <th>capture</th>
+                    <th>reason</th>
+                    <th>thumbnail</th>
                   </tr>
                 </thead>
                 <tbody id="waypoint-body"></tbody>
               </table>
             </div>
+            <div id="table-footer" class="panel-footer">已接受 0　跳过 0　待采集 0</div>
           </section>
 
           <section class="panel preview-panel">
-            <div class="panel-header">
+            <div class="panel-header compact">
               <div>
-                <h2>样本预览</h2>
-                <p id="preview-title">点击 waypoint 或样本缩略图查看</p>
+                <h2 id="preview-title">样本预览</h2>
+                <p id="preview-subtitle">选择 waypoint 查看图像和质量指标</p>
               </div>
               <div class="segmented">
-                <button class="seg-button active" data-preview-mode="overlay" type="button">Overlay</button>
-                <button class="seg-button" data-preview-mode="pose" type="button">Pose</button>
-                <button class="seg-button" data-preview-mode="raw" type="button">Raw</button>
+                <button class="seg-button" data-preview-mode="raw" type="button">原图</button>
+                <button class="seg-button active" data-preview-mode="overlay" type="button">overlay</button>
+                <button class="seg-button" data-preview-mode="pose" type="button">pose</button>
               </div>
             </div>
             <div class="preview-stage">
               <img id="sample-preview" alt="sample preview" />
+              <div id="preview-empty" class="stage-empty">未选择样本</div>
             </div>
+            <div id="preview-details" class="preview-details"></div>
+          </section>
+
+          <section class="panel result-panel">
+            <div class="panel-header compact">
+              <div>
+                <h2>标定结果</h2>
+                <p id="report-path">尚未选择 session</p>
+              </div>
+              <select id="session-select" class="session-select" aria-label="session"></select>
+            </div>
+            <div class="summary-grid">
+              <div class="summary-cell"><span>sample_count</span><strong id="sample-count">--</strong></div>
+              <div class="summary-cell"><span>accepted</span><strong id="accepted-count">--</strong></div>
+              <div class="summary-cell"><span>skipped</span><strong id="skipped-count">--</strong></div>
+              <div class="summary-cell"><span>pending</span><strong id="pending-count">--</strong></div>
+            </div>
+            <div id="residual-grid" class="residual-grid"></div>
+            <div id="residual-bars" class="bar-list"></div>
           </section>
 
           <section class="panel event-panel">
-            <div class="panel-header">
+            <div class="panel-header compact">
               <div>
                 <h2>事件</h2>
-                <p>状态 topic 与 UI 命令反馈</p>
+                <p id="event-mode">WebSocket / polling</p>
               </div>
+              <button id="refresh-btn" class="ghost-button small" type="button">刷新</button>
             </div>
             <div id="event-log" class="event-log"></div>
           </section>

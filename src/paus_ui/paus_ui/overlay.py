@@ -8,11 +8,15 @@ import numpy as np
 
 from paus_perception import CameraCalibration, make_transform_matrix, rotation_matrix_to_rpy_deg
 
+from .operator_messages import classify_operator_message
+
 
 @dataclass
 class BoardOverlayResult:
     detected: bool
     reason: str | None
+    reason_code: str | None
+    operator_message: str | None
     reprojection_error_px: float | None
     board_margin_px: float | None
     camera_to_board_matrix: np.ndarray | None
@@ -27,6 +31,8 @@ class BoardOverlayResult:
         payload: dict[str, Any] = {
             "detected": self.detected,
             "reason": self.reason,
+            "reason_code": self.reason_code,
+            "operator_message": self.operator_message,
             "image_sequence": image_sequence,
             "reprojection_error_px": self.reprojection_error_px,
             "board_margin_px": self.board_margin_px,
@@ -66,9 +72,12 @@ class BoardOverlayDetector:
         try:
             return self._estimate_or_raise(image_bgr)
         except Exception as exc:
+            info = classify_operator_message(repr(exc))
             return BoardOverlayResult(
                 detected=False,
-                reason=repr(exc),
+                reason=info["clean"],
+                reason_code=info["code"],
+                operator_message=info["message"],
                 reprojection_error_px=None,
                 board_margin_px=None,
                 camera_to_board_matrix=None,
@@ -116,6 +125,8 @@ class BoardOverlayDetector:
         return BoardOverlayResult(
             detected=True,
             reason=None,
+            reason_code=None,
+            operator_message=None,
             reprojection_error_px=reprojection_error_px,
             board_margin_px=board_margin_px,
             camera_to_board_matrix=transform,
@@ -127,7 +138,14 @@ class BoardOverlayDetector:
             tvec=tvec,
         )
 
-    def render(self, image_bgr: np.ndarray, *, mode: str = "overlay", image_sequence: int | None = None) -> tuple[np.ndarray, BoardOverlayResult]:
+    def render(
+        self,
+        image_bgr: np.ndarray,
+        *,
+        mode: str = "overlay",
+        image_sequence: int | None = None,
+        show_axes: bool = True,
+    ) -> tuple[np.ndarray, BoardOverlayResult]:
         mode = mode if mode in {"raw", "overlay", "pose"} else "overlay"
         result = self.estimate(image_bgr)
         output = image_bgr.copy()
@@ -135,16 +153,19 @@ class BoardOverlayDetector:
             return output, result
 
         if result.detected and result.corners is not None:
-            cv2.drawChessboardCorners(output, (self.board_cols, self.board_rows), result.corners, True)
+            if mode == "overlay":
+                cv2.drawChessboardCorners(output, (self.board_cols, self.board_rows), result.corners, True)
             self._draw_board_outline(output, result.corners)
-            if result.rvec is not None and result.tvec is not None:
+            if show_axes and result.rvec is not None and result.tvec is not None:
                 axis_length = max(self.square_size_m * 3.0, 0.02)
                 try:
                     cv2.drawFrameAxes(output, self.camera_matrix, self.dist_coeffs, result.rvec, result.tvec, axis_length)
                     self._draw_axis_labels(output, result.rvec, result.tvec, axis_length)
                 except Exception:
                     pass
-        self._draw_metrics(output, result, image_sequence=image_sequence)
+        else:
+            self._draw_failure_hint(output, result)
+        self._draw_metrics(output, result, image_sequence=image_sequence, show_axes=show_axes)
         return output, result
 
     def _draw_axis_labels(self, image_bgr: np.ndarray, rvec: np.ndarray, tvec: np.ndarray, axis_length: float) -> None:
@@ -176,9 +197,16 @@ class BoardOverlayDetector:
             ],
             dtype=np.int32,
         )
-        cv2.polylines(image_bgr, [outline], isClosed=True, color=(34, 180, 92), thickness=3)
+        cv2.polylines(image_bgr, [outline], isClosed=True, color=(34, 220, 92), thickness=3)
 
-    def _draw_metrics(self, image_bgr: np.ndarray, result: BoardOverlayResult, *, image_sequence: int | None) -> None:
+    def _draw_failure_hint(self, image_bgr: np.ndarray, result: BoardOverlayResult) -> None:
+        message = result.operator_message or "Chessboard not detected"
+        overlay = image_bgr.copy()
+        cv2.rectangle(overlay, (20, image_bgr.shape[0] - 92), (min(image_bgr.shape[1] - 20, 760), image_bgr.shape[0] - 24), (22, 28, 34), -1)
+        cv2.addWeighted(overlay, 0.7, image_bgr, 0.3, 0.0, image_bgr)
+        cv2.putText(image_bgr, message[:64], (40, image_bgr.shape[0] - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (0, 210, 255), 2, cv2.LINE_AA)
+
+    def _draw_metrics(self, image_bgr: np.ndarray, result: BoardOverlayResult, *, image_sequence: int | None, show_axes: bool) -> None:
         lines = [f"image_sequence: {image_sequence if image_sequence is not None else '-'}"]
         if result.detected:
             t = result.camera_to_board_translation_m or [0.0, 0.0, 0.0]
@@ -188,13 +216,14 @@ class BoardOverlayDetector:
                     f"board_margin_px: {result.board_margin_px:.1f}",
                     f"T_camera_board: x={t[0]:.3f} y={t[1]:.3f} z={t[2]:.3f} m",
                     f"board_angle_deg: {result.board_angle_deg:.2f}",
+                    f"axes: {'on' if show_axes else 'off'}",
                 ]
             )
         else:
-            lines.append(f"detected: false ({result.reason or 'unknown'})")
+            lines.append(f"detected: false ({result.reason_code or 'unknown'})")
 
         line_height = 24
-        width = min(max(500, int(image_bgr.shape[1] * 0.38)), image_bgr.shape[1] - 20)
+        width = min(max(560, int(image_bgr.shape[1] * 0.42)), image_bgr.shape[1] - 20)
         height = 18 + line_height * len(lines)
         overlay = image_bgr.copy()
         cv2.rectangle(overlay, (12, 12), (12 + width, 12 + height), (15, 22, 33), -1)

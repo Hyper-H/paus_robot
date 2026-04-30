@@ -29,9 +29,14 @@ def create_app(bridge: UiRosBridge):
     async def status() -> dict[str, Any]:
         return bridge.get_status()
 
+    @app.get("/api/events")
+    async def events(since: int = 0) -> dict[str, Any]:
+        rows, last_id = bridge.get_events_since(since)
+        return {"events": rows, "last_id": last_id}
+
     @app.get("/api/image/latest.jpg")
-    async def latest_image(mode: str = "overlay") -> Response:
-        return Response(content=await asyncio.to_thread(bridge.get_latest_jpeg, mode=mode), media_type="image/jpeg")
+    async def latest_image(mode: str = "overlay", axes: bool = True) -> Response:
+        return Response(content=await asyncio.to_thread(bridge.get_latest_jpeg, mode=mode, show_axes=axes), media_type="image/jpeg")
 
     @app.get("/api/handeye/quality")
     async def quality() -> dict[str, Any]:
@@ -62,6 +67,10 @@ def create_app(bridge: UiRosBridge):
     async def sessions() -> list[dict[str, Any]]:
         return await asyncio.to_thread(bridge.session_store.list_sessions)
 
+    @app.get("/api/sessions/latest")
+    async def latest_session() -> dict[str, Any]:
+        return {"session_id": bridge.session_store.latest_valid_session_id()}
+
     @app.get("/api/sessions/{session_id}/report")
     async def session_report(session_id: str) -> dict[str, Any]:
         try:
@@ -84,9 +93,9 @@ def create_app(bridge: UiRosBridge):
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/api/sessions/{session_id}/sample-image/{row_index}.jpg")
-    async def session_sample_image(session_id: str, row_index: int, mode: str = "overlay") -> Response:
+    async def session_sample_image(session_id: str, row_index: int, mode: str = "overlay", axes: bool = True) -> Response:
         try:
-            image = await asyncio.to_thread(bridge.get_sample_jpeg, session_id=session_id, row_index=row_index, mode=mode)
+            image = await asyncio.to_thread(bridge.get_sample_jpeg, session_id=session_id, row_index=row_index, mode=mode, show_axes=axes)
         except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return Response(content=image, media_type="image/jpeg")

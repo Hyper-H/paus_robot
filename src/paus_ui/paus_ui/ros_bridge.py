@@ -20,6 +20,7 @@ from std_srvs.srv import Trigger
 
 from paus_perception import load_camera_calibration, load_config, resolve_config_path
 
+from .operator_messages import classify_operator_message
 from .overlay import BoardOverlayDetector, encode_jpeg, make_placeholder_image
 from .session_store import SessionStore
 
@@ -95,7 +96,12 @@ class UiRosBridge(Node):
 
         self.bridge = CvBridge()
         self.events = EventBuffer()
-        self.session_store = SessionStore(session_root_path=self.session_root_path, trajectory_path=self.trajectory_path)
+        self.session_store = SessionStore(
+            session_root_path=self.session_root_path,
+            trajectory_path=self.trajectory_path,
+            max_reprojection_error_px=self.max_reprojection_error_px,
+            min_board_margin_px=self.min_board_margin_px,
+        )
 
         self._image_lock = threading.Lock()
         self._latest_image: CachedImage | None = None
@@ -116,7 +122,7 @@ class UiRosBridge(Node):
             "delete_last_waypoint": self.create_client(Trigger, "/eye_to_hand/delete_last_waypoint"),
             "run_semi_auto": self.create_client(Trigger, "/eye_to_hand/run_semi_auto_calibration"),
         }
-        self.events.push({"type": "ui_started", "message": "PAUS UI server started."})
+        self.events.push({"type": "ui_started", "message": "PAUS UI server started.", "operator_message": "UI 服务已启动。"})
 
     def _resolve_default_config_path(self, bringup_share: Path) -> Path:
         workspace_root = bringup_share.parents[3]
@@ -144,10 +150,19 @@ class UiRosBridge(Node):
             payload = {"status": "invalid_json", "message": message.data}
         if not isinstance(payload, dict):
             payload = {"status": "invalid_status", "message": str(payload)}
+        shaped = self._shape_status_payload(payload)
         with self._last_status_lock:
             self._last_status = payload
             self._last_status_time_s = time.monotonic()
-        self.events.push({"type": "eye_to_hand_status", "payload": payload})
+        self.events.push(
+            {
+                "type": "eye_to_hand_status",
+                "payload": payload,
+                "status": shaped["workflow"]["status"],
+                "operator_message": shaped["operator_message"],
+                "dedupe_key": self._event_dedupe_key("eye_to_hand_status", payload),
+            }
+        )
 
     def get_status(self) -> dict[str, Any]:
         with self._image_lock:
@@ -156,6 +171,8 @@ class UiRosBridge(Node):
             last_status = dict(self._last_status) if self._last_status else None
             last_status_age_s = (time.monotonic() - self._last_status_time_s) if self._last_status_time_s else None
         camera_age_s = (time.monotonic() - latest_image.received_time_s) if latest_image else None
+        shaped_status = self._shape_status_payload(last_status)
+        latest_session = self.session_store.latest_valid_session_id()
         return {
             "ui": {
                 "host": self.ui_host,
@@ -182,6 +199,12 @@ class UiRosBridge(Node):
                 "min_board_margin_px": self.min_board_margin_px,
                 "last_command_result": self._last_command_result,
                 "run_active": bool(self._run_thread and self._run_thread.is_alive()),
+                "workflow": shaped_status["workflow"],
+                "current_waypoint": shaped_status["current_waypoint"],
+                "session": shaped_status["session"] | {"latest_valid_session_id": latest_session},
+                "motion": self._motion_summary(),
+                "stop": self._stop_status(),
+                "operator_message": shaped_status["operator_message"],
             },
             "config": {
                 "config_path": self.config_path,
@@ -194,18 +217,30 @@ class UiRosBridge(Node):
     def get_latest_quality(self) -> dict[str, Any]:
         latest_image = self._latest_image_copy()
         if latest_image is None:
-            return {"detected": False, "reason": "No image received.", "image_sequence": 0}
+            return {
+                "detected": False,
+                "reason": "No image received.",
+                "reason_code": "no_image",
+                "operator_message": "尚未收到相机图像。",
+                "image_sequence": 0,
+                "thresholds": self._quality_flags(None, None),
+            }
         detector = self._get_detector()
         if detector is None:
             return {
                 "detected": False,
                 "reason": f"Camera calibration is unavailable: {self.camera_config_path}",
+                "reason_code": "camera_calibration_missing",
+                "operator_message": "相机内参不可用，请检查 camera.yaml 是否存在。",
                 "image_sequence": latest_image.sequence,
+                "thresholds": self._quality_flags(None, None),
             }
         result = detector.estimate(latest_image.image_bgr)
-        return result.to_payload(image_sequence=latest_image.sequence)
+        payload = result.to_payload(image_sequence=latest_image.sequence)
+        payload["thresholds"] = self._quality_flags(result.reprojection_error_px, result.board_margin_px)
+        return payload
 
-    def get_latest_jpeg(self, *, mode: str = "overlay") -> bytes:
+    def get_latest_jpeg(self, *, mode: str = "overlay", show_axes: bool = True) -> bytes:
         latest_image = self._latest_image_copy()
         if latest_image is None:
             return encode_jpeg(make_placeholder_image("Waiting for /camera/image_bridge"))
@@ -225,10 +260,10 @@ class UiRosBridge(Node):
                 cv2.LINE_AA,
             )
             return encode_jpeg(image)
-        rendered, _ = detector.render(latest_image.image_bgr, mode=mode, image_sequence=latest_image.sequence)
+        rendered, _ = detector.render(latest_image.image_bgr, mode=mode, image_sequence=latest_image.sequence, show_axes=show_axes)
         return encode_jpeg(rendered)
 
-    def get_sample_jpeg(self, *, session_id: str, row_index: int, mode: str = "overlay") -> bytes:
+    def get_sample_jpeg(self, *, session_id: str, row_index: int, mode: str = "overlay", show_axes: bool = True) -> bytes:
         image_path = self.session_store.sample_image_path(session_id, row_index)
         if image_path is None:
             return encode_jpeg(make_placeholder_image("Sample image not found"))
@@ -240,7 +275,7 @@ class UiRosBridge(Node):
         detector = self._get_detector()
         if detector is None:
             return encode_jpeg(image_bgr)
-        rendered, _ = detector.render(image_bgr, mode=mode, image_sequence=row_index)
+        rendered, _ = detector.render(image_bgr, mode=mode, image_sequence=row_index, show_axes=show_axes)
         return encode_jpeg(rendered)
 
     def record_waypoint(self) -> dict[str, Any]:
@@ -250,55 +285,67 @@ class UiRosBridge(Node):
         return self._call_trigger("delete_last_waypoint", timeout_s=5.0)
 
     def start_semi_auto_run(self, *, confirmed: bool = False) -> dict[str, Any]:
+        confirmation = self._motion_summary()
         if self.execute_motion and not confirmed:
-            return {
-                "success": False,
-                "requires_confirmation": True,
-                "message": "execute_motion=true requires UI confirmation before starting.",
-            }
+            result = self._shape_command_result(
+                "run_semi_auto",
+                False,
+                "execute_motion=true requires UI confirmation before starting.",
+                extra={"requires_confirmation": True, "confirmation": confirmation},
+            )
+            self._last_command_result = result
+            return result
         with self._run_lock:
             if self._run_thread is not None and self._run_thread.is_alive():
-                return {"success": False, "message": "Semi-auto calibration is already running."}
+                result = self._shape_command_result("run_semi_auto", False, "Semi-auto calibration is already running.")
+                self._last_command_result = result
+                return result
             self._run_thread = threading.Thread(target=self._run_semi_auto_worker, daemon=True)
             self._run_thread.start()
-        return {"success": True, "message": "Semi-auto calibration request started."}
+        result = self._shape_command_result("run_semi_auto", True, "Semi-auto calibration request started.", extra={"confirmation": confirmation})
+        self._last_command_result = result
+        return result
 
     def stop_run(self) -> dict[str, Any]:
-        return {
-            "success": False,
-            "message": "Stop is not supported by the current calibration node. Use terminal interrupt or the physical emergency stop if motion must stop immediately.",
-        }
+        result = self._shape_command_result(
+            "stop",
+            False,
+            "Stop is not supported by the current calibration node. Use terminal interrupt or the physical emergency stop if motion must stop immediately.",
+            extra={"stop_supported": False},
+        )
+        self._last_command_result = result
+        return result
 
     def get_events_since(self, last_id: int) -> tuple[list[dict[str, Any]], int]:
         return self.events.since(last_id)
 
     def _run_semi_auto_worker(self) -> None:
-        self.events.push({"type": "ui_command", "command": "run_semi_auto", "message": "Semi-auto service call started."})
-        result = self._call_trigger("run_semi_auto", timeout_s=3600.0)
-        self._last_command_result = {"command": "run_semi_auto", **result}
-        self.events.push({"type": "ui_command_result", "command": "run_semi_auto", "result": result})
+        self.events.push({"type": "ui_command", "command": "run_semi_auto", "message": "Semi-auto service call started.", "operator_message": "半自动标定请求已发送。"})
+        self._call_trigger("run_semi_auto", timeout_s=3600.0)
 
     def _call_trigger(self, key: str, *, timeout_s: float) -> dict[str, Any]:
         client = self._service_clients[key]
         if not client.wait_for_service(timeout_sec=min(timeout_s, 2.0)):
-            result = {"success": False, "message": f"Service is unavailable: {client.srv_name}"}
-            self._last_command_result = {"command": key, **result}
+            result = self._shape_command_result(key, False, f"Service is unavailable: {client.srv_name}")
+            self._last_command_result = result
+            self.events.push({"type": "ui_command_result", "command": key, "result": result, "operator_message": result["operator_message"], "dedupe_key": self._event_dedupe_key("ui_command_result", result)})
             return result
         future = client.call_async(Trigger.Request())
         done = threading.Event()
         future.add_done_callback(lambda _: done.set())
         if not done.wait(timeout=timeout_s):
-            result = {"success": False, "message": f"Service timed out: {client.srv_name}"}
-            self._last_command_result = {"command": key, **result}
+            result = self._shape_command_result(key, False, f"Service timed out: {client.srv_name}")
+            self._last_command_result = result
+            self.events.push({"type": "ui_command_result", "command": key, "result": result, "operator_message": result["operator_message"], "dedupe_key": self._event_dedupe_key("ui_command_result", result)})
             return result
         try:
             response = future.result()
         except Exception as exc:
-            result = {"success": False, "message": repr(exc)}
+            result = self._shape_command_result(key, False, repr(exc))
         else:
-            result = {"success": bool(response.success), "message": str(response.message)}
-        self._last_command_result = {"command": key, **result}
-        self.events.push({"type": "ui_command_result", "command": key, "result": result})
+            result = self._shape_command_result(key, bool(response.success), str(response.message))
+        self._last_command_result = result
+        self.events.push({"type": "ui_command_result", "command": key, "result": result, "operator_message": result["operator_message"], "dedupe_key": self._event_dedupe_key("ui_command_result", result)})
         return result
 
     def _latest_image_copy(self) -> CachedImage | None:
@@ -328,3 +375,134 @@ class UiRosBridge(Node):
         )
         self._detector_mtime_ns = mtime_ns
         return self._detector
+
+    def _shape_status_payload(self, payload: dict[str, Any] | None) -> dict[str, Any]:
+        payload = payload or {}
+        status = str(payload.get("status", "idle"))
+        info = classify_operator_message(payload.get("message", ""))
+        waypoint = payload.get("waypoint") if isinstance(payload.get("waypoint"), dict) else {}
+        waypoint_name = payload.get("waypoint_name") or waypoint.get("name")
+        workflow = self._workflow_for_status(status)
+        session_dir = payload.get("session_dir")
+        return {
+            "workflow": {
+                "status": status,
+                "stage": workflow["stage"],
+                "label": workflow["label"],
+                "progress_index": payload.get("waypoint_index"),
+                "progress_count": payload.get("waypoint_count"),
+                "sample_count": payload.get("sample_count"),
+                "min_sample_count": payload.get("min_sample_count"),
+            },
+            "current_waypoint": {
+                "name": waypoint_name,
+                "index": payload.get("waypoint_index"),
+                "count": payload.get("waypoint_count"),
+                "motion": waypoint.get("motion"),
+                "vel": waypoint.get("vel"),
+                "acc": waypoint.get("acc"),
+                "dwell_s": waypoint.get("dwell_s"),
+                "stable_tcp_pose_mmdeg": payload.get("stable_tcp_pose_mmdeg"),
+                "tcp_pose_mmdeg": payload.get("tcp_pose_mmdeg"),
+            },
+            "session": {
+                "session_dir": session_dir,
+                "session_id": Path(str(session_dir)).name if session_dir else None,
+                "report_path": payload.get("report_path"),
+            },
+            "operator_message": info["message"] if payload.get("message") else workflow["label"],
+            "message_code": info["code"],
+        }
+
+    def _workflow_for_status(self, status: str) -> dict[str, str]:
+        mapping = {
+            "idle": ("idle", "等待状态"),
+            "ready": ("idle", "节点就绪"),
+            "waypoint_recorded": ("recorded", "已记录当前点"),
+            "record_waypoint_failed": ("error", "记录点失败"),
+            "waypoint_deleted": ("recorded", "已删除上一个点"),
+            "semi_auto_dry_run_waypoint": ("dry_run", "Dry-run 检查中"),
+            "semi_auto_dry_run_complete": ("finished", "Dry-run 完成"),
+            "waypoint_motion_started": ("movej", "MoveJ 运动中"),
+            "waypoint_waiting_stable": ("wait_stable", "等待机械臂稳定"),
+            "waypoint_reached": ("reached", "已到达采样点"),
+            "waypoint_capture_started": ("capture", "正在采集图像"),
+            "waypoint_capture_skipped": ("skipped", "该点已跳过"),
+            "waypoint_sample_captured": ("accepted", "样本已接受"),
+            "semi_auto_insufficient_samples": ("error", "有效样本不足"),
+            "solved": ("solve", "标定已求解"),
+            "semi_auto_finished": ("finished", "半自动标定完成"),
+            "semi_auto_finished_with_skips": ("finished", "半自动标定完成，存在跳过点"),
+            "semi_auto_failed": ("error", "半自动标定失败"),
+        }
+        stage, label = mapping.get(status, ("idle", status or "等待状态"))
+        return {"stage": stage, "label": label}
+
+    def _motion_summary(self) -> dict[str, Any]:
+        trajectory = self.session_store.read_waypoints()
+        waypoints = trajectory.get("waypoints", []) if isinstance(trajectory.get("waypoints"), list) else []
+        defaults = trajectory.get("defaults", {}) if isinstance(trajectory.get("defaults"), dict) else {}
+        motions = {str(item.get("motion", defaults.get("motion", "movej"))).lower() for item in waypoints if isinstance(item, dict)}
+        return {
+            "execute_motion": self.execute_motion,
+            "waypoint_count": len(waypoints),
+            "motion": ",".join(sorted(motions)) if motions else str(defaults.get("motion", "movej")),
+            "vel": defaults.get("vel"),
+            "acc": defaults.get("acc"),
+            "dwell_s": defaults.get("dwell_s"),
+            "trajectory_path": str(self.trajectory_path),
+            "trajectory_error": trajectory.get("error"),
+        }
+
+    def _stop_status(self) -> dict[str, Any]:
+        return {
+            "supported": False,
+            "operator_message": "当前停止按钮只能给出提示；如需立即停止真实运动，请使用实体急停或终端中断。",
+        }
+
+    def _shape_command_result(self, command: str, success: bool, message: str, *, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        info = classify_operator_message(message)
+        success_messages = {
+            "run_semi_auto": "半自动标定请求已发送。",
+            "record_waypoint": "当前 waypoint 已记录。",
+            "delete_last_waypoint": "已删除上一个 waypoint。",
+        }
+        result = {
+            "command": command,
+            "success": bool(success),
+            "message": message,
+            "operator_message": info["message"] if not success else success_messages.get(command, message or "操作已完成。"),
+            "message_code": info["code"],
+        }
+        if extra:
+            result.update(extra)
+        return result
+
+    def _quality_flags(self, reprojection_error_px: Any, board_margin_px: Any) -> dict[str, Any]:
+        reprojection = _to_float(reprojection_error_px)
+        margin = _to_float(board_margin_px)
+        reprojection_limit_enabled = self.max_reprojection_error_px > 0.0
+        reprojection_ok = None if reprojection is None or not reprojection_limit_enabled else reprojection <= self.max_reprojection_error_px
+        margin_ok = None if margin is None else margin >= self.min_board_margin_px
+        return {
+            "max_reprojection_error_px": self.max_reprojection_error_px,
+            "min_board_margin_px": self.min_board_margin_px,
+            "reprojection_limit_enabled": reprojection_limit_enabled,
+            "reprojection_ok": reprojection_ok,
+            "margin_ok": margin_ok,
+            "quality_ok": (reprojection_ok is not False) and (margin_ok is not False),
+        }
+
+    def _event_dedupe_key(self, event_type: str, payload: dict[str, Any]) -> str:
+        status = payload.get("status") or payload.get("command") or payload.get("message") or ""
+        waypoint = payload.get("waypoint_name") or (payload.get("waypoint", {}) if isinstance(payload.get("waypoint"), dict) else {}).get("name", "")
+        return f"{event_type}:{status}:{waypoint}:{payload.get('sample_count', '')}:{payload.get('waypoint_index', '')}"
+
+
+def _to_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
