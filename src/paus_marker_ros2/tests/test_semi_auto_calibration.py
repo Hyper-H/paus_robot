@@ -21,9 +21,15 @@ from paus_marker_ros2.semi_auto_calibration import (
     load_trajectory,
     save_trajectory,
 )
+from paus_marker_ros2.eye_to_hand_calibration_node import _wrapped_rotation_delta_norm_deg
 
 
 class SemiAutoCalibrationTrajectoryTests(unittest.TestCase):
+    def test_wrapped_rotation_delta_handles_boundary_crossing(self) -> None:
+        delta = _wrapped_rotation_delta_norm_deg([0.0, 0.0, -179.9], [0.0, 0.0, 179.9])
+
+        self.assertLess(delta, 0.3)
+
     def test_save_and_load_recorded_movej_trajectory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             trajectory = empty_trajectory(tool_id=0, user_id=0, default_vel=10.0, default_acc=10.0, default_dwell_s=0.5)

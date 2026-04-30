@@ -387,10 +387,20 @@ class UiRosBridge(Node):
     def _get_detector(self) -> BoardOverlayDetector | None:
         if not self.camera_config_path.exists():
             return None
-        mtime_ns = self.camera_config_path.stat().st_mtime_ns
+        try:
+            mtime_ns = self.camera_config_path.stat().st_mtime_ns
+        except OSError:
+            self._detector = None
+            self._detector_mtime_ns = None
+            return None
         if self._detector is not None and self._detector_mtime_ns == mtime_ns:
             return self._detector
-        calibration = load_camera_calibration(self.camera_config_path)
+        try:
+            calibration = load_camera_calibration(self.camera_config_path)
+        except Exception:
+            self._detector = None
+            self._detector_mtime_ns = None
+            return None
         self._detector = BoardOverlayDetector(
             board_rows=self.board_rows,
             board_cols=self.board_cols,
