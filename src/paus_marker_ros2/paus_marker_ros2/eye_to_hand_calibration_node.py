@@ -375,6 +375,12 @@ class EyeToHandCalibrationNode(Node):
     def _write_recorded_trajectory(self) -> None:
         save_trajectory(self.recorded_trajectory, self.trajectory_path)
 
+    def _recorded_trajectory_status(self, *, dirty: bool) -> dict[str, object]:
+        return {
+            "recorded_trajectory": self.recorded_trajectory.to_payload(),
+            "trajectory_dirty": dirty,
+        }
+
     # 构造棋盘格的三维角点模板。
     def _build_board_object_points(self) -> np.ndarray:
         object_points = np.zeros((self.board_rows * self.board_cols, 3), np.float32) #为每个角点创建一个三维坐标，初始值为 (0, 0, 0)，后续会根据行列数和方格大小更新 x 和 y 坐标。这里的 z 坐标保持为 0，因为我们假设棋盘格是平放在一个平面上的。
@@ -874,7 +880,11 @@ class EyeToHandCalibrationNode(Node):
             self._publish_status(
                 "waypoint_recorded",
                 response.message,
-                {"waypoint_count": len(self.recorded_trajectory.waypoints), "record_quality": record_quality},
+                {
+                    "waypoint_count": len(self.recorded_trajectory.waypoints),
+                    "record_quality": record_quality,
+                    **self._recorded_trajectory_status(dirty=True),
+                },
             )
         except Exception as exc:
             response.success = False
@@ -895,7 +905,11 @@ class EyeToHandCalibrationNode(Node):
         response.success = True
         response.message = f"Deleted {removed.name} from the in-memory recording."
         self._append_run_log("waypoint_deleted", removed.to_payload())
-        self._publish_status("waypoint_deleted", response.message, {"waypoint_count": len(self.recorded_trajectory.waypoints)})
+        self._publish_status(
+            "waypoint_deleted",
+            response.message,
+            {"waypoint_count": len(self.recorded_trajectory.waypoints), **self._recorded_trajectory_status(dirty=True)},
+        )
         return response
 
     def _save_trajectory_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
@@ -910,7 +924,11 @@ class EyeToHandCalibrationNode(Node):
         self._write_recorded_trajectory()
         response.success = True
         response.message = f"Saved {len(self.recorded_trajectory.waypoints)} waypoints to {self.trajectory_path}."
-        self._publish_status("trajectory_saved", response.message, {"trajectory_path": str(self.trajectory_path)})
+        self._publish_status(
+            "trajectory_saved",
+            response.message,
+            {"trajectory_path": str(self.trajectory_path), **self._recorded_trajectory_status(dirty=False)},
+        )
         return response
 
     def _wait_until_tcp_stable(self) -> list[float]:

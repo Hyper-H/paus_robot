@@ -270,10 +270,11 @@ class UiRosBridge(Node):
             last_status = dict(self._last_status) if self._last_status else None
             last_status_age_s = (time.monotonic() - self._last_status_time_s) if self._last_status_time_s else None
         camera_age_s = self._image_age_s(latest_image)
-        shaped_status = self._shape_status_payload(last_status)
         backend_state = self._sync_backend_state(last_status, last_status_age_s)
+        live_status = last_status if backend_state["backend_connected"] and last_status is not None else None
+        shaped_status = self._shape_status_payload(live_status)
         current_waypoint = dict(shaped_status["current_waypoint"])
-        status_payload = last_status or {}
+        status_payload = live_status or {}
         current_waypoint.update(
             {
                 "camera_to_board_translation_m": status_payload.get("camera_to_board_translation_m"),
@@ -302,8 +303,8 @@ class UiRosBridge(Node):
             },
             "handeye": {
                 "status_topic": self.status_topic,
-                "last_status": last_status,
-                "last_status_age_s": last_status_age_s,
+                "last_status": live_status,
+                "last_status_age_s": last_status_age_s if live_status is not None else None,
                 "calibration_node_connected": backend_state["backend_connected"],
                 "execute_motion": backend_state["execute_motion"],
                 "requires_motion_confirmation": backend_state["execute_motion"] or not backend_state["backend_connected"] or not backend_state["motion_state_known"],
@@ -419,7 +420,18 @@ class UiRosBridge(Node):
         return self._call_trigger("delete_last_waypoint", timeout_s=5.0)
 
     def get_waypoints(self) -> dict[str, Any]:
-        self._sync_backend_state()
+        backend_state = self._sync_backend_state()
+        with self._last_status_lock:
+            last_status = dict(self._last_status) if self._last_status else None
+        recorded_trajectory = last_status.get("recorded_trajectory") if backend_state["backend_connected"] and isinstance(last_status, dict) else None
+        if isinstance(recorded_trajectory, dict):
+            return {
+                **recorded_trajectory,
+                "trajectory_path": str(backend_state["trajectory_path"]),
+                "error": None,
+                "source": "recorded_trajectory",
+                "dirty": bool(last_status.get("trajectory_dirty")),
+            }
         return self.session_store.read_waypoints()
 
     def list_sessions(self) -> list[dict[str, Any]]:

@@ -294,6 +294,93 @@ def test_get_status_does_not_recompute_latest_quality() -> None:
         assert status["handeye"]["current_waypoint"]["image_sequence"] == 42
 
 
+def test_get_status_drops_stale_backend_payload_when_disconnected() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        trajectory_path = root / "trajectory.yaml"
+        trajectory_path.write_text("version: 1\nwaypoints: []\n", encoding="utf-8")
+        bridge = UiRosBridge.__new__(UiRosBridge)
+        bridge.ui_host = "0.0.0.0"
+        bridge.ui_port = 8080
+        bridge.image_topic = "/camera/image_bridge"
+        bridge.status_topic = "/eye_to_hand/status"
+        bridge.camera_config_path = root / "camera.yaml"
+        bridge.config_path = str(root / "default.yaml")
+        bridge.board_rows = 6
+        bridge.board_cols = 9
+        bridge.square_size_m = 0.01
+        bridge._image_lock = threading.Lock()
+        bridge._latest_image = None
+        bridge._last_status_lock = threading.Lock()
+        bridge._last_status = {"status": "waypoint_pose_estimated", "waypoint_name": "stale_001", "session_dir": str(root / "old_session")}
+        bridge._last_status_time_s = time.monotonic() - 120.0
+        bridge._last_command_result = None
+        bridge._run_thread = None
+        bridge.session_store = SessionStore(
+            session_root_path=root / "sessions",
+            trajectory_path=trajectory_path,
+            max_reprojection_error_px=0.0,
+            min_board_margin_px=10.0,
+        )
+        bridge._sync_backend_state = lambda *_args: {
+            "backend_connected": False,
+            "execute_motion": False,
+            "motion_state_known": False,
+            "config_source": "ui_local_fallback",
+            "trajectory_path": trajectory_path,
+            "session_root_path": root / "sessions",
+            "max_reprojection_error_px": 0.0,
+            "min_board_margin_px": 10.0,
+        }
+        bridge._motion_summary = lambda: {}
+        bridge._stop_status = lambda: {}
+
+        status = UiRosBridge.get_status(bridge)
+
+        assert status["handeye"]["last_status"] is None
+        assert status["handeye"]["current_waypoint"]["name"] is None
+
+
+def test_get_waypoints_prefers_live_recorded_trajectory() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        trajectory_path = root / "trajectory.yaml"
+        bridge = UiRosBridge.__new__(UiRosBridge)
+        bridge._last_status_lock = threading.Lock()
+        bridge._last_status = {
+            "recorded_trajectory": {
+                "version": 1,
+                "tool_id": 0,
+                "user_id": 0,
+                "defaults": {"motion": "movej", "vel": 10.0, "acc": 10.0, "dwell_s": 0.5},
+                "waypoints": [{"name": "waypoint_001", "capture": True}],
+            },
+            "trajectory_dirty": True,
+        }
+        bridge.session_store = SessionStore(
+            session_root_path=root / "sessions",
+            trajectory_path=trajectory_path,
+            max_reprojection_error_px=0.0,
+            min_board_margin_px=10.0,
+        )
+        bridge._sync_backend_state = lambda *_args: {
+            "backend_connected": True,
+            "trajectory_path": trajectory_path,
+            "session_root_path": root / "sessions",
+            "execute_motion": False,
+            "motion_state_known": True,
+            "config_source": "backend_status",
+            "max_reprojection_error_px": 0.0,
+            "min_board_margin_px": 10.0,
+        }
+
+        waypoints = UiRosBridge.get_waypoints(bridge)
+
+        assert waypoints["source"] == "recorded_trajectory"
+        assert waypoints["dirty"] is True
+        assert waypoints["waypoints"][0]["name"] == "waypoint_001"
+
+
 def test_successful_run_command_preserves_backend_message() -> None:
     bridge = UiRosBridge.__new__(UiRosBridge)
 
