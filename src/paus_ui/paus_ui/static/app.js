@@ -151,10 +151,8 @@ async function refreshStatus() {
   } else if (current.empty_reason) {
     els.boardAngle.textContent = current.empty_reason;
   }
-  if (session.session_id && !state.userSelectedSession && state.selectedSession !== session.session_id) {
+  if (session.session_id && handeye.run_active && !state.userSelectedSession && state.selectedSession !== session.session_id) {
     state.selectedSession = session.session_id;
-  } else if (!state.selectedSession) {
-    state.selectedSession = session.latest_valid_session_id || session.session_id || "";
   }
   const result = handeye.last_command_result;
   if (result) {
@@ -192,18 +190,15 @@ async function refreshSessions() {
   const sessions = await getJson("/api/sessions", []);
   state.sessions = sessions;
   const selectedStillExists = sessions.some((session) => session.id === state.selectedSession);
-  if (!selectedStillExists) {
+  if (state.selectedSession && !selectedStillExists) {
+    state.selectedSession = "";
     state.userSelectedSession = false;
   }
-  if ((!state.selectedSession || !selectedStillExists) && sessions.length) {
-    const preferred = sessions.find((session) => session.has_solution) || sessions.find((session) => session.has_report) || sessions[0];
-    state.selectedSession = preferred.id;
-  }
-  const options = sessions.map((session) => {
+  const options = ['<option value="">当前示教轨迹</option>'];
+  options.push(...sessions.map((session) => {
     const label = `${session.id} (${session.sample_count || 0})${session.has_solution ? "" : session.has_report ? " unsolved" : " no report"}`;
     return `<option value="${escapeHtml(session.id)}">${escapeHtml(label)}</option>`;
-  });
-  if (!options.length) options.push('<option value="">无 session</option>');
+  }));
   els.sessionSelect.innerHTML = options.join("");
   els.sessionSelect.value = state.selectedSession || "";
 }

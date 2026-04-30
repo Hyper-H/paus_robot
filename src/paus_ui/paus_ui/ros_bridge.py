@@ -617,6 +617,7 @@ class UiRosBridge(Node):
             "record_waypoint_failed": ("error", "记录点失败"),
             "waypoint_deleted": ("recorded", "已删除上一个点"),
             "semi_auto_dry_run_waypoint": ("dry_run", "Dry-run 检查中"),
+            "waypoint_dry_run_complete": ("dry_run", "Dry-run"),
             "semi_auto_dry_run_complete": ("finished", "Dry-run 完成"),
             "waypoint_motion_started": ("movej", "MoveJ 运动中"),
             "waypoint_waiting_stable": ("wait_stable", "等待机械臂稳定"),

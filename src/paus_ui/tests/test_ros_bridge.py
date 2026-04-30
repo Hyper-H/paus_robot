@@ -373,3 +373,11 @@ def test_archived_sample_overlay_uses_saved_metadata_without_live_detector() -> 
         assert raw.startswith(b"\xff\xd8")
         assert overlay.startswith(b"\xff\xd8")
         assert overlay != raw
+
+
+def test_workflow_maps_backend_dry_run_waypoint_status() -> None:
+    bridge = UiRosBridge.__new__(UiRosBridge)
+
+    workflow = UiRosBridge._workflow_for_status(bridge, "waypoint_dry_run_complete")
+
+    assert workflow["stage"] == "dry_run"

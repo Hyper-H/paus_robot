@@ -190,10 +190,11 @@ def _resolve_config_artifact_path(path_value: str | Path, config_path: str | Pat
     path = Path(path_text).expanduser()
     if path.is_absolute():
         return str(path)
+    resolved_config_path = Path(config_path).expanduser().resolve()
+    if "install" in resolved_config_path.parts:
+        runtime_relative_path = Path("configs") / path if len(path.parts) == 1 else path
+        return str((_runtime_root() / runtime_relative_path).resolve())
     if len(path.parts) == 1:
-        resolved_config_path = Path(config_path).expanduser().resolve()
-        if "install" in resolved_config_path.parts:
-            return str((_runtime_root() / "configs" / path).resolve())
         return str((resolved_config_path.parent / path).resolve())
     return resolve_config_path(path, config_path)
 
