@@ -399,7 +399,7 @@ class UiRosBridge(Node):
             self._run_thread.start()
         result = self._shape_command_result(
             "run_semi_auto",
-            False,
+            True,
             "Semi-auto calibration request queued.",
             extra={"accepted": True, "queued": True, "confirmation": confirmation},
         )

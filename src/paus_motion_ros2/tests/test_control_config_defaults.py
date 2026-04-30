@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import os
 from pathlib import Path
 
 import yaml
@@ -75,29 +76,38 @@ class ConfigControlDefaultsTests(unittest.TestCase):
 
     def test_default_yaml_paths_are_install_safe(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_root = Path(temp_dir) / "runtime"
+            old_runtime_root = os.environ.get("PAUS_ROBOT_RUNTIME_DIR")
+            os.environ["PAUS_ROBOT_RUNTIME_DIR"] = str(runtime_root)
             install_config_dir = Path(temp_dir) / "install" / "paus_bringup" / "share" / "paus_bringup" / "configs"
             install_config_dir.mkdir(parents=True, exist_ok=True)
             config_path = install_config_dir / "default.yaml"
-            config_path.write_text(
-                yaml.safe_dump(
-                    {
-                        "calibration": {
-                            "output_path": "extrinsics.yaml",
-                            "trajectory_path": "eye_to_hand_trajectory.yaml",
-                            "session_root_path": "calibration_sessions",
-                        }
-                    },
-                    sort_keys=False,
-                ),
-                encoding="utf-8",
-            )
+            try:
+                config_path.write_text(
+                    yaml.safe_dump(
+                        {
+                            "calibration": {
+                                "output_path": "extrinsics.yaml",
+                                "trajectory_path": "eye_to_hand_trajectory.yaml",
+                                "session_root_path": "calibration_sessions",
+                            }
+                        },
+                        sort_keys=False,
+                    ),
+                    encoding="utf-8",
+                )
 
-            config = load_config(config_path)
-            calibration = config["calibration"]
+                config = load_config(config_path)
+                calibration = config["calibration"]
 
-            self.assertEqual(calibration["output_path"], str(Path(temp_dir) / "configs" / "extrinsics.yaml"))
-            self.assertEqual(calibration["trajectory_path"], str(Path(temp_dir) / "configs" / "eye_to_hand_trajectory.yaml"))
-            self.assertEqual(calibration["session_root_path"], str(Path(temp_dir) / "calibration_sessions"))
+                self.assertEqual(calibration["output_path"], str(runtime_root / "configs" / "extrinsics.yaml"))
+                self.assertEqual(calibration["trajectory_path"], str(runtime_root / "configs" / "eye_to_hand_trajectory.yaml"))
+                self.assertEqual(calibration["session_root_path"], str(Path(temp_dir) / "calibration_sessions"))
+            finally:
+                if old_runtime_root is None:
+                    os.environ.pop("PAUS_ROBOT_RUNTIME_DIR", None)
+                else:
+                    os.environ["PAUS_ROBOT_RUNTIME_DIR"] = old_runtime_root
 
 
 class FairinoLinuxClientTests(unittest.TestCase):

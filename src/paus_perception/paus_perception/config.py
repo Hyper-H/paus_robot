@@ -175,6 +175,16 @@ def resolve_config_path(path_value: str | Path, config_path: str | Path) -> str:
     return str((_infer_project_root(Path(config_path)) / path).resolve())
 
 
+def _runtime_root() -> Path:
+    override = os.environ.get("PAUS_ROBOT_RUNTIME_DIR")
+    if override:
+        return Path(override).expanduser()
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    if xdg_data_home:
+        return Path(xdg_data_home).expanduser() / "paus_robot"
+    return Path.home() / ".local" / "share" / "paus_robot"
+
+
 def _resolve_config_artifact_path(path_value: str | Path, config_path: str | Path) -> str:
     path_text = os.path.expandvars(str(path_value)).strip()
     path = Path(path_text).expanduser()
@@ -183,7 +193,7 @@ def _resolve_config_artifact_path(path_value: str | Path, config_path: str | Pat
     if len(path.parts) == 1:
         resolved_config_path = Path(config_path).expanduser().resolve()
         if "install" in resolved_config_path.parts:
-            return str((_infer_project_root(resolved_config_path) / "configs" / path).resolve())
+            return str((_runtime_root() / "configs" / path).resolve())
         return str((resolved_config_path.parent / path).resolve())
     return resolve_config_path(path, config_path)
 

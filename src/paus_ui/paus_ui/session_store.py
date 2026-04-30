@@ -7,6 +7,7 @@ from typing import Any
 import yaml
 
 from paus_marker_ros2.semi_auto_calibration import TrajectoryValidationError, load_trajectory
+from paus_perception import rotation_matrix_to_rpy_deg
 
 from .operator_messages import classify_operator_message
 
@@ -108,7 +109,7 @@ class SessionStore:
             image_path = sample.get("image_path")
             sample["has_image"] = bool(image_path and Path(str(image_path)).exists())
             sample["camera_to_board_translation_m"] = sample.get("camera_to_board_translation_m") or _matrix_translation(sample.get("camera_to_board_matrix"))
-            sample["camera_to_board_rotation_rpy_deg"] = sample.get("camera_to_board_rotation_rpy_deg")
+            sample["camera_to_board_rotation_rpy_deg"] = sample.get("camera_to_board_rotation_rpy_deg") or _matrix_rotation_rpy_deg(sample.get("camera_to_board_matrix"))
             sample["capture_time_s"] = sample.get("image_header_time_s") or sample.get("image_received_time_s")
             sample["thresholds"] = self._quality_flags(sample.get("reprojection_error_px"), sample.get("board_margin_px"))
         return samples
@@ -402,6 +403,16 @@ def _matrix_translation(matrix: Any) -> list[float] | None:
         return [float(matrix[0][3]), float(matrix[1][3]), float(matrix[2][3])]
     except (TypeError, ValueError, IndexError):
         return None
+
+
+def _matrix_rotation_rpy_deg(matrix: Any) -> list[float] | None:
+    if not isinstance(matrix, list) or len(matrix) < 3:
+        return None
+    try:
+        rotation = [[float(matrix[row][col]) for col in range(3)] for row in range(3)]
+    except (TypeError, ValueError, IndexError):
+        return None
+    return rotation_matrix_to_rpy_deg(rotation)
 
 
 def _to_float(value: Any) -> float | None:

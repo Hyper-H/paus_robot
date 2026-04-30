@@ -101,6 +101,7 @@ def test_session_store_reads_report_samples_and_waypoint_events(tmp_path: Path) 
     samples = store.read_samples("2026-04-29_120000")
     assert samples[0]["row_index"] == 1
     assert samples[0]["reprojection_error_px"] == 1.25
+    assert samples[0]["camera_to_board_rotation_rpy_deg"] == [0.0, -0.0, 0.0]
 
     waypoints = store.read_session_waypoints("2026-04-29_120000")
     assert waypoints[0]["status"] == "accepted"
