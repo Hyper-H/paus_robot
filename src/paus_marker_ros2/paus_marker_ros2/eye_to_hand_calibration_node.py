@@ -192,10 +192,11 @@ class EyeToHandCalibrationNode(Node):
         self.move_vel = float(self.get_parameter("move_vel").get_parameter_value().double_value)
         self.move_acc = float(self.get_parameter("move_acc").get_parameter_value().double_value)
         self.execute_motion = bool(self.get_parameter("execute_motion").get_parameter_value().bool_value)
-        self.session_dir = create_session_dir(self.session_root_path)
-        self.sample_log_path = Path(resolve_config_path(sample_log_path_value, self.config_path)) if sample_log_path_value else self.session_dir / "samples.jsonl"
-        self.report_path = self.session_dir / "report.yaml"
-        self.run_log_path = self.session_dir / "run.log"
+        self.session_dir: Path | None = None
+        self.sample_log_path_override = Path(resolve_config_path(sample_log_path_value, self.config_path)) if sample_log_path_value else None
+        self.sample_log_path: Path | None = None
+        self.report_path: Path | None = None
+        self.run_log_path: Path | None = None
 
         # 标定节点必须有相机内参文件，否则没法 solvePnP。
         ##runtimeerror表示运行时报错，即运行到这里时，状态不满足要求，所以不能继续
@@ -236,8 +237,7 @@ class EyeToHandCalibrationNode(Node):
         self.run_semi_auto_service = self.create_service(Trigger, "/eye_to_hand/run_semi_auto_calibration", self._run_semi_auto_callback, callback_group=self.callback_group)
 
         # 节点启动后发布初始状态。
-        self._append_run_log("node_started", {"session_dir": str(self.session_dir), "trajectory_path": str(self.trajectory_path)})
-        self._publish_status("ready", "Eye-to-hand calibration node started.", {"session_dir": str(self.session_dir), "trajectory_path": str(self.trajectory_path)})
+        self._publish_status("ready", "Eye-to-hand calibration node started.", {"trajectory_path": str(self.trajectory_path)})
 
     def _wait_for_camera_config(self, camera_config_path: str) -> Path:
         path = Path(camera_config_path)
@@ -278,7 +278,7 @@ class EyeToHandCalibrationNode(Node):
             "sample_count": len(self.samples),
             "min_sample_count": self.min_sample_count,
             "solver_method": self.solver_method,
-            "session_dir": str(self.session_dir),
+            "session_dir": str(self.session_dir) if self.session_dir is not None else None,
             "trajectory_path": str(self.trajectory_path),
             "session_root_path": str(self.session_root_path),
             "output_path": str(self.output_path),
@@ -294,6 +294,8 @@ class EyeToHandCalibrationNode(Node):
         self.get_logger().info(status_message.data)
 
     def _append_run_log(self, event: str, payload: dict[str, object] | None = None) -> None:
+        if self.run_log_path is None:
+            return
         record = {
             "event": event,
             "monotonic_time_s": time.monotonic(),
@@ -321,11 +323,18 @@ class EyeToHandCalibrationNode(Node):
 
     def _begin_new_semi_auto_session(self) -> None:
         self.session_dir = create_session_dir(self.session_root_path)
-        self.sample_log_path = self.session_dir / "samples.jsonl"
+        self.sample_log_path = self.sample_log_path_override or self.session_dir / "samples.jsonl"
         self.report_path = self.session_dir / "report.yaml"
         self.run_log_path = self.session_dir / "run.log"
         self.samples.clear()
         self.current_solution = None
+
+    def _ensure_session_started(self) -> None:
+        if self.session_dir is None:
+            self.session_dir = create_session_dir(self.session_root_path)
+            self.sample_log_path = self.sample_log_path_override or self.session_dir / "samples.jsonl"
+            self.report_path = self.session_dir / "report.yaml"
+            self.run_log_path = self.session_dir / "run.log"
 
     def _write_recorded_trajectory(self) -> None:
         save_trajectory(self.recorded_trajectory, self.trajectory_path)
@@ -444,6 +453,8 @@ class EyeToHandCalibrationNode(Node):
         }
 
     def _append_sample_log(self, sample: CalibrationSample) -> None:
+        if self.sample_log_path is None:
+            raise RuntimeError("Calibration session is not initialized.")
         self.sample_log_path.parent.mkdir(parents=True, exist_ok=True)
         with self.sample_log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(self._sample_to_log_record(sample), ensure_ascii=False) + "\n")
@@ -451,8 +462,12 @@ class EyeToHandCalibrationNode(Node):
     def _save_sample_image(self, image_bgr: np.ndarray, sample_index: int) -> str | None:
         if not self.save_sample_images:
             return None
+        if self.session_dir is None:
+            raise RuntimeError("Calibration session is not initialized.")
         image_path = self.session_dir / "images" / f"sample_{sample_index:03d}.png"
-        cv2.imwrite(str(image_path), image_bgr)
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(image_path), image_bgr):
+            raise RuntimeError(f"Failed to write sample image: {image_path}")
         return str(image_path)
 
     def _probe_current_board_quality(self) -> dict[str, object]:
@@ -497,6 +512,7 @@ class EyeToHandCalibrationNode(Node):
         return message
 
     def _capture_one_sample(self) -> CalibrationSample:
+        self._ensure_session_started()
         with self._image_condition:
             previous_sequence = self.image_sequence
         captured_image = self._wait_for_fresh_image(previous_sequence)
@@ -539,6 +555,8 @@ class EyeToHandCalibrationNode(Node):
         }
 
     def _write_report(self, payload: dict[str, object]) -> None:
+        if self.report_path is None:
+            raise RuntimeError("Calibration session is not initialized.")
         self.report_path.parent.mkdir(parents=True, exist_ok=True)
         with self.report_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(payload, handle, sort_keys=False, allow_unicode=True)
@@ -556,7 +574,7 @@ class EyeToHandCalibrationNode(Node):
                 {
                     "robot_ip": self.robot_ip,
                     "sdk_root": self.linux_fairino_sdk_root,
-                    "sample_log_path": str(self.sample_log_path),
+                    "sample_log_path": str(self.sample_log_path) if self.sample_log_path is not None else None,
                     "capture_timing": self._sample_to_log_record(sample),
                 },
             )
@@ -690,9 +708,9 @@ class EyeToHandCalibrationNode(Node):
                 method=solve_method,
             )
             report_payload = {
-                "session_dir": str(self.session_dir),
+                "session_dir": str(self.session_dir) if self.session_dir is not None else None,
                 "trajectory_path": str(self.trajectory_path),
-                "sample_log_path": str(self.sample_log_path),
+                "sample_log_path": str(self.sample_log_path) if self.sample_log_path is not None else None,
                 "sample_count": len(self.samples),
                 "method": solve_method,
                 "base_to_camera": asdict(transform),
@@ -705,7 +723,14 @@ class EyeToHandCalibrationNode(Node):
                 ],
             }
             self._write_report(report_payload)
-            self._append_run_log("solved", {"report_path": str(self.report_path), "method": solve_method, "sample_count": len(self.samples)})
+            self._append_run_log(
+                "solved",
+                {
+                    "report_path": str(self.report_path) if self.report_path is not None else None,
+                    "method": solve_method,
+                    "sample_count": len(self.samples),
+                },
+            )
             response.success = True
             response.message = self.current_solution.message
             self._publish_status(
@@ -718,7 +743,7 @@ class EyeToHandCalibrationNode(Node):
                     "tool_to_board_rotation_rpy_deg": self.current_solution.tool_to_board_rotation_rpy_deg,
                     "residuals": asdict(residuals),
                     "solver_residuals": solver_residuals,
-                    "report_path": str(self.report_path),
+                    "report_path": str(self.report_path) if self.report_path is not None else None,
                 },
             )
         except Exception as exc:
@@ -731,6 +756,8 @@ class EyeToHandCalibrationNode(Node):
     def _save_current_solution(self) -> None:
         if self.current_solution is None or not self.current_solution.success:
             raise RuntimeError("No solved extrinsic is available.")
+        if self.session_dir is None:
+            raise RuntimeError("Calibration session is not initialized.")
         before_path = self.session_dir / "extrinsics_before.yaml"
         after_path = self.session_dir / "extrinsics_after.yaml"
         if self.output_path.exists():
@@ -758,7 +785,11 @@ class EyeToHandCalibrationNode(Node):
             self._save_current_solution()
             response.success = True
             response.message = f"Saved extrinsic to {self.output_path}."
-            self._publish_status("saved", response.message, {"output_path": str(self.output_path), "session_dir": str(self.session_dir)})
+            self._publish_status(
+                "saved",
+                response.message,
+                {"output_path": str(self.output_path), "session_dir": str(self.session_dir) if self.session_dir is not None else None},
+            )
         except Exception as exc:
             response.success = False
             response.message = repr(exc)
@@ -989,6 +1020,29 @@ class EyeToHandCalibrationNode(Node):
                         ),
                         sample_progress,
                     )
+                else:
+                    skipped_count += 1
+                    disabled_progress = {
+                        **waypoint_progress,
+                        "captured_count": captured_count,
+                        "skipped_count": skipped_count,
+                        "reason": "capture=false",
+                    }
+                    self._append_run_log(
+                        "waypoint_capture_disabled",
+                        {
+                            "waypoint": waypoint.to_payload(),
+                            "waypoint_name": waypoint.name,
+                            "reason": "capture=false",
+                            "captured_count": captured_count,
+                            "skipped_count": skipped_count,
+                        },
+                    )
+                    self._publish_status(
+                        "waypoint_capture_disabled",
+                        f"Completed {waypoint.name} without capture (capture=false).",
+                        disabled_progress,
+                    )
 
             if len(self.samples) < self.min_sample_count:
                 response.success = False
@@ -1008,7 +1062,7 @@ class EyeToHandCalibrationNode(Node):
                     "semi_auto_insufficient_samples",
                     response.message,
                     {
-                        "session_dir": str(self.session_dir),
+                        "session_dir": str(self.session_dir) if self.session_dir is not None else None,
                         "accepted_samples": captured_count,
                         "skipped_waypoints": skipped_count,
                         "min_sample_count": self.min_sample_count,
@@ -1028,8 +1082,8 @@ class EyeToHandCalibrationNode(Node):
                 "semi_auto_finished" if skipped_count == 0 else "semi_auto_finished_with_skips",
                 response.message,
                 {
-                    "session_dir": str(self.session_dir),
-                    "report_path": str(self.report_path),
+                    "session_dir": str(self.session_dir) if self.session_dir is not None else None,
+                    "report_path": str(self.report_path) if self.report_path is not None else None,
                     "accepted_samples": captured_count,
                     "skipped_waypoints": skipped_count,
                 },
@@ -1038,7 +1092,7 @@ class EyeToHandCalibrationNode(Node):
             response.success = False
             response.message = repr(exc)
             self._append_run_log("semi_auto_failed", {"error": response.message})
-            self._publish_status("semi_auto_failed", response.message, {"session_dir": str(self.session_dir)})
+            self._publish_status("semi_auto_failed", response.message, {"session_dir": str(self.session_dir) if self.session_dir is not None else None})
         finally:
             with self._semi_auto_lock:
                 self._semi_auto_active = False

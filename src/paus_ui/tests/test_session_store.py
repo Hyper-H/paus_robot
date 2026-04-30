@@ -109,3 +109,59 @@ def test_session_store_reads_report_samples_and_waypoint_events(tmp_path: Path) 
     assert waypoints[0]["camera_to_board_translation_m"] == [0.1, 0.2, 0.3]
     assert waypoints[1]["status"] == "skipped"
     assert "not detected" in waypoints[1]["reason"]
+
+
+def test_session_store_marks_capture_disabled_waypoints_terminal(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
+    trajectory_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "tool_id": 0,
+                "user_id": 0,
+                "defaults": {"motion": "movej", "vel": 10.0, "acc": 10.0, "dwell_s": 0.5},
+                "waypoints": [
+                    {
+                        "name": "waypoint_001",
+                        "motion": "movej",
+                        "joint_deg": [0, 0, 0, 0, 0, 0],
+                        "expected_tcp_pose_mmdeg": [1, 2, 3, 4, 5, 6],
+                        "vel": 10.0,
+                        "acc": 10.0,
+                        "dwell_s": 0.5,
+                        "capture": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    session_root = tmp_path / "calibration_sessions"
+    session_path = session_root / "2026-04-29_121000"
+    session_path.mkdir(parents=True)
+    _write_jsonl(
+        session_path / "run.log",
+        [
+            {
+                "event": "waypoint_reached",
+                "waypoint_name": "waypoint_001",
+                "waypoint": {"name": "waypoint_001", "capture": False},
+            },
+            {
+                "event": "waypoint_capture_disabled",
+                "waypoint_name": "waypoint_001",
+                "waypoint": {"name": "waypoint_001", "capture": False},
+                "reason": "capture=false",
+            },
+        ],
+    )
+
+    store = SessionStore(session_root_path=session_root, trajectory_path=trajectory_path)
+
+    sessions = store.list_sessions()
+    assert sessions[0]["skipped_count"] == 1
+    assert sessions[0]["pending_count"] == 0
+    waypoints = store.read_session_waypoints("2026-04-29_121000")
+    assert waypoints[0]["status"] == "skipped"
+    assert waypoints[0]["result"] == "SKIP"
+    assert waypoints[0]["reason"] == "capture=false"

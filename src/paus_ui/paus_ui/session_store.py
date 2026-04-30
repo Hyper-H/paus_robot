@@ -171,8 +171,10 @@ class SessionStore:
                 ),
             )
             event_name = str(event.get("event", ""))
-            if event_name == "waypoint_capture_skipped":
+            if event_name in {"waypoint_capture_skipped", "waypoint_capture_disabled"}:
                 reason = str(event.get("reason", event.get("message", "")))
+                if event_name == "waypoint_capture_disabled" and not reason:
+                    reason = "capture=false"
                 record.update(
                     self._waypoint_record(
                         session_id=session_id,
@@ -180,7 +182,7 @@ class SessionStore:
                         name=name,
                         waypoint=record.get("waypoint", {"name": name}),
                         status="skipped",
-                        result="FAIL",
+                        result="SKIP" if event_name == "waypoint_capture_disabled" else "FAIL",
                         reason=reason,
                         sample=None,
                         reprojection_error_px=event.get("reprojection_error_px", record.get("reprojection_error_px")),
@@ -300,7 +302,7 @@ class SessionStore:
 
     def _counts_for_session(self, *, path: Path, report: dict[str, Any], samples: list[dict[str, Any]], events: list[dict[str, Any]]) -> dict[str, int]:
         accepted = sum(1 for event in events if event.get("event") == "waypoint_sample_captured")
-        skipped = sum(1 for event in events if event.get("event") == "waypoint_capture_skipped")
+        skipped = sum(1 for event in events if event.get("event") in {"waypoint_capture_skipped", "waypoint_capture_disabled"})
         if not accepted:
             accepted = int(report.get("sample_count", 0) or len(samples))
         trajectory = self._read_waypoints_from_path(self._trajectory_path_for_session(path))
