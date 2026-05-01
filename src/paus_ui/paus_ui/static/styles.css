@@ -519,6 +519,10 @@ p {
   background: var(--red);
 }
 
+.flow-step.active.error {
+  background: var(--red);
+}
+
 .flow-step.active.accepted {
   background: var(--green);
 }

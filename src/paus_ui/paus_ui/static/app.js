@@ -403,15 +403,17 @@ function renderFlow(activeStage) {
     detect: 4,
     accepted: 5,
     skipped: 5,
+    error: 5,
     solve: 6,
     finished: 7,
   };
   const activeIndex = order[normalizedStage] ?? -1;
   els.workflowFlow.innerHTML = steps.map((step, index) => {
     const isOutcome = step.key === "outcome";
-    const isActive = isOutcome ? normalizedStage === "accepted" || normalizedStage === "skipped" : step.key === normalizedStage;
+    const isOutcomeState = normalizedStage === "accepted" || normalizedStage === "skipped" || normalizedStage === "error";
+    const isActive = isOutcome ? isOutcomeState : step.key === normalizedStage;
     const isDone = index < activeIndex;
-    const label = isOutcome && isActive ? normalizedStage : step.label;
+    const label = isOutcome && isActive ? (normalizedStage === "error" ? "错误" : normalizedStage) : step.label;
     const branchClass = isOutcome && isActive ? normalizedStage : "";
     const cls = [isActive ? "active" : "", isDone ? "done" : "", branchClass].filter(Boolean).join(" ");
     return `<span class="flow-step ${cls}">${label}</span>`;
@@ -426,7 +428,7 @@ function normalizeWorkflowStage(stage) {
     detecting: "detect",
     detected: "detect",
     solved: "solve",
-    error: "skipped",
+    error: "error",
   };
   return aliases[stage] !== undefined ? aliases[stage] : stage;
 }
