@@ -980,13 +980,14 @@ class EyeToHandCalibrationNode(Node):
                 return response
             self._semi_auto_active = True
         try:
+            self._begin_new_semi_auto_session()
             if not self.trajectory_path.exists():
                 response.success = False
                 response.message = f"Trajectory YAML does not exist: {self.trajectory_path}. Record waypoints first."
+                self._append_run_log("semi_auto_failed", {"error": response.message})
                 self._publish_status("semi_auto_failed", response.message)
                 return response
             trajectory = load_trajectory(self.trajectory_path)
-            self._begin_new_semi_auto_session()
             shutil.copy2(self.trajectory_path, self.session_dir / "trajectory_used.yaml")
             self._append_run_log("semi_auto_started", {"trajectory_path": str(self.trajectory_path), "execute_motion": self.execute_motion})
             self._publish_status(

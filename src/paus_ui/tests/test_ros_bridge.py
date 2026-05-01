@@ -296,6 +296,7 @@ def test_get_status_does_not_recompute_latest_quality() -> None:
 
         status = UiRosBridge.get_status(bridge)
 
+        assert status["ui"]["url"] == "http://localhost:8080"
         assert status["handeye"]["current_waypoint"]["camera_to_board_translation_m"] == [0.1, 0.2, 0.3]
         assert status["handeye"]["current_waypoint"]["image_sequence"] == 42
 

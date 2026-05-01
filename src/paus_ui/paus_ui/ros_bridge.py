@@ -286,11 +286,12 @@ class UiRosBridge(Node):
             }
         )
         latest_session = self.session_store.latest_valid_session_id()
+        ui_host = self.ui_host if self.ui_host not in {"0.0.0.0", "::", ""} else "localhost"
         return {
             "ui": {
                 "host": self.ui_host,
                 "port": self.ui_port,
-                "url": f"http://{self.ui_host}:{self.ui_port}",
+                "url": f"http://{ui_host}:{self.ui_port}",
             },
             "camera": {
                 "connected": camera_age_s is not None and camera_age_s < CAMERA_FRESHNESS_S,
