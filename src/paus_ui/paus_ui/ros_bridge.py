@@ -426,7 +426,11 @@ class UiRosBridge(Node):
         backend_state = self._sync_backend_state()
         with self._last_status_lock:
             last_status = dict(self._last_status) if self._last_status else None
-        recorded_trajectory = last_status.get("recorded_trajectory") if backend_state["backend_connected"] and isinstance(last_status, dict) else None
+        recorded_trajectory = (
+            last_status.get("recorded_trajectory")
+            if backend_state.get("status_recent") and isinstance(last_status, dict)
+            else None
+        )
         if isinstance(recorded_trajectory, dict):
             return {
                 **recorded_trajectory,
@@ -659,7 +663,16 @@ class UiRosBridge(Node):
         return {"stage": stage, "label": label}
 
     def _motion_summary(self) -> dict[str, Any]:
-        trajectory = self.session_store.read_waypoints()
+        backend_state = self._sync_backend_state()
+        with self._last_status_lock:
+            last_status = dict(self._last_status) if self._last_status else None
+        trajectory = (
+            last_status.get("recorded_trajectory")
+            if backend_state.get("status_recent") and isinstance(last_status, dict)
+            else None
+        )
+        if not isinstance(trajectory, dict):
+            trajectory = self.session_store.read_waypoints()
         waypoints = trajectory.get("waypoints", []) if isinstance(trajectory.get("waypoints"), list) else []
         defaults = trajectory.get("defaults", {}) if isinstance(trajectory.get("defaults"), dict) else {}
         motions = {str(item.get("motion", defaults.get("motion", "movej"))).lower() for item in waypoints if isinstance(item, dict)}

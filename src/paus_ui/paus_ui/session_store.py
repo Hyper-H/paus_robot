@@ -340,9 +340,22 @@ class SessionStore:
             accepted = int(report.get("sample_count", 0) or len(samples))
         trajectory = self._read_waypoints_from_path(self._trajectory_path_for_session(path))
         waypoint_count = len(trajectory.get("waypoints", []))
+        if not waypoint_count:
+            waypoint_count = self._waypoint_count_from_events(events)
         pending = max(waypoint_count - accepted - skipped, 0) if waypoint_count else 0
         sample_count = int(report.get("sample_count", 0) or len(samples) or accepted)
         return {"sample_count": sample_count, "accepted": accepted, "skipped": skipped, "pending": pending, "trajectory_error": trajectory.get("error")}
+
+    def _waypoint_count_from_events(self, events: list[dict[str, Any]]) -> int:
+        names: set[str] = set()
+        for event in events:
+            waypoint = event.get("waypoint")
+            waypoint_name = event.get("waypoint_name")
+            if isinstance(waypoint, dict):
+                waypoint_name = waypoint.get("name", waypoint_name)
+            if waypoint_name:
+                names.add(str(waypoint_name))
+        return len(names)
 
     def _trajectory_path_for_session(self, session_path: Path) -> Path | None:
         used = session_path / "trajectory_used.yaml"

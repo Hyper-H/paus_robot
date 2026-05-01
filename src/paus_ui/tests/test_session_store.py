@@ -311,6 +311,10 @@ def test_session_store_reads_manual_recorded_waypoints_from_run_log(tmp_path: Pa
 
     store = SessionStore(session_root_path=session_root, trajectory_path=trajectory_path)
 
+    sessions = store.list_sessions()
+    assert sessions[0]["pending_count"] == 1
+    assert sessions[0]["accepted_count"] == 0
+    assert sessions[0]["skipped_count"] == 0
     waypoints = store.read_session_waypoints("2026-04-29_123500")
     assert len(waypoints) == 1
     assert waypoints[0]["name"] == "waypoint_001"

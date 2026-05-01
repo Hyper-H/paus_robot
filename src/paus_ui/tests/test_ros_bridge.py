@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 cv2 = pytest.importorskip("cv2")
 np = pytest.importorskip("numpy")
@@ -371,6 +372,7 @@ def test_get_waypoints_prefers_live_recorded_trajectory() -> None:
         )
         bridge._sync_backend_state = lambda *_args: {
             "backend_connected": True,
+            "status_recent": True,
             "trajectory_path": trajectory_path,
             "session_root_path": root / "sessions",
             "execute_motion": False,
@@ -387,6 +389,70 @@ def test_get_waypoints_prefers_live_recorded_trajectory() -> None:
         assert waypoints["waypoints"][0]["name"] == "waypoint_001"
 
 
+def test_get_waypoints_falls_back_to_disk_when_live_recording_is_stale() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        trajectory_path = root / "trajectory.yaml"
+        trajectory_path.write_text(
+            yaml.safe_dump(
+                {
+                    "version": 1,
+                    "tool_id": 0,
+                    "user_id": 0,
+                    "defaults": {"motion": "movej", "vel": 20.0, "acc": 30.0, "dwell_s": 0.5},
+                    "waypoints": [
+                        {
+                            "name": "waypoint_disk",
+                                "motion": "movej",
+                            "joint_deg": [0, 0, 0, 0, 0, 0],
+                            "expected_tcp_pose_mmdeg": [10, 20, 30, 40, 50, 60],
+                            "vel": 20.0,
+                            "acc": 30.0,
+                            "dwell_s": 0.5,
+                            "capture": True,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        bridge = UiRosBridge.__new__(UiRosBridge)
+        bridge._last_status_lock = threading.Lock()
+        bridge._last_status = {
+            "recorded_trajectory": {
+                "version": 1,
+                "tool_id": 0,
+                "user_id": 0,
+                "defaults": {"motion": "movej", "vel": 10.0, "acc": 10.0, "dwell_s": 0.5},
+                "waypoints": [{"name": "waypoint_live", "capture": True}],
+            },
+            "trajectory_dirty": True,
+        }
+        bridge.session_store = SessionStore(
+            session_root_path=root / "sessions",
+            trajectory_path=trajectory_path,
+            max_reprojection_error_px=0.0,
+            min_board_margin_px=10.0,
+        )
+        bridge._sync_backend_state = lambda *_args: {
+            "backend_connected": True,
+            "status_recent": False,
+            "trajectory_path": trajectory_path,
+            "session_root_path": root / "sessions",
+            "execute_motion": False,
+            "motion_state_known": False,
+            "config_source": "backend_service_ready",
+            "max_reprojection_error_px": 0.0,
+            "min_board_margin_px": 10.0,
+        }
+
+        waypoints = UiRosBridge.get_waypoints(bridge)
+
+        assert waypoints["trajectory_path"] == str(trajectory_path)
+        assert waypoints["waypoints"][0]["name"] == "waypoint_disk"
+        assert waypoints["waypoints"][0]["name"] != "waypoint_live"
+
+
 def test_successful_run_command_preserves_backend_message() -> None:
     bridge = UiRosBridge.__new__(UiRosBridge)
 
@@ -398,6 +464,82 @@ def test_successful_run_command_preserves_backend_message() -> None:
     )
 
     assert result["operator_message"] == result["message"]
+
+
+def test_motion_summary_prefers_live_recorded_trajectory() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        trajectory_path = root / "trajectory.yaml"
+        trajectory_path.write_text(
+            yaml.safe_dump(
+                {
+                    "version": 1,
+                    "tool_id": 0,
+                    "user_id": 0,
+                    "defaults": {"motion": "movej", "vel": 20.0, "acc": 30.0, "dwell_s": 0.5},
+                    "waypoints": [
+                        {
+                            "name": "waypoint_disk_001",
+                            "motion": "movej",
+                            "joint_deg": [0, 0, 0, 0, 0, 0],
+                            "expected_tcp_pose_mmdeg": [1, 2, 3, 4, 5, 6],
+                            "vel": 20.0,
+                            "acc": 30.0,
+                            "dwell_s": 0.5,
+                            "capture": True,
+                        },
+                        {
+                            "name": "waypoint_disk_002",
+                            "motion": "movej",
+                            "joint_deg": [1, 1, 1, 1, 1, 1],
+                            "expected_tcp_pose_mmdeg": [6, 5, 4, 3, 2, 1],
+                            "vel": 20.0,
+                            "acc": 30.0,
+                            "dwell_s": 0.5,
+                            "capture": True,
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        bridge = UiRosBridge.__new__(UiRosBridge)
+        bridge._last_status_lock = threading.Lock()
+        bridge._last_status = {
+            "recorded_trajectory": {
+                "version": 1,
+                "tool_id": 0,
+                "user_id": 0,
+                "defaults": {"motion": "movej", "vel": 10.0, "acc": 10.0, "dwell_s": 0.5},
+                "waypoints": [{"name": "waypoint_live_001"}],
+            },
+            "trajectory_dirty": True,
+        }
+        bridge.effective_execute_motion = False
+        bridge.effective_trajectory_path = trajectory_path
+        bridge.session_store = SessionStore(
+            session_root_path=root / "sessions",
+            trajectory_path=trajectory_path,
+            max_reprojection_error_px=0.0,
+            min_board_margin_px=10.0,
+        )
+        bridge._sync_backend_state = lambda *_args: {
+            "backend_connected": True,
+            "status_recent": True,
+            "trajectory_path": trajectory_path,
+            "session_root_path": root / "sessions",
+            "execute_motion": False,
+            "motion_state_known": True,
+            "config_source": "backend_status",
+            "max_reprojection_error_px": 0.0,
+            "min_board_margin_px": 10.0,
+        }
+
+        summary = UiRosBridge._motion_summary(bridge)
+
+        assert summary["waypoint_count"] == 1
+        assert summary["motion"] == "movej"
+        assert summary["trajectory_path"] == str(trajectory_path)
 
 
 def test_start_run_reports_queued_request_as_pending_not_success() -> None:
