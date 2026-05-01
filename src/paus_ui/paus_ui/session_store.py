@@ -172,6 +172,7 @@ class SessionStore:
             if not waypoint_name:
                 continue
             name = str(waypoint_name)
+            record_quality = waypoint.get("record_quality") if isinstance(waypoint, dict) and isinstance(waypoint.get("record_quality"), dict) else {}
             record = records.setdefault(
                 name,
                 self._waypoint_record(
@@ -183,6 +184,8 @@ class SessionStore:
                     result="-",
                     reason="",
                     sample=None,
+                    reprojection_error_px=record_quality.get("reprojection_error_px"),
+                    board_margin_px=record_quality.get("board_margin_px"),
                 ),
             )
             event_name = str(event.get("event", ""))

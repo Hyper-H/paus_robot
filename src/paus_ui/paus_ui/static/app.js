@@ -371,25 +371,40 @@ function renderPoseGrid(el, labels, values, units) {
 }
 
 function renderFlow(activeStage) {
-  const steps = [
+  const baseSteps = [
     { key: "movej", label: "MoveJ" },
-    { key: "wait_stable", label: "等待稳定" },
-    { key: "capture", label: "拍照" },
-    { key: "detect", label: "detect" },
-    { key: "outcome", label: "结果" },
-    { key: "solve", label: "solve" },
-    { key: "finished", label: "完成" },
   ];
   const normalizedStage = normalizeWorkflowStage(activeStage);
+  const steps = normalizedStage === "dry_run"
+    ? [
+        { key: "movej", label: "MoveJ" },
+        { key: "dry_run", label: "Dry-run" },
+        { key: "wait_stable", label: "等待稳定" },
+        { key: "capture", label: "拍照" },
+        { key: "detect", label: "detect" },
+        { key: "outcome", label: "结果" },
+        { key: "solve", label: "solve" },
+        { key: "finished", label: "完成" },
+      ]
+    : [
+        ...baseSteps,
+        { key: "wait_stable", label: "等待稳定" },
+        { key: "capture", label: "拍照" },
+        { key: "detect", label: "detect" },
+        { key: "outcome", label: "结果" },
+        { key: "solve", label: "solve" },
+        { key: "finished", label: "完成" },
+      ];
   const order = {
     movej: 0,
-    wait_stable: 1,
-    capture: 2,
-    detect: 3,
-    accepted: 4,
-    skipped: 4,
-    solve: 5,
-    finished: 6,
+    dry_run: 1,
+    wait_stable: 2,
+    capture: 3,
+    detect: 4,
+    accepted: 5,
+    skipped: 5,
+    solve: 6,
+    finished: 7,
   };
   const activeIndex = order[normalizedStage] ?? -1;
   els.workflowFlow.innerHTML = steps.map((step, index) => {
@@ -407,7 +422,6 @@ function normalizeWorkflowStage(stage) {
   const aliases = {
     idle: "",
     recorded: "",
-    dry_run: "movej",
     reached: "wait_stable",
     detecting: "detect",
     detected: "detect",

@@ -284,6 +284,42 @@ def test_manual_session_without_trajectory_has_no_phantom_waypoints(tmp_path: Pa
     assert store.read_session_waypoints("2026-04-29_123000") == []
 
 
+def test_session_store_reads_manual_recorded_waypoints_from_run_log(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
+    trajectory_path.write_text(
+        yaml.safe_dump({"version": 1, "tool_id": 0, "user_id": 0, "defaults": {"motion": "movej"}, "waypoints": []}),
+        encoding="utf-8",
+    )
+    session_root = tmp_path / "calibration_sessions"
+    session_path = session_root / "2026-04-29_123500"
+    session_path.mkdir(parents=True)
+    _write_jsonl(
+        session_path / "run.log",
+        [
+            {
+                "event": "waypoint_recorded",
+                "waypoint_name": "waypoint_001",
+                "waypoint": {
+                    "name": "waypoint_001",
+                    "motion": "movej",
+                    "capture": True,
+                    "record_quality": {"reprojection_error_px": 1.5, "board_margin_px": 42.0},
+                },
+            }
+        ],
+    )
+
+    store = SessionStore(session_root_path=session_root, trajectory_path=trajectory_path)
+
+    waypoints = store.read_session_waypoints("2026-04-29_123500")
+    assert len(waypoints) == 1
+    assert waypoints[0]["name"] == "waypoint_001"
+    assert waypoints[0]["status"] == "pending"
+    assert waypoints[0]["result"] == "-"
+    assert waypoints[0]["reprojection_error_px"] == 1.5
+    assert waypoints[0]["board_margin_px"] == 42.0
+
+
 def test_session_store_detects_fallback_sample_images(tmp_path: Path) -> None:
     trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
     trajectory_path.write_text(
