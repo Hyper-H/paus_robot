@@ -167,6 +167,16 @@ def _infer_project_root(config_path: Path) -> Path:
     return resolved_config_path.parent
 
 
+def _is_install_layout_path(resolved_config_path: Path) -> bool:
+    parts = resolved_config_path.parts
+    if "install" in parts:
+        return True
+    if "share" in parts:
+        share_index = parts.index("share")
+        return any(part == "configs" for part in parts[share_index + 1 :])
+    return False
+
+
 def resolve_config_path(path_value: str | Path, config_path: str | Path) -> str:
     path_text = os.path.expandvars(str(path_value)).strip()
     path = Path(path_text).expanduser()
@@ -191,7 +201,7 @@ def _resolve_config_artifact_path(path_value: str | Path, config_path: str | Pat
     if path.is_absolute():
         return str(path)
     resolved_config_path = Path(config_path).expanduser().resolve()
-    if "install" in resolved_config_path.parts:
+    if _is_install_layout_path(resolved_config_path):
         runtime_relative_path = Path("configs") / path if len(path.parts) == 1 else path
         return str((_runtime_root() / runtime_relative_path).resolve())
     if len(path.parts) == 1:
@@ -209,7 +219,7 @@ def _resolve_runtime_data_path(path_value: str | Path, config_path: str | Path) 
     if path.is_absolute():
         return str(path)
     resolved_config_path = Path(config_path).expanduser().resolve()
-    if "install" in resolved_config_path.parts:
+    if _is_install_layout_path(resolved_config_path):
         return str((_runtime_root() / path).resolve())
     return resolve_config_path(path, config_path)
 
