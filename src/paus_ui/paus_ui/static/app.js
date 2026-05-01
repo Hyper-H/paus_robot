@@ -11,6 +11,7 @@ const state = {
   waypoints: [],
   waypointsDirty: false,
   userSelectedSession: false,
+  currentTrajectorySelected: false,
   autoSelectedSession: false,
   lastEventId: 0,
   wsConnected: false,
@@ -163,6 +164,7 @@ async function refreshStatus() {
   if (session.session_id && handeye.run_active && !state.userSelectedSession && state.selectedSession !== session.session_id) {
     state.selectedSession = session.session_id;
     state.autoSelectedSession = true;
+    state.currentTrajectorySelected = false;
   } else if (!handeye.run_active && state.autoSelectedSession) {
     state.autoSelectedSession = false;
   }
@@ -170,7 +172,7 @@ async function refreshStatus() {
   if (result) {
     setNotice(result.operator_message || result.message, commandTone(result));
   }
-  if (motion.trajectory_path) {
+  if (motion.trajectory_path && (!state.selectedSession || state.selectedSession === session.session_id || state.currentTrajectorySelected)) {
     els.trajectoryPath.textContent = motion.trajectory_path;
   }
 }
@@ -202,7 +204,7 @@ async function refreshSessions() {
   }
   const handeye = (state.status && state.status.handeye) || {};
   const latestReportSession = sessions.find((session) => session.has_solution || (session.has_report && !session.is_invalid));
-  if (!handeye.run_active && !state.userSelectedSession && !state.selectedSession && latestReportSession) {
+  if (!handeye.run_active && !state.userSelectedSession && !state.currentTrajectorySelected && !state.selectedSession && latestReportSession) {
     state.selectedSession = latestReportSession.id;
     state.autoSelectedSession = true;
     state.selectedWaypointName = "";
@@ -233,7 +235,10 @@ async function refreshReport() {
   els.skippedCount.textContent = report.skipped_count ?? "--";
   els.pendingCount.textContent = report.pending_count ?? "--";
   if (!report.has_solution) {
-    els.residualGrid.innerHTML = `<div class="empty-card">report.yaml exists, but this session has not produced a solved calibration result yet.</div>`;
+    const message = report.is_invalid
+      ? (report.empty_reason || report.report_error || "该 session 无效。")
+      : "report.yaml exists, but this session has not produced a solved calibration result yet.";
+    els.residualGrid.innerHTML = `<div class="empty-card">${escapeHtml(message)}</div>`;
     els.residualBars.innerHTML = "";
     return;
   }
@@ -595,9 +600,11 @@ function bindUi() {
   document.getElementById("stop-btn").addEventListener("click", () => runCommand("停止", "/api/handeye/stop"));
   document.getElementById("refresh-btn").addEventListener("click", refreshAll);
   els.sessionSelect.addEventListener("change", () => {
-    state.userSelectedSession = true;
+    const selectedSession = els.sessionSelect.value;
+    state.userSelectedSession = Boolean(selectedSession);
+    state.currentTrajectorySelected = !selectedSession;
     state.autoSelectedSession = false;
-    state.selectedSession = els.sessionSelect.value;
+    state.selectedSession = selectedSession;
     state.selectedWaypointName = "";
     state.selectedSampleRow = null;
     refreshReport();
