@@ -26,5 +26,5 @@ def test_ui_calibration_paths_match_backend_runtime_resolvers(monkeypatch: pytes
         "calibration_sessions",
     )
 
-    assert trajectory_path == config_path.parent / "eye_to_hand_trajectory.yaml"
+    assert trajectory_path == runtime_dir / "configs" / "eye_to_hand_trajectory.yaml"
     assert session_root_path == runtime_dir / "calibration_sessions"

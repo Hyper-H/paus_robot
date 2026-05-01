@@ -188,13 +188,6 @@ async function refreshQuality() {
     { label: "棋盘角度", value: fmt(quality.board_angle_deg, 2, " deg"), tone: "" },
   ];
   els.qualityMetrics.innerHTML = metrics.map((item) => `<div class="metric ${item.tone}"><span>${item.label}</span><strong>${item.value}</strong></div>`).join("");
-  renderPoseGrid(els.cameraBoardGrid, ["x", "y", "z", "rx", "ry", "rz"], [
-    t[0],
-    t[1],
-    t[2],
-    ...(quality.camera_to_board_rotation_rpy_deg || []),
-  ], ["m", "m", "m", "deg", "deg", "deg"]);
-  els.boardAngle.textContent = quality.detected ? fmt(quality.board_angle_deg, 2, " deg") : (quality.operator_message || "--");
   els.liveEmpty.classList.toggle("hidden", Boolean(quality.image_sequence));
 }
 

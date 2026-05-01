@@ -16,7 +16,7 @@ def test_installed_nested_artifact_paths_resolve_under_runtime_dir(monkeypatch, 
     config_path = tmp_path / "install" / "paus_bringup" / "share" / "paus_bringup" / "configs" / "default.yaml"
     monkeypatch.setenv("PAUS_ROBOT_RUNTIME_DIR", str(runtime_dir))
 
-    assert Path(resolve_config_artifact_path("extrinsics.yaml", config_path)) == config_path.parent / "extrinsics.yaml"
+    assert Path(resolve_config_artifact_path("extrinsics.yaml", config_path)) == runtime_dir / "configs" / "extrinsics.yaml"
     assert Path(resolve_config_artifact_path("configs/eye_to_hand.yaml", config_path)) == runtime_dir / "configs" / "eye_to_hand.yaml"
     assert Path(resolve_config_artifact_path("calibration/extrinsics.yaml", config_path)) == runtime_dir / "calibration" / "extrinsics.yaml"
     assert Path(resolve_runtime_data_path("runs", config_path)) == runtime_dir / "runs"
@@ -27,6 +27,6 @@ def test_ros_share_prefix_paths_resolve_under_runtime_dir(monkeypatch, tmp_path:
     config_path = Path("/opt/ros/humble/share/paus_bringup/configs/default.yaml")
     monkeypatch.setenv("PAUS_ROBOT_RUNTIME_DIR", str(runtime_dir))
 
-    assert Path(resolve_config_artifact_path("extrinsics.yaml", config_path)) == config_path.parent / "extrinsics.yaml"
+    assert Path(resolve_config_artifact_path("extrinsics.yaml", config_path)) == runtime_dir / "configs" / "extrinsics.yaml"
     assert Path(resolve_config_artifact_path("configs/eye_to_hand.yaml", config_path)) == runtime_dir / "configs" / "eye_to_hand.yaml"
     assert Path(resolve_runtime_data_path("runs", config_path)) == runtime_dir / "runs"
