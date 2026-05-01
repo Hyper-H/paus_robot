@@ -523,7 +523,7 @@ class UiRosBridge(Node):
 
     def _call_trigger(self, key: str, *, timeout_s: float) -> dict[str, Any]:
         client = self._service_clients[key]
-        if not client.wait_for_service(timeout_sec=min(timeout_s, 2.0)):
+        if not client.wait_for_service(timeout_sec=timeout_s):
             result = self._shape_command_result(key, False, f"Service is unavailable: {client.srv_name}")
             self._last_command_result = result
             self.events.push({"type": "ui_command_result", "command": key, "result": result, "operator_message": result["operator_message"], "dedupe_key": self._event_dedupe_key("ui_command_result", result)})

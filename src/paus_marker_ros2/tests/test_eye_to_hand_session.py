@@ -43,6 +43,60 @@ class EyeToHandSessionTests(unittest.TestCase):
         self.assertEqual(sample_log_targets(session_path, session_path), [session_path])
         self.assertEqual(sample_log_targets(session_path, None), [session_path])
 
+    def test_record_waypoint_starts_manual_session_before_logging(self) -> None:
+        class FakeTrajectory:
+            def __init__(self) -> None:
+                self.waypoints = []
+
+            def to_payload(self) -> dict[str, object]:
+                return {"waypoints": []}
+
+        class FakeClient:
+            def get_actual_joint_pos_degree(self) -> tuple[int, list[float]]:
+                return 0, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+
+            def get_actual_tcp_pose(self) -> tuple[int, list[float]]:
+                return 0, [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+
+        node = EyeToHandCalibrationNode.__new__(EyeToHandCalibrationNode)
+        node._semi_auto_lock = threading.Lock()
+        node._semi_auto_active = False
+        node.linux_client = FakeClient()
+        node.move_vel = 10.0
+        node.move_acc = 10.0
+        node.dwell_s = 0.5
+        node.trajectory_path = Path("/tmp/trajectory.yaml")
+        node.recorded_trajectory = FakeTrajectory()
+        node.samples = []
+        node.current_solution = None
+        started_modes: list[str] = []
+        appended: list[tuple[str, dict[str, object] | None]] = []
+        published: list[dict[str, object]] = []
+        node._probe_current_board_quality = lambda: {
+            "detected": True,
+            "reprojection_error_px": 1.25,
+            "board_margin_px": 42.0,
+            "reprojection_filter_enabled": True,
+            "reprojection_filter_passed": True,
+            "margin_filter_passed": True,
+            "max_reprojection_error_px": 4.0,
+            "min_board_margin_px": 10.0,
+        }
+        node._ensure_session_started = lambda owner="manual": started_modes.append(owner)
+        node._append_run_log = lambda event, payload=None: appended.append((event, payload))
+        node._publish_status = lambda status, message, payload=None: published.append(
+            {"status": status, "message": message, "payload": payload or {}}
+        )
+
+        response = EyeToHandCalibrationNode._record_waypoint_callback(node, Trigger.Request(), Trigger.Response())
+
+        self.assertTrue(response.success)
+        self.assertEqual(started_modes, ["manual"])
+        self.assertEqual(appended[-1][0], "waypoint_recorded")
+        self.assertEqual(appended[-1][1]["waypoint_name"], "waypoint_001")
+        self.assertEqual(published[-1]["status"], "waypoint_recorded")
+        self.assertEqual(published[-1]["payload"]["waypoint_name"], "waypoint_001")
+
     def test_delete_last_waypoint_logs_normalized_payload(self) -> None:
         class FakeWaypoint:
             def __init__(self, name: str) -> None:
@@ -64,6 +118,8 @@ class EyeToHandSessionTests(unittest.TestCase):
         node.recorded_trajectory = FakeTrajectory()
         appended: list[tuple[str, dict[str, object] | None]] = []
         published: list[dict[str, object]] = []
+        started_modes: list[str] = []
+        node._ensure_session_started = lambda owner="manual": started_modes.append(owner)
         node._append_run_log = lambda event, payload=None: appended.append((event, payload))
         node._publish_status = lambda status, message, payload=None: published.append(
             {"status": status, "message": message, "payload": payload or {}}
@@ -76,6 +132,7 @@ class EyeToHandSessionTests(unittest.TestCase):
         self.assertEqual(appended[-1][0], "waypoint_deleted")
         self.assertEqual(appended[-1][1]["waypoint_name"], "waypoint_001")
         self.assertEqual(appended[-1][1]["waypoint"]["name"], "waypoint_001")
+        self.assertEqual(started_modes, ["manual"])
         self.assertEqual(published[-1]["status"], "waypoint_deleted")
         self.assertEqual(published[-1]["payload"]["waypoint_name"], "waypoint_001")
         self.assertEqual(published[-1]["payload"]["waypoint"]["name"], "waypoint_001")

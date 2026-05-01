@@ -41,6 +41,40 @@ class _ServiceClient:
         return self._ready
 
 
+class _RecordingWaitClient:
+    def __init__(self) -> None:
+        self.srv_name = "/eye_to_hand/test"
+        self.wait_timeouts: list[float] = []
+
+    def wait_for_service(self, timeout_sec: float) -> bool:
+        self.wait_timeouts.append(timeout_sec)
+        return False
+
+
+class _EventSink:
+    def __init__(self) -> None:
+        self.items: list[dict[str, object]] = []
+
+    def push(self, item: dict[str, object]) -> dict[str, object]:
+        self.items.append(item)
+        return item
+
+
+def test_call_trigger_honors_full_service_wait_timeout() -> None:
+    bridge = UiRosBridge.__new__(UiRosBridge)
+    client = _RecordingWaitClient()
+    bridge._service_clients = {"run": client}
+    bridge.events = _EventSink()
+    bridge._last_command_result = None
+    bridge._event_dedupe_key = lambda event_type, payload: f"{event_type}:dedupe"
+
+    result = UiRosBridge._call_trigger(bridge, "run", timeout_s=17.5)
+
+    assert result["success"] is False
+    assert client.wait_timeouts == [17.5]
+    assert bridge.events.items[-1]["command"] == "run"
+
+
 def test_get_detector_returns_none_for_malformed_camera_yaml() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         camera_yaml = Path(temp_dir) / "camera.yaml"

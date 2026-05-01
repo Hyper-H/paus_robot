@@ -874,6 +874,7 @@ class EyeToHandCalibrationNode(Node):
                 record_quality=record_quality,
             )
             self.recorded_trajectory.waypoints.append(waypoint)
+            self._ensure_session_started("manual")
             response.success = True
             response.message = f"Recorded {waypoint.name} in memory. Press finish/save to write {self.trajectory_path}. {self._format_record_quality(record_quality)}."
             waypoint_payload = waypoint.to_payload()
@@ -920,6 +921,7 @@ class EyeToHandCalibrationNode(Node):
             "waypoint": removed_payload,
             "waypoint_count": len(self.recorded_trajectory.waypoints),
         }
+        self._ensure_session_started("manual")
         self._append_run_log("waypoint_deleted", deleted_progress)
         self._publish_status(
             "waypoint_deleted",

@@ -49,3 +49,23 @@ Solution: Clear the preview panel when no waypoints are available, and count onl
 Constraints: Keep the empty-state message explicit instead of showing stale sample details. Do not change accepted/skipped rendering for non-empty sessions.
 Validation Evidence: `python3 -m compileall -q src/paus_ui/paus_ui/session_store.py src/paus_ui/tests/test_session_store.py`; `node --check src/paus_ui/paus_ui/static/app.js`; `/usr/bin/python3 -m pytest -q src/paus_ui/tests/test_session_store.py src/paus_ui/tests/test_path_resolvers.py src/paus_ui/tests/test_ros_bridge.py` (`31 passed`); `colcon build --packages-select paus_ui --symlink-install`; `/usr/bin/python3 -m pytest -q src/paus_perception/tests/test_config_paths.py src/paus_ui/tests src/paus_marker_ros2/tests/test_semi_auto_calibration.py src/paus_marker_ros2/tests/test_eye_to_hand_session.py` (`52 passed`)
 Source Rounds: 43
+
+## Lesson: handeye-manual-edit-archive
+Lesson ID: BL-20260501-handeye-manual-edit-archive
+Scope: src/paus_marker_ros2/paus_marker_ros2/eye_to_hand_calibration_node.py; src/paus_marker_ros2/tests/test_eye_to_hand_session.py
+Problem Description: Manual waypoint record/delete edits made before any capture or semi-auto run were silently dropped because no archive session had been started yet.
+Root Cause: The manual edit callbacks only wrote to `run.log` when `run_log_path` already existed, so the first edit in a fresh session had nowhere to persist.
+Solution: Start a manual session before logging successful waypoint edits, so record-only or edit-only sessions are archived immediately and can be reconstructed after restart.
+Constraints: Keep the semi-auto rejection guard intact. Only start the manual archive session after the edit succeeds, not before validation or robot reads.
+Validation Evidence: `python3 -m compileall -q src/paus_marker_ros2/paus_marker_ros2/eye_to_hand_calibration_node.py src/paus_marker_ros2/tests/test_eye_to_hand_session.py src/paus_ui/paus_ui/ros_bridge.py src/paus_ui/tests/test_ros_bridge.py src/paus_ui/paus_ui/session_store.py src/paus_ui/tests/test_session_store.py`; `/usr/bin/python3 -m pytest -q src/paus_marker_ros2/tests/test_eye_to_hand_session.py src/paus_ui/tests/test_ros_bridge.py src/paus_ui/tests/test_session_store.py` (`38 passed`); `colcon build --packages-select paus_marker_ros2 paus_ui --symlink-install`; `/usr/bin/python3 -m pytest -q src/paus_perception/tests/test_config_paths.py src/paus_ui/tests src/paus_marker_ros2/tests/test_semi_auto_calibration.py src/paus_marker_ros2/tests/test_eye_to_hand_session.py` (`54 passed`)
+Source Rounds: 44
+
+## Lesson: handeye-ui-service-timeout
+Lesson ID: BL-20260501-handeye-ui-service-timeout
+Scope: src/paus_ui/paus_ui/ros_bridge.py; src/paus_ui/tests/test_ros_bridge.py
+Problem Description: UI command calls could report service unavailability during normal startup or restart races even when the caller asked to wait longer.
+Root Cause: The ROS service wait path truncated every timeout to two seconds before calling `wait_for_service()`.
+Solution: Pass the caller's full timeout through to the ROS service wait so long startup windows are honored.
+Constraints: Preserve the existing command result and event logging behavior. Do not change the user-facing timeout semantics beyond honoring the requested wait.
+Validation Evidence: `python3 -m compileall -q src/paus_marker_ros2/paus_marker_ros2/eye_to_hand_calibration_node.py src/paus_marker_ros2/tests/test_eye_to_hand_session.py src/paus_ui/paus_ui/ros_bridge.py src/paus_ui/tests/test_ros_bridge.py src/paus_ui/paus_ui/session_store.py src/paus_ui/tests/test_session_store.py`; `/usr/bin/python3 -m pytest -q src/paus_marker_ros2/tests/test_eye_to_hand_session.py src/paus_ui/tests/test_ros_bridge.py src/paus_ui/tests/test_session_store.py` (`38 passed`); `colcon build --packages-select paus_marker_ros2 paus_ui --symlink-install`; `/usr/bin/python3 -m pytest -q src/paus_perception/tests/test_config_paths.py src/paus_ui/tests src/paus_marker_ros2/tests/test_semi_auto_calibration.py src/paus_marker_ros2/tests/test_eye_to_hand_session.py` (`54 passed`)
+Source Rounds: 44
