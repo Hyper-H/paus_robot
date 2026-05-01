@@ -647,6 +647,7 @@ class UiRosBridge(Node):
             "waypoint_detection_started": ("detect", "正在检测棋盘"),
             "waypoint_chessboard_detected": ("detect", "棋盘已检测到"),
             "waypoint_pose_estimated": ("detect", "棋盘位姿已估计"),
+            "waypoint_capture_disabled": ("skipped", "无需采样"),
             "waypoint_capture_skipped": ("skipped", "该点已跳过"),
             "waypoint_sample_captured": ("accepted", "样本已接受"),
             "semi_auto_insufficient_samples": ("error", "有效样本不足"),

@@ -15,7 +15,7 @@ from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 # 导入 ROS2 Node 启动动作。
 from launch_ros.actions import Node
-from paus_perception import load_config
+from paus_perception import load_config, resolve_config_artifact_path, resolve_runtime_data_path
 
 
 # 标定链默认把相机标定输出写到 `/tmp`，避免污染仓库工作树。
@@ -36,6 +36,11 @@ def _as_bool(value: str) -> bool:
 def _arg_or_config(raw_value: str, config_value) -> str:
     stripped = raw_value.strip()
     return str(config_value).lower() if stripped == "" and isinstance(config_value, bool) else (str(config_value) if stripped == "" else raw_value)
+
+
+def _resolve_launch_path(raw_value: str, config_path: str, *, runtime_data: bool = False) -> str:
+    resolver = resolve_runtime_data_path if runtime_data else resolve_config_artifact_path
+    return str(Path(resolver(raw_value, config_path)))
 
 
 # 真正组装标定链启动动作。
@@ -59,7 +64,7 @@ def _launch_setup(context, *args, **kwargs):
     tool_to_board_cfg = calibration_cfg.get("tool_to_board", {}) if isinstance(calibration_cfg.get("tool_to_board", {}), dict) else {}
     default_tool_to_board_translation = tool_to_board_cfg.get("translation_m", [0.0, 0.0, 0.0])
     default_tool_to_board_rotation = tool_to_board_cfg.get("rotation_rpy_deg", [0.0, 0.0, 0.0])
-    camera_config_output = LaunchConfiguration("camera_config_output").perform(context)
+    camera_config_output = _resolve_launch_path(LaunchConfiguration("camera_config_output").perform(context), config_path, runtime_data=True)
     camera_ip = LaunchConfiguration("camera_ip").perform(context).strip()
     camera_index = LaunchConfiguration("camera_index").perform(context).strip()
     board_rows = int(_arg_or_config(LaunchConfiguration("board_rows").perform(context), calibration_cfg.get("board_rows", 6)))
@@ -67,9 +72,9 @@ def _launch_setup(context, *args, **kwargs):
     square_size_m = float(_arg_or_config(LaunchConfiguration("square_size_m").perform(context), calibration_cfg.get("square_size_m", 0.01)))
     solver_method = _arg_or_config(LaunchConfiguration("solver_method").perform(context), calibration_cfg.get("solver_method", "joint_absolute")).strip()
     min_sample_count = int(_arg_or_config(LaunchConfiguration("min_sample_count").perform(context), calibration_cfg.get("min_sample_count", 10)))
-    output_path = _arg_or_config(LaunchConfiguration("output_path").perform(context), calibration_cfg.get("output_path", "extrinsics.yaml"))
-    trajectory_path = _arg_or_config(LaunchConfiguration("trajectory_path").perform(context), calibration_cfg.get("trajectory_path", "eye_to_hand_trajectory.yaml"))
-    session_root_path = _arg_or_config(LaunchConfiguration("session_root_path").perform(context), calibration_cfg.get("session_root_path", "calibration_sessions"))
+    output_path = _resolve_launch_path(_arg_or_config(LaunchConfiguration("output_path").perform(context), calibration_cfg.get("output_path", "extrinsics.yaml")), config_path)
+    trajectory_path = _resolve_launch_path(_arg_or_config(LaunchConfiguration("trajectory_path").perform(context), calibration_cfg.get("trajectory_path", "eye_to_hand_trajectory.yaml")), config_path)
+    session_root_path = _resolve_launch_path(_arg_or_config(LaunchConfiguration("session_root_path").perform(context), calibration_cfg.get("session_root_path", "calibration_sessions")), config_path, runtime_data=True)
     save_sample_images = _as_bool(_arg_or_config(LaunchConfiguration("save_sample_images").perform(context), calibration_cfg.get("save_sample_images", True)))
     max_reprojection_error_px = float(_arg_or_config(LaunchConfiguration("max_reprojection_error_px").perform(context), calibration_cfg.get("max_reprojection_error_px", 0.0)))
     min_board_margin_px = float(_arg_or_config(LaunchConfiguration("min_board_margin_px").perform(context), calibration_cfg.get("min_board_margin_px", 10.0)))
