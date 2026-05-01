@@ -360,7 +360,11 @@ class SessionStore:
             if isinstance(waypoint, dict):
                 waypoint_name = waypoint.get("name", waypoint_name)
             if waypoint_name:
-                names.add(str(waypoint_name))
+                name = str(waypoint_name)
+                if str(event.get("event", "")) == "waypoint_deleted":
+                    names.discard(name)
+                else:
+                    names.add(name)
         return len(names)
 
     def _trajectory_path_for_session(self, session_path: Path) -> Path | None:

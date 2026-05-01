@@ -289,7 +289,11 @@ async function refreshWaypoints() {
   els.waypointStats.textContent = `共 ${state.waypoints.length} 个点`;
   els.tableFooter.textContent = `已接受 ${accepted}　跳过 ${skipped}　待采集 ${pending}`;
   els.waypointBody.innerHTML = state.waypoints.map(renderWaypointRow).join("");
-  if (!state.selectedWaypointName && state.waypoints.length) {
+  if (!state.waypoints.length) {
+    state.selectedWaypointName = "";
+    state.selectedSampleRow = null;
+    renderPreview(null);
+  } else if (!state.selectedWaypointName && state.waypoints.length) {
     selectWaypoint(state.waypoints.find((item) => item.has_image) || state.waypoints[0]);
   } else {
     markSelectedRow();
@@ -337,6 +341,16 @@ function markSelectedRow() {
 }
 
 function renderPreview(item) {
+  if (!item) {
+    els.previewTitle.textContent = "样本预览";
+    els.previewSubtitle.textContent = "选择 waypoint 查看图像和质量指标";
+    els.samplePreview.removeAttribute("src");
+    els.samplePreview.style.display = "none";
+    els.previewEmpty.classList.remove("hidden");
+    els.previewEmpty.textContent = "当前没有 waypoint";
+    els.previewDetails.innerHTML = "";
+    return;
+  }
   const name = item.name || item.waypoint?.name || "样本预览";
   els.previewTitle.textContent = `${name} 预览`;
   const rowIndex = item.sample_row_index;

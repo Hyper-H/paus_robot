@@ -39,3 +39,13 @@ Solution: Validate the trajectory before starting a semi-auto session, suppress 
 Constraints: Do not create archive directories for missing or malformed trajectories. Keep the remaining archived waypoints stable and preserve the existing capture/skip rendering for non-deleted items.
 Validation Evidence: `python3 -m compileall -q src/paus_marker_ros2/paus_marker_ros2/eye_to_hand_calibration_node.py src/paus_marker_ros2/tests/test_eye_to_hand_session.py src/paus_ui/paus_ui/session_store.py src/paus_ui/tests/test_session_store.py`; `/usr/bin/python3 -m pytest -q src/paus_marker_ros2/tests/test_eye_to_hand_session.py src/paus_ui/tests/test_session_store.py` (`17 passed`); `colcon build --packages-select paus_marker_ros2 paus_ui --symlink-install`; `/usr/bin/python3 -m pytest -q src/paus_perception/tests/test_config_paths.py src/paus_ui/tests src/paus_marker_ros2/tests/test_semi_auto_calibration.py src/paus_marker_ros2/tests/test_eye_to_hand_session.py` (`51 passed`)
 Source Rounds: 42
+
+## Lesson: handeye-empty-preview-active-count
+Lesson ID: BL-20260501-handeye-empty-preview-active-count
+Scope: src/paus_ui/paus_ui/static/app.js; src/paus_ui/paus_ui/session_store.py; src/paus_ui/tests/test_session_store.py
+Problem Description: Switching to an empty waypoint list left the previous sample preview visible, and run.log-only sessions could still overcount pending waypoints after deletions.
+Root Cause: The preview renderer was never cleared when `state.waypoints` became empty, and session totals counted every waypoint name in the log without treating `waypoint_deleted` as a removal.
+Solution: Clear the preview panel when no waypoints are available, and count only active waypoint names by discarding deletions from the event-derived set.
+Constraints: Keep the empty-state message explicit instead of showing stale sample details. Do not change accepted/skipped rendering for non-empty sessions.
+Validation Evidence: `python3 -m compileall -q src/paus_ui/paus_ui/session_store.py src/paus_ui/tests/test_session_store.py`; `node --check src/paus_ui/paus_ui/static/app.js`; `/usr/bin/python3 -m pytest -q src/paus_ui/tests/test_session_store.py src/paus_ui/tests/test_path_resolvers.py src/paus_ui/tests/test_ros_bridge.py` (`31 passed`); `colcon build --packages-select paus_ui --symlink-install`; `/usr/bin/python3 -m pytest -q src/paus_perception/tests/test_config_paths.py src/paus_ui/tests src/paus_marker_ros2/tests/test_semi_auto_calibration.py src/paus_marker_ros2/tests/test_eye_to_hand_session.py` (`52 passed`)
+Source Rounds: 43
