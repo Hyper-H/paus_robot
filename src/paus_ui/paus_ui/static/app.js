@@ -9,6 +9,7 @@ const state = {
   quality: null,
   sessions: [],
   waypoints: [],
+  waypointsDirty: false,
   userSelectedSession: false,
   autoSelectedSession: false,
   lastEventId: 0,
@@ -129,6 +130,9 @@ async function refreshStatus() {
   const current = handeye.current_waypoint || {};
   const session = handeye.session || {};
   const motion = handeye.motion || {};
+  if (handeye.trajectory_dirty !== null && handeye.trajectory_dirty !== undefined) {
+    state.waypointsDirty = Boolean(handeye.trajectory_dirty);
+  }
   setChip(els.cameraChip, camera.connected ? `相机已连接 ${camera.image_sequence || 0}` : "相机等待中", camera.connected ? "good" : "warn");
   setChip(els.nodeChip, handeye.calibration_node_connected ? "机器人已连接" : "节点等待中", handeye.calibration_node_connected ? "good" : "warn");
   setChip(els.extrinsicsChip, session.session_id ? `session ${session.session_id}` : "外参 --", session.session_id ? "good" : "neutral");
@@ -260,10 +264,12 @@ function renderEmptyReport(message) {
 
 async function refreshWaypoints() {
   let waypoints = [];
+  state.waypointsDirty = false;
   if (state.selectedSession) {
     waypoints = await getJson(`/api/sessions/${encodeURIComponent(state.selectedSession)}/waypoints`, []);
   } else {
     const trajectory = await getJson("/api/handeye/waypoints", { waypoints: [] });
+    state.waypointsDirty = Boolean(trajectory.dirty);
     waypoints = (trajectory.waypoints || []).map((waypoint, index) => ({
       waypoint,
       index: index + 1,
@@ -435,6 +441,14 @@ async function runCommand(label, url, body = {}) {
   }
 }
 
+async function saveTrajectoryIfDirty() {
+  const dirty = Boolean(state.waypointsDirty || state.status?.handeye?.trajectory_dirty);
+  if (!dirty) return true;
+  setNotice("检测到未保存的示教轨迹，正在先保存轨迹...");
+  const result = await runCommand("保存轨迹", "/api/handeye/save_trajectory");
+  return Boolean(result?.success);
+}
+
 function addEvent(event) {
   const key = event.dedupe_key || `${event.type}:${event.operator_message || event.message || ""}`;
   const now = Date.now();
@@ -519,12 +533,14 @@ function bindUi() {
   });
   document.getElementById("record-btn").addEventListener("click", () => runCommand("记录当前点", "/api/handeye/record_waypoint"));
   document.getElementById("delete-btn").addEventListener("click", () => runCommand("删除上一个", "/api/handeye/delete_last_waypoint"));
+  document.getElementById("save-trajectory-btn").addEventListener("click", () => runCommand("保存轨迹", "/api/handeye/save_trajectory"));
   document.getElementById("dry-run-btn").addEventListener("click", async () => {
     const handeye = state.status?.handeye || {};
     if (handeye.execute_motion || handeye.backend_config_source !== "backend_status") {
       setNotice("无法确认后端是 dry-run；请确认标定节点状态已连接且 execute_motion=false。", "bad");
       return;
     }
+    if (!await saveTrajectoryIfDirty()) return;
     await runCommand("Dry-run", "/api/handeye/run", { confirmed: false });
   });
   document.getElementById("run-btn").addEventListener("click", async () => {
@@ -541,6 +557,7 @@ function bindUi() {
       ].join("\n");
       if (!window.confirm(message)) return;
     }
+    if (!await saveTrajectoryIfDirty()) return;
     await runCommand("开始标定", "/api/handeye/run", { confirmed: Boolean(handeye.requires_motion_confirmation) });
   });
   document.getElementById("stop-btn").addEventListener("click", () => runCommand("停止", "/api/handeye/stop"));

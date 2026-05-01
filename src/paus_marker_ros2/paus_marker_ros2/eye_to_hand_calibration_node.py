@@ -556,12 +556,12 @@ class EyeToHandCalibrationNode(Node):
         return message
 
     def _capture_one_sample(self, *, session_owner: str = "manual") -> CalibrationSample:
-        self._ensure_session_started(session_owner)
         with self._image_condition:
             previous_sequence = self.image_sequence
         captured_image = self._wait_for_fresh_image(previous_sequence)
         base_to_tool, tcp_pose_mmdeg, tcp_read_start_time_s, tcp_read_end_time_s = self._read_current_base_to_tool()
         board_estimate = self._estimate_camera_to_board(captured_image.image_bgr)
+        self._ensure_session_started(session_owner)
         sample_index = len(self.samples) + 1
         image_path = self._save_sample_image(captured_image.image_bgr, sample_index)
         sample = CalibrationSample(

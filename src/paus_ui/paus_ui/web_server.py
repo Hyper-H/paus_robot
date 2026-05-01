@@ -54,6 +54,10 @@ def create_app(bridge: UiRosBridge):
     async def delete_last_waypoint() -> dict[str, Any]:
         return await asyncio.to_thread(bridge.delete_last_waypoint)
 
+    @app.post("/api/handeye/save_trajectory")
+    async def save_trajectory() -> dict[str, Any]:
+        return await asyncio.to_thread(bridge.save_trajectory)
+
     @app.post("/api/handeye/run")
     async def run_handeye(body: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
         confirmed = bool(body.get("confirmed", False)) if isinstance(body, dict) else False

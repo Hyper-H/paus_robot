@@ -135,6 +135,7 @@ class UiRosBridge(Node):
         self._service_clients = {
             "record_waypoint": self.create_client(Trigger, "/eye_to_hand/record_waypoint"),
             "delete_last_waypoint": self.create_client(Trigger, "/eye_to_hand/delete_last_waypoint"),
+            "save_trajectory": self.create_client(Trigger, "/eye_to_hand/save_trajectory"),
             "run_semi_auto": self.create_client(Trigger, "/eye_to_hand/run_semi_auto_calibration"),
         }
         self.events.push({"type": "ui_started", "message": "PAUS UI server started.", "operator_message": "UI 服务已启动。"})
@@ -311,6 +312,7 @@ class UiRosBridge(Node):
                 "motion_state_known": backend_state["motion_state_known"],
                 "backend_config_source": backend_state["config_source"],
                 "trajectory_path": str(backend_state["trajectory_path"]),
+                "trajectory_dirty": status_payload.get("trajectory_dirty"),
                 "session_root_path": str(backend_state["session_root_path"]),
                 "max_reprojection_error_px": backend_state["max_reprojection_error_px"],
                 "min_board_margin_px": backend_state["min_board_margin_px"],
@@ -418,6 +420,9 @@ class UiRosBridge(Node):
 
     def delete_last_waypoint(self) -> dict[str, Any]:
         return self._call_trigger("delete_last_waypoint", timeout_s=5.0)
+
+    def save_trajectory(self) -> dict[str, Any]:
+        return self._call_trigger("save_trajectory", timeout_s=5.0)
 
     def get_waypoints(self) -> dict[str, Any]:
         backend_state = self._sync_backend_state()
