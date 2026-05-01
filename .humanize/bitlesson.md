@@ -189,3 +189,23 @@ Solution: Count both legacy and semi-auto accepted events, and map manual `sampl
 Constraints: Keep the existing semi-auto status names unchanged. Do not alter the accepted/skipped semantics for archived waypoint rendering.
 Validation Evidence: `python3 -m compileall -q src/paus_ui/paus_ui/session_store.py src/paus_ui/paus_ui/ros_bridge.py src/paus_ui/tests/test_session_store.py src/paus_ui/tests/test_ros_bridge.py`; `/usr/bin/python3 -m pytest -q src/paus_ui/tests/test_session_store.py src/paus_ui/tests/test_ros_bridge.py` (`37 passed`); `colcon build --packages-select paus_perception paus_ui paus_bringup paus_marker_ros2 --symlink-install`; `/usr/bin/python3 -m pytest -q src/paus_perception/tests/test_config_paths.py src/paus_ui/tests src/paus_marker_ros2/tests/test_semi_auto_calibration.py src/paus_marker_ros2/tests/test_eye_to_hand_session.py` (`64 passed`)
 Source Rounds: 55
+
+## Lesson: handeye-archive-reconstruction-without-run-log
+Lesson ID: BL-20260501-handeye-archive-reconstruction-without-run-log
+Scope: src/paus_ui/paus_ui/session_store.py; src/paus_ui/tests/test_session_store.py
+Problem Description: Archived handeye sessions that kept `report.yaml` and `samples.jsonl` but lost `run.log` still rendered every waypoint as pending in the session table.
+Root Cause: `read_session_waypoints()` only reconstructed status from run-log events and never fell back to the stored accepted samples when the log was missing.
+Solution: When no run-log events are present, map stored samples back onto the trajectory order and mark the corresponding waypoints accepted so archived sessions still reflect their real progress.
+Constraints: Only use this fallback when the run log is absent or empty. Preserve the existing event-driven reconstruction when run-log data exists.
+Validation Evidence: `python3 -m compileall -q src/paus_ui/paus_ui/session_store.py src/paus_ui/tests/test_session_store.py`; `/usr/bin/python3 -m pytest -q src/paus_ui/tests/test_session_store.py src/paus_marker_ros2/tests/test_eye_to_hand_session.py` (`25 passed`); `/usr/bin/python3 -m pytest -q src/paus_perception/tests/test_config_paths.py src/paus_ui/tests src/paus_marker_ros2/tests/test_semi_auto_calibration.py src/paus_marker_ros2/tests/test_eye_to_hand_session.py` (`66 passed`); `colcon build --packages-select paus_ui paus_marker_ros2 --symlink-install`
+Source Rounds: 56
+
+## Lesson: handeye-empty-trajectory-clear-after-edit
+Lesson ID: BL-20260501-handeye-empty-trajectory-clear-after-edit
+Scope: src/paus_marker_ros2/paus_marker_ros2/eye_to_hand_calibration_node.py; src/paus_marker_ros2/tests/test_eye_to_hand_session.py
+Problem Description: After recording and then deleting all waypoints in a manual session, saving the trajectory still failed if the shared trajectory file had never been written to disk.
+Root Cause: The empty-save branch only cleared an existing file and treated the absence of `trajectory_path` as a hard error even when the node had already entered a manual editing session.
+Solution: Allow an empty save to succeed once a manual session exists, and treat the operation as clearing the dirty in-memory trajectory state whether or not a file was already present.
+Constraints: Keep a truly untouched node rejecting empty saves. Do not change the non-empty trajectory save path or the semi-auto rejection guard.
+Validation Evidence: `python3 -m compileall -q src/paus_marker_ros2/paus_marker_ros2/eye_to_hand_calibration_node.py src/paus_marker_ros2/tests/test_eye_to_hand_session.py`; `/usr/bin/python3 -m pytest -q src/paus_ui/tests/test_session_store.py src/paus_marker_ros2/tests/test_eye_to_hand_session.py` (`25 passed`); `/usr/bin/python3 -m pytest -q src/paus_perception/tests/test_config_paths.py src/paus_ui/tests src/paus_marker_ros2/tests/test_semi_auto_calibration.py src/paus_marker_ros2/tests/test_eye_to_hand_session.py` (`66 passed`); `colcon build --packages-select paus_ui paus_marker_ros2 --symlink-install`
+Source Rounds: 56

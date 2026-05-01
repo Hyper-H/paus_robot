@@ -135,6 +135,96 @@ def test_session_store_reads_report_samples_and_waypoint_events(tmp_path: Path) 
     assert "not detected" in waypoints[1]["reason"]
 
 
+def test_session_store_reconstructs_archived_waypoints_without_run_log(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
+    trajectory_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "tool_id": 0,
+                "user_id": 0,
+                "defaults": {"motion": "movej", "vel": 10.0, "acc": 10.0, "dwell_s": 0.5},
+                "waypoints": [
+                    {
+                        "name": "waypoint_001",
+                        "motion": "movej",
+                        "joint_deg": [0, 0, 0, 0, 0, 0],
+                        "expected_tcp_pose_mmdeg": [1, 2, 3, 4, 5, 6],
+                        "vel": 10.0,
+                        "acc": 10.0,
+                        "dwell_s": 0.5,
+                        "capture": True,
+                    },
+                    {
+                        "name": "waypoint_002",
+                        "motion": "movej",
+                        "joint_deg": [1, 1, 1, 1, 1, 1],
+                        "expected_tcp_pose_mmdeg": [6, 5, 4, 3, 2, 1],
+                        "vel": 10.0,
+                        "acc": 10.0,
+                        "dwell_s": 0.5,
+                        "capture": True,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    session_root = tmp_path / "calibration_sessions"
+    session_path = session_root / "2026-04-29_123000"
+    session_path.mkdir(parents=True)
+    (session_path / "trajectory_used.yaml").write_text(trajectory_path.read_text(encoding="utf-8"), encoding="utf-8")
+    (session_path / "report.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "sample_count": 1,
+                "method": "joint_absolute",
+                "samples": [
+                    {
+                        "sample_index": 1,
+                        "camera_to_board_matrix": [
+                            [1, 0, 0, 0.1],
+                            [0, 1, 0, 0.2],
+                            [0, 0, 1, 0.3],
+                            [0, 0, 0, 1],
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_jsonl(
+        session_path / "samples.jsonl",
+        [
+            {
+                "sample_index": 1,
+                "reprojection_error_px": 1.25,
+                "board_margin_px": 50.0,
+                "camera_to_board_matrix": [
+                    [1, 0, 0, 0.1],
+                    [0, 1, 0, 0.2],
+                    [0, 0, 1, 0.3],
+                    [0, 0, 0, 1],
+                ],
+            }
+        ],
+    )
+
+    store = SessionStore(session_root_path=session_root, trajectory_path=trajectory_path)
+
+    sessions = store.list_sessions()
+    assert sessions[0]["accepted_count"] == 1
+    assert sessions[0]["pending_count"] == 1
+
+    waypoints = store.read_session_waypoints("2026-04-29_123000")
+    assert waypoints[0]["status"] == "accepted"
+    assert waypoints[0]["sample_index"] == 1
+    assert waypoints[0]["camera_to_board_translation_m"] == [0.1, 0.2, 0.3]
+    assert waypoints[1]["status"] == "pending"
+
+
 def test_session_store_accepts_legacy_sample_captured_events(tmp_path: Path) -> None:
     trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
     trajectory_path.write_text(

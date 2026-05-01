@@ -154,6 +154,7 @@ class SessionStore:
         session_path = self._session_path(session_id)
         trajectory = self._read_waypoints_from_path(self._trajectory_path_for_session(session_path))
         samples = self.read_samples(session_id)
+        events = self.read_run_events(session_id)
         samples_by_index: dict[int, dict[str, Any]] = {}
         for sample in samples:
             for key in ("sample_index", "row_index"):
@@ -182,7 +183,7 @@ class SessionStore:
                 board_margin_px=record_quality.get("board_margin_px"),
             )
 
-        for event in self.read_run_events(session_id):
+        for event in events:
             waypoint = event.get("waypoint")
             waypoint_name = event.get("waypoint_name")
             if isinstance(waypoint, dict):
@@ -254,6 +255,27 @@ class SessionStore:
             elif event_name in {"waypoint_motion_started", "waypoint_reached", "waypoint_capture_started"} and record.get("status") == "pending":
                 record["status"] = "running"
                 record["result"] = "..."
+
+        if not events and samples and records:
+            for record, sample in zip(records.values(), samples):
+                name = str(record.get("name", ""))
+                if not name:
+                    continue
+                record.update(
+                    self._waypoint_record(
+                        session_id=session_id,
+                        display_index=record.get("index"),
+                        name=name,
+                        waypoint=record.get("waypoint", {"name": name}),
+                        status="accepted",
+                        result="OK",
+                        reason="",
+                        sample=sample,
+                        event_sample_index=sample.get("row_index") or sample.get("sample_index"),
+                        reprojection_error_px=sample.get("reprojection_error_px"),
+                        board_margin_px=sample.get("board_margin_px"),
+                    )
+                )
 
         return list(records.values())
 
