@@ -75,6 +75,15 @@ def test_call_trigger_honors_full_service_wait_timeout() -> None:
     assert bridge.events.items[-1]["command"] == "run"
 
 
+def test_workflow_maps_semi_auto_started_to_motion_stage() -> None:
+    bridge = UiRosBridge.__new__(UiRosBridge)
+
+    workflow = UiRosBridge._workflow_for_status(bridge, "semi_auto_started")
+
+    assert workflow["stage"] == "movej"
+    assert workflow["label"] == "半自动标定已启动"
+
+
 def test_get_detector_returns_none_for_malformed_camera_yaml() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         camera_yaml = Path(temp_dir) / "camera.yaml"

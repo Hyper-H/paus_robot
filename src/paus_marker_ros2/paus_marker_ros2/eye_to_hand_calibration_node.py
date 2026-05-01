@@ -939,7 +939,10 @@ class EyeToHandCalibrationNode(Node):
             response.message = "No recorded waypoints to save."
             self._publish_status("save_trajectory_failed", response.message)
             return response
+        self._ensure_session_started("manual")
         self._write_recorded_trajectory()
+        if self.session_dir is not None:
+            shutil.copy2(self.trajectory_path, self.session_dir / "trajectory_used.yaml")
         response.success = True
         response.message = f"Saved {len(self.recorded_trajectory.waypoints)} waypoints to {self.trajectory_path}."
         self._publish_status(

@@ -643,6 +643,7 @@ class UiRosBridge(Node):
             "waypoint_recorded": ("recorded", "已记录当前点"),
             "record_waypoint_failed": ("error", "记录点失败"),
             "waypoint_deleted": ("recorded", "已删除上一个点"),
+            "semi_auto_started": ("movej", "半自动标定已启动"),
             "semi_auto_dry_run_waypoint": ("dry_run", "Dry-run 检查中"),
             "waypoint_dry_run_complete": ("dry_run", "Dry-run"),
             "semi_auto_dry_run_complete": ("finished", "Dry-run 完成"),
