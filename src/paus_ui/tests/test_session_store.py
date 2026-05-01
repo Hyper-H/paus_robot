@@ -320,6 +320,36 @@ def test_session_store_reads_manual_recorded_waypoints_from_run_log(tmp_path: Pa
     assert waypoints[0]["board_margin_px"] == 42.0
 
 
+def test_session_store_ignores_malformed_archive_yaml(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
+    trajectory_path.write_text(
+        yaml.safe_dump({"version": 1, "tool_id": 0, "user_id": 0, "defaults": {"motion": "movej"}, "waypoints": []}),
+        encoding="utf-8",
+    )
+    session_root = tmp_path / "calibration_sessions"
+    malformed_report = session_root / "2026-04-29_123600"
+    malformed_trajectory = session_root / "2026-04-29_123700"
+    malformed_report.mkdir(parents=True)
+    malformed_trajectory.mkdir(parents=True)
+    (malformed_report / "report.yaml").write_text("sample_count: [\n", encoding="utf-8")
+    (malformed_trajectory / "report.yaml").write_text(
+        yaml.safe_dump({"sample_count": 1, "method": "joint_absolute"}),
+        encoding="utf-8",
+    )
+    (malformed_trajectory / "trajectory_used.yaml").write_text("waypoints: [\n", encoding="utf-8")
+
+    store = SessionStore(session_root_path=session_root, trajectory_path=trajectory_path)
+
+    sessions = store.list_sessions()
+    assert len(sessions) == 2
+    assert all(session["is_invalid"] for session in sessions)
+    assert any(session["report_error"] for session in sessions)
+    assert any(session["trajectory_error"] for session in sessions)
+    assert store.latest_valid_session_id() is None
+    assert store.read_report("2026-04-29_123600")["is_invalid"] is True
+    assert store.read_session_waypoints("2026-04-29_123700") == []
+
+
 def test_session_store_detects_fallback_sample_images(tmp_path: Path) -> None:
     trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
     trajectory_path.write_text(

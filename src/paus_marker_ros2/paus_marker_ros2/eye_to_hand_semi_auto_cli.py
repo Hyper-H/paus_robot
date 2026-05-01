@@ -170,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     rclpy.init(args=[])
     node = rclpy.create_node("eye_to_hand_semi_auto_cli")
     try:
-        backend_status = _wait_for_backend_status(node, min(args.timeout_s, 2.0), args.status_topic)
+        backend_status = _wait_for_backend_status(node, min(args.timeout_s, 10.0), args.status_topic)
         backend_trajectory_value = backend_status.get("trajectory_path") if isinstance(backend_status, dict) else None
         if backend_trajectory_value:
             backend_trajectory_path = Path(str(backend_trajectory_value)).expanduser().resolve()

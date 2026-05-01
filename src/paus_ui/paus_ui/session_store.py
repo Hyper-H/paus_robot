@@ -37,8 +37,11 @@ class SessionStore:
             samples = self._read_jsonl(samples_path)
             events = self._read_jsonl(path / "run.log")
             counts = self._counts_for_session(path=path, report=report, samples=samples, events=events)
+            report_error = report.get("error")
+            trajectory_error = counts.get("trajectory_error")
+            invalid_reason = report_error or trajectory_error
             has_report = report_path.exists()
-            has_solution = bool(report.get("base_to_camera") or report.get("residuals"))
+            has_solution = bool(report.get("base_to_camera") or report.get("residuals")) and not invalid_reason
             sessions.append(
                 {
                     "id": path.name,
@@ -50,10 +53,13 @@ class SessionStore:
                     "pending_count": counts["pending"],
                     "has_report": has_report,
                     "has_solution": has_solution,
+                    "is_invalid": bool(invalid_reason),
+                    "report_error": report_error,
+                    "trajectory_error": trajectory_error,
                     "has_samples": samples_path.exists(),
                     "method": report.get("method"),
                     "residuals": report.get("residuals", {}),
-                    "empty_reason": None if has_report else "该 session 暂无 report.yaml。",
+                    "empty_reason": invalid_reason or (None if has_report else "该 session 暂无 report.yaml。"),
                 }
             )
         return sessions
@@ -64,7 +70,7 @@ class SessionStore:
             if session.get("has_solution"):
                 return str(session["id"])
         for session in sessions:
-            if session.get("has_report"):
+            if session.get("has_report") and not session.get("is_invalid"):
                 return str(session["id"])
         return None
 
@@ -76,8 +82,11 @@ class SessionStore:
         events = self._read_jsonl(session_path / "run.log")
         counts = self._counts_for_session(path=session_path, report=report, samples=samples, events=events)
         residuals = report.get("residuals", {}) if isinstance(report.get("residuals"), dict) else {}
+        report_error = report.get("error")
+        trajectory_error = counts.get("trajectory_error")
+        invalid_reason = report_error or trajectory_error
         has_report = report_path.exists()
-        has_solution = bool(report.get("base_to_camera") or residuals)
+        has_solution = bool(report.get("base_to_camera") or residuals) and not invalid_reason
         shaped = dict(report)
         shaped.update(
             {
@@ -86,13 +95,16 @@ class SessionStore:
                 "report_path": str(report_path),
                 "has_report": has_report,
                 "has_solution": has_solution,
+                "is_invalid": bool(invalid_reason),
+                "report_error": report_error,
+                "trajectory_error": trajectory_error,
                 "sample_count": int(report.get("sample_count", counts["sample_count"]) or counts["sample_count"]),
                 "accepted_count": counts["accepted"],
                 "skipped_count": counts["skipped"],
                 "pending_count": counts["pending"],
                 "residuals": residuals,
                 "residual_comparison": self._residual_comparison(residuals),
-                "empty_reason": None if has_solution else ("report.yaml 存在，但该 session 尚未完成求解。" if has_report else "该 session 暂无 report.yaml。"),
+                "empty_reason": invalid_reason or (None if has_solution else ("report.yaml 存在，但该 session 尚未完成求解。" if has_report else "该 session 暂无 report.yaml。")),
             }
         )
         return shaped
@@ -258,7 +270,7 @@ class SessionStore:
             return {"trajectory_path": str(path), "waypoints": [], "error": "Trajectory YAML does not exist."}
         try:
             trajectory = load_trajectory(path)
-        except TrajectoryValidationError as exc:
+        except (TrajectoryValidationError, yaml.YAMLError, OSError, ValueError) as exc:
             return {"trajectory_path": str(path), "waypoints": [], "error": str(exc)}
         return {
             "trajectory_path": str(path),
@@ -330,7 +342,7 @@ class SessionStore:
         waypoint_count = len(trajectory.get("waypoints", []))
         pending = max(waypoint_count - accepted - skipped, 0) if waypoint_count else 0
         sample_count = int(report.get("sample_count", 0) or len(samples) or accepted)
-        return {"sample_count": sample_count, "accepted": accepted, "skipped": skipped, "pending": pending}
+        return {"sample_count": sample_count, "accepted": accepted, "skipped": skipped, "pending": pending, "trajectory_error": trajectory.get("error")}
 
     def _trajectory_path_for_session(self, session_path: Path) -> Path | None:
         used = session_path / "trajectory_used.yaml"
@@ -388,8 +400,11 @@ class SessionStore:
     def _read_yaml(self, path: Path) -> dict[str, Any]:
         if not path.exists():
             return {}
-        with path.open("r", encoding="utf-8") as handle:
-            payload = yaml.safe_load(handle) or {}
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                payload = yaml.safe_load(handle) or {}
+        except (yaml.YAMLError, OSError, ValueError) as exc:
+            return {"error": str(exc)}
         return payload if isinstance(payload, dict) else {}
 
     def _read_jsonl(self, path: Path) -> list[dict[str, Any]]:
