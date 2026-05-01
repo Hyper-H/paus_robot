@@ -1,4 +1,4 @@
-# Code Review - Round 46
+# Code Review - Round 53
 
 ## Original Implementation Plan
 
@@ -8,32 +8,35 @@
 You MUST read this plan file first to understand the full scope of work before conducting your review.
 This plan contains the complete requirements and implementation details that Claude should be following.
 
-Based on the original plan and @/home/chen_lab/worktrees/paus_robot_handeye_rlcr/.humanize/rlcr/2026-04-30_11-21-11/round-46-prompt.md, Claude claims to have completed the work. Please conduct a thorough critical review to verify this.
+Based on the original plan and @/home/chen_lab/worktrees/paus_robot_handeye_rlcr/.humanize/rlcr/2026-04-30_11-21-11/round-53-prompt.md, Claude claims to have completed the work. Please conduct a thorough critical review to verify this.
 
 ---
 Below is Claude's summary of the work completed:
 <!-- CLAUDE's WORK SUMMARY START -->
-## Round 46 Summary
+# Review Round 53 Summary
 
-Fixed the two review findings from round 46:
+## Work Completed
+- Fixed live-session auto-follow for the blank current-trajectory state. An active run can now reselect the live session even when the dropdown was on the blank current-trajectory option.
+- Fixed `ui.launch.py` camera bridge startup so the bridge only launches when the local image receiver is also launched.
 
-- Manual `save_trajectory` now archives the saved trajectory into the current session as `trajectory_used.yaml`, making manual sessions self-contained like semi-auto sessions.
-- `semi_auto_started` is now mapped to the `movej` workflow stage so the UI progress bar shows a meaningful startup state before the first waypoint update.
+## Files Changed
+- `src/paus_ui/paus_ui/static/app.js`
+- `src/paus_bringup/launch/ui.launch.py`
+- `.humanize/bitlesson.md`
 
 ## Validation
+- `python3 -m compileall -q src/paus_bringup/launch/ui.launch.py src/paus_ui/paus_ui/session_store.py src/paus_ui/tests/test_session_store.py` passed.
+- `node --check src/paus_ui/paus_ui/static/app.js` passed.
+- `colcon build --packages-select paus_bringup paus_ui paus_marker_ros2 --symlink-install` passed.
+- `/usr/bin/python3 -m pytest -q src/paus_ui/tests/test_session_store.py src/paus_ui/tests/test_web_server.py src/paus_ui/tests/test_ros_bridge.py` passed (`37 passed`).
 
-- `python3 -m compileall -q src/paus_marker_ros2/paus_marker_ros2/eye_to_hand_calibration_node.py src/paus_marker_ros2/tests/test_eye_to_hand_session.py src/paus_ui/paus_ui/ros_bridge.py src/paus_ui/tests/test_ros_bridge.py`
-- `/usr/bin/python3 -m pytest -q src/paus_marker_ros2/tests/test_eye_to_hand_session.py src/paus_ui/tests/test_ros_bridge.py`
-  - `28 passed`
-- `colcon build --packages-select paus_marker_ros2 paus_ui --symlink-install`
-- `/usr/bin/python3 -m pytest -q src/paus_perception/tests/test_config_paths.py src/paus_ui/tests src/paus_marker_ros2/tests/test_semi_auto_calibration.py src/paus_marker_ros2/tests/test_eye_to_hand_session.py`
-  - `56 passed`
+## Remaining Items
+- None.
 
 ## BitLesson Delta
-
 - Action: add
-- Lesson ID(s): BL-20260501-handeye-session-workflow-completeness
-- Notes: Captured the self-contained session archive rule and startup workflow mapping so manual and semi-auto UI feedback remain complete.
+- Lesson ID(s): BL-20260501-handeye-live-follow-and-camera-bridge-gating
+- Notes: Captures the live-follow eligibility and camera bridge/receiver launch coupling fixes from round 53.
 <!-- CLAUDE's WORK SUMMARY  END  -->
 ---
 
@@ -85,7 +88,7 @@ Common update requests you should handle:
 ## Part 4: Output Requirements
 
 - In short, your review comments can include: problems/findings/blockers; claims that don't match reality; implementation plans for deferred work (to be implemented now); implementation plans for unfinished work; goal alignment issues.
-- If after your investigation the actual situation does not match what Claude claims to have completed, or there is pending work to be done, output your review comments to @/home/chen_lab/worktrees/paus_robot_handeye_rlcr/.humanize/rlcr/2026-04-30_11-21-11/round-46-review-result.md.
+- If after your investigation the actual situation does not match what Claude claims to have completed, or there is pending work to be done, output your review comments to @/home/chen_lab/worktrees/paus_robot_handeye_rlcr/.humanize/rlcr/2026-04-30_11-21-11/round-53-review-result.md.
 - **CRITICAL**: Only output "COMPLETE" as the last line if ALL tasks from the original plan are FULLY completed with no deferrals
   - DEFERRED items are considered INCOMPLETE - do NOT output COMPLETE if any task is deferred
   - UNFINISHED items are considered INCOMPLETE - do NOT output COMPLETE if any task is pending

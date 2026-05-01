@@ -89,6 +89,9 @@ class SessionStore:
         has_report = report_path.exists()
         has_solution = bool(report.get("base_to_camera") or residuals) and not invalid_reason
         shaped = dict(report)
+        report_samples = shaped.get("samples")
+        if isinstance(report_samples, list):
+            shaped["samples"] = [self._normalize_sample_record(sample) for sample in report_samples if isinstance(sample, dict)]
         shaped.update(
             {
                 "session_id": session_id,
@@ -117,6 +120,7 @@ class SessionStore:
             report_samples = self._read_yaml(session_path / "report.yaml").get("samples", [])
             if isinstance(report_samples, list):
                 samples = [item for item in report_samples if isinstance(item, dict)]
+        samples = [self._normalize_sample_record(sample) for sample in samples]
         for index, sample in enumerate(samples, start=1):
             sample["row_index"] = index
             image_path = sample.get("image_path")
@@ -226,7 +230,7 @@ class SessionStore:
                         board_margin_px=event.get("board_margin_px", record.get("board_margin_px")),
                     )
                 )
-            elif event_name == "waypoint_sample_captured":
+            elif event_name in {"waypoint_sample_captured", "sample_captured"}:
                 try:
                     event_sample_index = int(event.get("sample_index"))
                 except (TypeError, ValueError):
@@ -340,12 +344,14 @@ class SessionStore:
         }
 
     def _counts_for_session(self, *, path: Path, report: dict[str, Any], samples: list[dict[str, Any]], events: list[dict[str, Any]]) -> dict[str, int]:
-        accepted = sum(1 for event in events if event.get("event") == "waypoint_sample_captured")
+        accepted = sum(1 for event in events if event.get("event") in {"waypoint_sample_captured", "sample_captured"})
         skipped = sum(1 for event in events if event.get("event") in {"waypoint_capture_skipped", "waypoint_capture_disabled", "waypoint_dry_run_complete"})
         if not accepted:
             accepted = int(report.get("sample_count", 0) or len(samples))
         trajectory = self._read_waypoints_from_path(self._trajectory_path_for_session(path))
-        waypoint_count = len(trajectory.get("waypoints", []))
+        waypoint_count = len(self.read_session_waypoints(path.name))
+        if not waypoint_count:
+            waypoint_count = len(trajectory.get("waypoints", []))
         if not waypoint_count:
             waypoint_count = self._waypoint_count_from_events(events)
         pending = max(waypoint_count - accepted - skipped, 0) if waypoint_count else 0
@@ -451,6 +457,13 @@ class SessionStore:
 
     def _read_samples_without_report_fallback(self, session_path: Path) -> list[dict[str, Any]]:
         return self._read_jsonl(session_path / "samples.jsonl")
+
+    def _normalize_sample_record(self, sample: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(sample)
+        normalized["camera_to_board_translation_m"] = normalized.get("camera_to_board_translation_m") or _matrix_translation(normalized.get("camera_to_board_matrix"))
+        normalized["camera_to_board_rotation_rpy_deg"] = normalized.get("camera_to_board_rotation_rpy_deg") or _matrix_rotation_rpy_deg(normalized.get("camera_to_board_matrix"))
+        normalized["board_angle_deg"] = normalized.get("board_angle_deg") if normalized.get("board_angle_deg") is not None else _matrix_board_angle_deg(normalized.get("camera_to_board_matrix"))
+        return normalized
 
 
 def _first_present(primary: dict[str, Any] | None, fallback: dict[str, Any], key: str) -> Any:

@@ -82,14 +82,16 @@ def _launch_setup(context, *args, **kwargs):
     start_image_receiver = _as_bool(LaunchConfiguration("start_image_receiver").perform(context))
     start_camera_bridge = _as_bool(LaunchConfiguration("start_camera_bridge").perform(context))
     start_calibration_node = _as_bool(LaunchConfiguration("start_calibration_node").perform(context))
+    image_receiver_host = LaunchConfiguration("image_receiver_host").perform(context)
+    image_receiver_port = LaunchConfiguration("image_receiver_port").perform(context)
 
     camera_bridge_cmd = [
         python_exec,
         str(camera_bridge_script),
         "--host",
-        "127.0.0.1",
+        image_receiver_host,
         "--port",
-        "5001",
+        image_receiver_port,
         "--camera-config-output",
         camera_config_output,
     ]
@@ -226,6 +228,8 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("camera_config_output", default_value=RUNTIME_CAMERA_CONFIG, description="Path where camera_bridge.py will write camera.yaml."),
             DeclareLaunchArgument("camera_ip", default_value="", description="Optional camera IP. Leave empty to use the first discovered camera."),
             DeclareLaunchArgument("camera_index", default_value="", description="Optional camera index. Leave empty to use auto-selection."),
+            DeclareLaunchArgument("image_receiver_host", default_value="127.0.0.1", description="TCP host where camera_bridge.py sends frames."),
+            DeclareLaunchArgument("image_receiver_port", default_value="5001", description="TCP port where camera_bridge.py sends frames."),
             DeclareLaunchArgument("image_topic", default_value="/camera/image_bridge", description="Image topic used by the UI preview."),
             DeclareLaunchArgument("status_topic", default_value="/eye_to_hand/status", description="Eye-to-hand JSON status topic."),
             DeclareLaunchArgument("camera_config_wait_timeout_s", default_value="15.0", description="How long the calibration node waits for camera.yaml to be written."),

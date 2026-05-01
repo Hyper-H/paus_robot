@@ -182,6 +182,9 @@ def resolve_config_path(path_value: str | Path, config_path: str | Path) -> str:
     path = Path(path_text).expanduser()
     if path.is_absolute():
         return str(path)
+    resolved_config_path = Path(config_path).expanduser().resolve()
+    if _is_install_layout_path(resolved_config_path) and len(path.parts) == 1:
+        return str((_runtime_root() / path).resolve())
     return str((_infer_project_root(Path(config_path)) / path).resolve())
 
 

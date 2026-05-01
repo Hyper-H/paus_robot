@@ -102,6 +102,11 @@ class UiRosBridge(Node):
         self.max_reprojection_error_px = float(self.get_parameter("max_reprojection_error_px").get_parameter_value().double_value)
         self.min_board_margin_px = float(self.get_parameter("min_board_margin_px").get_parameter_value().double_value)
         self.execute_motion = bool(self.get_parameter("execute_motion").get_parameter_value().bool_value)
+        self.local_camera_config_path = self.camera_config_path
+        self.local_board_rows = self.board_rows
+        self.local_board_cols = self.board_cols
+        self.local_square_size_m = self.square_size_m
+        self.local_execute_motion = self.execute_motion
         self.effective_trajectory_path = self.trajectory_path
         self.effective_session_root_path = self.session_root_path
         self.effective_max_reprojection_error_px = self.max_reprojection_error_px
@@ -191,50 +196,88 @@ class UiRosBridge(Node):
         status_recent = last_status is not None and (last_status_age_s is None or last_status_age_s < 10.0)
         backend_connected = services_ready or status_recent or run_active
         payload = last_status if (status_recent or run_active) and last_status is not None else {}
-        trajectory_path = Path(str(payload.get("trajectory_path") or self.trajectory_path))
-        session_root_path = Path(str(payload.get("session_root_path") or self.session_root_path))
-        max_reprojection_error_px = _to_float(payload.get("max_reprojection_error_px"))
-        min_board_margin_px = _to_float(payload.get("min_board_margin_px"))
+        if not hasattr(self, "effective_trajectory_path"):
+            self.effective_trajectory_path = self.trajectory_path
+        if not hasattr(self, "effective_session_root_path"):
+            self.effective_session_root_path = self.session_root_path
+        if not hasattr(self, "effective_max_reprojection_error_px"):
+            self.effective_max_reprojection_error_px = self.max_reprojection_error_px
+        if not hasattr(self, "effective_min_board_margin_px"):
+            self.effective_min_board_margin_px = self.min_board_margin_px
+        if not hasattr(self, "effective_execute_motion"):
+            self.effective_execute_motion = self.execute_motion
+        local_camera_config_path = Path(getattr(self, "local_camera_config_path", getattr(self, "camera_config_path", Path(""))))
+        local_board_rows = int(getattr(self, "local_board_rows", getattr(self, "board_rows", 6)))
+        local_board_cols = int(getattr(self, "local_board_cols", getattr(self, "board_cols", 9)))
+        local_square_size_m = float(getattr(self, "local_square_size_m", getattr(self, "square_size_m", 0.01)))
+        local_execute_motion = bool(getattr(self, "local_execute_motion", getattr(self, "execute_motion", False)))
+        if not hasattr(self, "camera_config_path"):
+            self.camera_config_path = local_camera_config_path
+        if not hasattr(self, "board_rows"):
+            self.board_rows = local_board_rows
+        if not hasattr(self, "board_cols"):
+            self.board_cols = local_board_cols
+        if not hasattr(self, "square_size_m"):
+            self.square_size_m = local_square_size_m
         board_rows = _to_int(payload.get("board_rows"))
         board_cols = _to_int(payload.get("board_cols"))
         square_size_m = _to_float(payload.get("square_size_m"))
         camera_config_path = payload.get("camera_config_path")
-        if not hasattr(self, "board_rows"):
-            self.board_rows = 6
-        if not hasattr(self, "board_cols"):
-            self.board_cols = 9
-        if not hasattr(self, "square_size_m"):
-            self.square_size_m = 0.01
-        if not hasattr(self, "camera_config_path"):
-            self.camera_config_path = Path("")
         detector_settings_changed = False
-        if board_rows is not None and board_rows != self.board_rows:
-            self.board_rows = board_rows
-            detector_settings_changed = True
-        if board_cols is not None and board_cols != self.board_cols:
-            self.board_cols = board_cols
-            detector_settings_changed = True
-        if square_size_m is not None and square_size_m != self.square_size_m:
-            self.square_size_m = square_size_m
-            detector_settings_changed = True
-        if camera_config_path:
-            backend_camera_config_path = Path(str(camera_config_path))
-            if backend_camera_config_path != self.camera_config_path:
-                self.camera_config_path = backend_camera_config_path
+        if backend_connected:
+            if board_rows is not None and board_rows != self.board_rows:
+                self.board_rows = board_rows
                 detector_settings_changed = True
+            if board_cols is not None and board_cols != self.board_cols:
+                self.board_cols = board_cols
+                detector_settings_changed = True
+            if square_size_m is not None and square_size_m != self.square_size_m:
+                self.square_size_m = square_size_m
+                detector_settings_changed = True
+            if camera_config_path:
+                backend_camera_config_path = Path(str(camera_config_path))
+                if backend_camera_config_path != self.camera_config_path:
+                    self.camera_config_path = backend_camera_config_path
+                    detector_settings_changed = True
+        else:
+            if self.board_rows != local_board_rows:
+                self.board_rows = local_board_rows
+                detector_settings_changed = True
+            if self.board_cols != local_board_cols:
+                self.board_cols = local_board_cols
+                detector_settings_changed = True
+            if self.square_size_m != local_square_size_m:
+                self.square_size_m = local_square_size_m
+                detector_settings_changed = True
+            if self.camera_config_path != local_camera_config_path:
+                self.camera_config_path = local_camera_config_path
+                detector_settings_changed = True
+            self.effective_execute_motion = local_execute_motion
         if detector_settings_changed:
             self._detector = None
             self._detector_mtime_ns = None
             self._detector_signature = None
-        self.effective_trajectory_path = trajectory_path
-        self.effective_session_root_path = session_root_path
-        self.effective_max_reprojection_error_px = self.max_reprojection_error_px if max_reprojection_error_px is None else max_reprojection_error_px
-        self.effective_min_board_margin_px = self.min_board_margin_px if min_board_margin_px is None else min_board_margin_px
+        if backend_connected:
+            trajectory_path_value = payload.get("trajectory_path")
+            if trajectory_path_value:
+                self.effective_trajectory_path = Path(str(trajectory_path_value))
+            session_root_path_value = payload.get("session_root_path")
+            if session_root_path_value:
+                self.effective_session_root_path = Path(str(session_root_path_value))
+            max_reprojection_error_px = _to_float(payload.get("max_reprojection_error_px"))
+            if max_reprojection_error_px is not None:
+                self.effective_max_reprojection_error_px = max_reprojection_error_px
+            min_board_margin_px = _to_float(payload.get("min_board_margin_px"))
+            if min_board_margin_px is not None:
+                self.effective_min_board_margin_px = min_board_margin_px
+        else:
+            self.effective_trajectory_path = self.trajectory_path
+            self.effective_session_root_path = self.session_root_path
+            self.effective_max_reprojection_error_px = self.max_reprojection_error_px
+            self.effective_min_board_margin_px = self.min_board_margin_px
         motion_state_known = bool((status_recent or run_active) and last_status is not None)
         if motion_state_known:
-            self.effective_execute_motion = _to_bool(payload.get("execute_motion"), self.execute_motion)
-        else:
-            self.effective_execute_motion = self.execute_motion
+            self.effective_execute_motion = _to_bool(payload.get("execute_motion"), self.effective_execute_motion)
         if (
             self.session_store.trajectory_path != self.effective_trajectory_path
             or self.session_store.session_root_path != self.effective_session_root_path
@@ -430,19 +473,17 @@ class UiRosBridge(Node):
         backend_state = self._sync_backend_state()
         with self._last_status_lock:
             last_status = dict(self._last_status) if self._last_status else None
-        recorded_trajectory = (
-            last_status.get("recorded_trajectory")
-            if (backend_state.get("status_recent") or backend_state.get("run_active")) and isinstance(last_status, dict)
-            else None
-        )
+        recorded_trajectory = last_status.get("recorded_trajectory") if isinstance(last_status, dict) else None
         if isinstance(recorded_trajectory, dict):
-            return {
-                **recorded_trajectory,
-                "trajectory_path": str(backend_state["trajectory_path"]),
-                "error": None,
-                "source": "recorded_trajectory",
-                "dirty": bool(last_status.get("trajectory_dirty")),
-            }
+            trajectory_dirty = bool(last_status.get("trajectory_dirty")) if isinstance(last_status, dict) else False
+            if backend_state.get("status_recent") or backend_state.get("run_active") or trajectory_dirty:
+                return {
+                    **recorded_trajectory,
+                    "trajectory_path": str(backend_state["trajectory_path"]),
+                    "error": None,
+                    "source": "recorded_trajectory",
+                    "dirty": trajectory_dirty,
+                }
         return self.session_store.read_waypoints()
 
     def list_sessions(self) -> list[dict[str, Any]]:
@@ -496,7 +537,7 @@ class UiRosBridge(Node):
             self._run_thread.start()
         result = self._shape_command_result(
             "run_semi_auto",
-            False,
+            True,
             "Semi-auto calibration request queued.",
             extra={"accepted": True, "queued": True, "confirmation": confirmation},
         )
@@ -657,6 +698,8 @@ class UiRosBridge(Node):
             "waypoint_capture_disabled": ("skipped", "无需采样"),
             "waypoint_capture_skipped": ("skipped", "该点已跳过"),
             "waypoint_sample_captured": ("accepted", "样本已接受"),
+            "sample_captured": ("accepted", "样本已接受"),
+            "capture_failed": ("error", "采集失败"),
             "semi_auto_insufficient_samples": ("error", "有效样本不足"),
             "solving": ("solve", "正在求解手眼标定"),
             "solved": ("solve", "标定已求解"),

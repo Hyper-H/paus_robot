@@ -10,6 +10,7 @@ const state = {
   sessions: [],
   waypoints: [],
   waypointsDirty: false,
+  trajectoryLoadError: "",
   userSelectedSession: false,
   currentTrajectorySelected: false,
   autoSelectedSession: false,
@@ -268,26 +269,50 @@ function renderEmptyReport(message) {
   els.residualBars.innerHTML = "";
 }
 
+function renderWaypointLoadError(message) {
+  const error = message || "当前示教轨迹加载失败。";
+  els.waypointStats.textContent = "轨迹加载失败";
+  els.tableFooter.textContent = error;
+  els.waypointBody.innerHTML = `<tr class="empty-row"><td colspan="10">${escapeHtml(error)}</td></tr>`;
+  state.selectedWaypointName = "";
+  state.selectedSampleRow = null;
+  renderPreview(null);
+  els.previewEmpty.textContent = error;
+}
+
 async function refreshWaypoints() {
   let waypoints = [];
   state.waypointsDirty = false;
+  state.trajectoryLoadError = "";
   if (state.selectedSession) {
     waypoints = await getJson(`/api/sessions/${encodeURIComponent(state.selectedSession)}/waypoints`, []);
+    const sessionRoot = text(state.status?.handeye?.session_root_path, "calibration_sessions").replace(/[\\/]+$/, "");
+    els.trajectoryPath.textContent = `${sessionRoot}/${state.selectedSession}/trajectory_used.yaml`;
   } else {
     const trajectory = await getJson("/api/handeye/waypoints", { waypoints: [] });
     state.waypointsDirty = Boolean(trajectory.dirty);
-    waypoints = (trajectory.waypoints || []).map((waypoint, index) => ({
-      waypoint,
-      index: index + 1,
-      name: waypoint.name,
-      status: "pending",
-      result: "-",
-      capture: waypoint.capture,
-      thresholds: {},
-    }));
-    if (trajectory.trajectory_path) els.trajectoryPath.textContent = trajectory.trajectory_path;
+    if (trajectory.error) {
+      state.trajectoryLoadError = trajectory.error;
+      if (trajectory.trajectory_path) els.trajectoryPath.textContent = trajectory.trajectory_path;
+      waypoints = [];
+    } else {
+      waypoints = (trajectory.waypoints || []).map((waypoint, index) => ({
+        waypoint,
+        index: index + 1,
+        name: waypoint.name,
+        status: "pending",
+        result: "-",
+        capture: waypoint.capture,
+        thresholds: {},
+      }));
+      if (trajectory.trajectory_path) els.trajectoryPath.textContent = trajectory.trajectory_path;
+    }
   }
   state.waypoints = Array.isArray(waypoints) ? waypoints : [];
+  if (state.trajectoryLoadError && !state.selectedSession) {
+    renderWaypointLoadError(state.trajectoryLoadError);
+    return;
+  }
   const accepted = state.waypoints.filter((item) => item.status === "accepted").length;
   const skipped = state.waypoints.filter((item) => item.status === "skipped").length;
   const pending = state.waypoints.filter((item) => item.status === "pending").length;

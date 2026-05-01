@@ -55,7 +55,24 @@ def test_session_store_reads_report_samples_and_waypoint_events(tmp_path: Path) 
     session_path.mkdir(parents=True)
     (session_path / "trajectory_used.yaml").write_text(trajectory_path.read_text(encoding="utf-8"), encoding="utf-8")
     (session_path / "report.yaml").write_text(
-        yaml.safe_dump({"sample_count": 1, "method": "joint_absolute", "residuals": {"translation_mean_mm": 12.0}}),
+        yaml.safe_dump(
+            {
+                "sample_count": 1,
+                "method": "joint_absolute",
+                "residuals": {"translation_mean_mm": 12.0},
+                "samples": [
+                    {
+                        "sample_index": 1,
+                        "camera_to_board_matrix": [
+                            [1, 0, 0, 0.1],
+                            [0, 1, 0, 0.2],
+                            [0, 0, 1, 0.3],
+                            [0, 0, 0, 1],
+                        ],
+                    }
+                ],
+            }
+        ),
         encoding="utf-8",
     )
     _write_jsonl(
@@ -105,6 +122,10 @@ def test_session_store_reads_report_samples_and_waypoint_events(tmp_path: Path) 
     assert samples[0]["camera_to_board_rotation_rpy_deg"] == [0.0, -0.0, 0.0]
     assert samples[0]["board_angle_deg"] == 0.0
 
+    report = store.read_report("2026-04-29_120000")
+    assert report["samples"][0]["camera_to_board_rotation_rpy_deg"] == [0.0, -0.0, 0.0]
+    assert report["samples"][0]["board_angle_deg"] == 0.0
+
     waypoints = store.read_session_waypoints("2026-04-29_120000")
     assert waypoints[0]["status"] == "accepted"
     assert waypoints[0]["sample_index"] == 1
@@ -112,6 +133,60 @@ def test_session_store_reads_report_samples_and_waypoint_events(tmp_path: Path) 
     assert waypoints[0]["board_angle_deg"] == 0.0
     assert waypoints[1]["status"] == "skipped"
     assert "not detected" in waypoints[1]["reason"]
+
+
+def test_session_store_accepts_legacy_sample_captured_events(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
+    trajectory_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "tool_id": 0,
+                "user_id": 0,
+                "defaults": {"motion": "movej", "vel": 10.0, "acc": 10.0, "dwell_s": 0.5},
+                "waypoints": [
+                    {
+                        "name": "waypoint_001",
+                        "motion": "movej",
+                        "joint_deg": [0, 0, 0, 0, 0, 0],
+                        "expected_tcp_pose_mmdeg": [1, 2, 3, 4, 5, 6],
+                        "vel": 10.0,
+                        "acc": 10.0,
+                        "dwell_s": 0.5,
+                        "capture": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    session_root = tmp_path / "calibration_sessions"
+    session_path = session_root / "2026-04-29_120000"
+    session_path.mkdir(parents=True)
+    _write_jsonl(session_path / "samples.jsonl", [{"sample_index": 1, "reprojection_error_px": 1.0, "board_margin_px": 30.0}])
+    _write_jsonl(
+        session_path / "run.log",
+        [
+            {
+                "event": "sample_captured",
+                "waypoint_name": "waypoint_001",
+                "sample_index": 1,
+                "reprojection_error_px": 1.0,
+                "board_margin_px": 30.0,
+            }
+        ],
+    )
+
+    store = SessionStore(session_root_path=session_root, trajectory_path=trajectory_path)
+
+    sessions = store.list_sessions()
+    assert sessions[0]["accepted_count"] == 1
+    assert sessions[0]["pending_count"] == 0
+
+    waypoints = store.read_session_waypoints("2026-04-29_120000")
+    assert waypoints[0]["status"] == "accepted"
+    assert waypoints[0]["sample_index"] == 1
 
 
 def test_session_store_marks_capture_disabled_waypoints_terminal(tmp_path: Path) -> None:
@@ -386,6 +461,54 @@ def test_session_store_reads_manual_recorded_waypoints_from_run_log(tmp_path: Pa
     assert waypoints[0]["result"] == "-"
     assert waypoints[0]["reprojection_error_px"] == 1.5
     assert waypoints[0]["board_margin_px"] == 42.0
+
+
+def test_session_store_counts_pending_from_archived_trajectory_edits(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
+    trajectory_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "tool_id": 0,
+                "user_id": 0,
+                "defaults": {"motion": "movej", "vel": 10.0, "acc": 10.0, "dwell_s": 0.5},
+                "waypoints": [
+                    {
+                        "name": "waypoint_001",
+                        "motion": "movej",
+                        "joint_deg": [0, 0, 0, 0, 0, 0],
+                        "expected_tcp_pose_mmdeg": [1, 2, 3, 4, 5, 6],
+                        "vel": 10.0,
+                        "acc": 10.0,
+                        "dwell_s": 0.5,
+                        "capture": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    session_root = tmp_path / "calibration_sessions"
+    session_path = session_root / "2026-04-29_123505"
+    session_path.mkdir(parents=True)
+    (session_path / "trajectory_used.yaml").write_text(trajectory_path.read_text(encoding="utf-8"), encoding="utf-8")
+    _write_jsonl(
+        session_path / "run.log",
+        [
+            {
+                "event": "waypoint_recorded",
+                "waypoint_name": "waypoint_002",
+                "waypoint": {"name": "waypoint_002", "motion": "movej", "capture": True},
+            }
+        ],
+    )
+
+    store = SessionStore(session_root_path=session_root, trajectory_path=trajectory_path)
+
+    sessions = store.list_sessions()
+    assert sessions[0]["pending_count"] == 2
+    waypoints = store.read_session_waypoints("2026-04-29_123505")
+    assert [waypoint["name"] for waypoint in waypoints] == ["waypoint_001", "waypoint_002"]
 
 
 def test_session_store_counts_deleted_manual_waypoints_as_inactive(tmp_path: Path) -> None:

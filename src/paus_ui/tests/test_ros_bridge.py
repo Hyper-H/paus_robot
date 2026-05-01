@@ -84,6 +84,16 @@ def test_workflow_maps_semi_auto_started_to_motion_stage() -> None:
     assert workflow["label"] == "半自动标定已启动"
 
 
+def test_workflow_maps_manual_capture_statuses() -> None:
+    bridge = UiRosBridge.__new__(UiRosBridge)
+
+    accepted = UiRosBridge._workflow_for_status(bridge, "sample_captured")
+    failed = UiRosBridge._workflow_for_status(bridge, "capture_failed")
+
+    assert accepted["stage"] == "accepted"
+    assert failed["stage"] == "error"
+
+
 def test_get_detector_returns_none_for_malformed_camera_yaml() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         camera_yaml = Path(temp_dir) / "camera.yaml"
@@ -169,6 +179,54 @@ def test_stale_status_uses_service_ready_fallback() -> None:
         assert state["execute_motion"] is False
 
 
+def test_stale_status_preserves_previous_backend_config_overrides() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        bridge = UiRosBridge.__new__(UiRosBridge)
+        bridge.trajectory_path = root / "local_trajectory.yaml"
+        bridge.session_root_path = root / "local_sessions"
+        bridge.max_reprojection_error_px = 0.0
+        bridge.min_board_margin_px = 10.0
+        bridge.execute_motion = False
+        bridge.effective_trajectory_path = bridge.trajectory_path
+        bridge.effective_session_root_path = bridge.session_root_path
+        bridge.effective_max_reprojection_error_px = bridge.max_reprojection_error_px
+        bridge.effective_min_board_margin_px = bridge.min_board_margin_px
+        bridge.effective_execute_motion = bridge.execute_motion
+        bridge._service_clients = {"run": _ServiceClient(True)}
+        bridge.session_store = SessionStore(
+            session_root_path=bridge.session_root_path,
+            trajectory_path=bridge.trajectory_path,
+            max_reprojection_error_px=bridge.max_reprojection_error_px,
+            min_board_margin_px=bridge.min_board_margin_px,
+        )
+
+        fresh_state = UiRosBridge._sync_backend_state(
+            bridge,
+            {
+                "execute_motion": True,
+                "trajectory_path": str(root / "backend_trajectory.yaml"),
+                "session_root_path": str(root / "backend_sessions"),
+                "max_reprojection_error_px": 4.0,
+                "min_board_margin_px": 20.0,
+            },
+            0.1,
+        )
+        stale_state = UiRosBridge._sync_backend_state(bridge, {"execute_motion": False}, 120.0)
+
+        assert fresh_state["config_source"] == "backend_status"
+        assert stale_state["backend_connected"] is True
+        assert stale_state["status_recent"] is False
+        assert stale_state["config_source"] == "backend_service_ready"
+        assert stale_state["trajectory_path"] == root / "backend_trajectory.yaml"
+        assert stale_state["session_root_path"] == root / "backend_sessions"
+        assert stale_state["max_reprojection_error_px"] == 4.0
+        assert stale_state["min_board_margin_px"] == 20.0
+        assert stale_state["execute_motion"] is True
+        assert bridge.session_store.trajectory_path == root / "backend_trajectory.yaml"
+        assert bridge.session_store.session_root_path == root / "backend_sessions"
+
+
 def test_active_run_keeps_stale_status_live() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         root = Path(temp_dir)
@@ -203,18 +261,32 @@ def test_active_run_keeps_stale_status_live() -> None:
 def test_stale_status_disconnects_when_services_disappear() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         root = Path(temp_dir)
+        local_camera = root / "local_camera.yaml"
+        backend_camera = root / "backend_camera.yaml"
         bridge = UiRosBridge.__new__(UiRosBridge)
         bridge.trajectory_path = root / "local_trajectory.yaml"
         bridge.session_root_path = root / "local_sessions"
         bridge.max_reprojection_error_px = 0.0
         bridge.min_board_margin_px = 10.0
         bridge.execute_motion = False
+        bridge.camera_config_path = local_camera
+        bridge.board_rows = 6
+        bridge.board_cols = 9
+        bridge.square_size_m = 0.01
+        bridge.local_camera_config_path = local_camera
+        bridge.local_board_rows = 6
+        bridge.local_board_cols = 9
+        bridge.local_square_size_m = 0.01
+        bridge.local_execute_motion = False
         bridge.effective_trajectory_path = bridge.trajectory_path
         bridge.effective_session_root_path = bridge.session_root_path
         bridge.effective_max_reprojection_error_px = bridge.max_reprojection_error_px
         bridge.effective_min_board_margin_px = bridge.min_board_margin_px
         bridge.effective_execute_motion = bridge.execute_motion
         bridge._service_clients = {"run": _ServiceClient(False)}
+        bridge._detector = object()
+        bridge._detector_mtime_ns = 123
+        bridge._detector_signature = ("backend", 123, 8, 11, 0.02)
         bridge.session_store = SessionStore(
             session_root_path=bridge.session_root_path,
             trajectory_path=bridge.trajectory_path,
@@ -222,16 +294,42 @@ def test_stale_status_disconnects_when_services_disappear() -> None:
             min_board_margin_px=bridge.min_board_margin_px,
         )
 
+        UiRosBridge._sync_backend_state(
+            bridge,
+            {
+                "execute_motion": True,
+                "trajectory_path": str(root / "backend_trajectory.yaml"),
+                "session_root_path": str(root / "backend_sessions"),
+                "max_reprojection_error_px": 4.0,
+                "min_board_margin_px": 20.0,
+                "camera_config_path": str(backend_camera),
+                "board_rows": 8,
+                "board_cols": 11,
+                "square_size_m": 0.02,
+            },
+            0.1,
+        )
+        bridge._detector = object()
+        bridge._detector_mtime_ns = 456
+        bridge._detector_signature = ("backend", 456, 8, 11, 0.02)
         state = UiRosBridge._sync_backend_state(
             bridge,
-            {"execute_motion": True, "trajectory_path": str(root / "stale_backend.yaml")},
+            {"execute_motion": True, "camera_config_path": str(backend_camera)},
             120.0,
         )
 
         assert state["backend_connected"] is False
         assert state["execute_motion"] is False
         assert state["config_source"] == "ui_local_fallback"
+        assert state["camera_config_path"] == local_camera
+        assert state["board_rows"] == 6
+        assert state["board_cols"] == 9
+        assert state["square_size_m"] == 0.01
         assert bridge.session_store.trajectory_path == root / "local_trajectory.yaml"
+        assert bridge.session_store.session_root_path == root / "local_sessions"
+        assert bridge.session_store.max_reprojection_error_px == 0.0
+        assert bridge.session_store.min_board_margin_px == 10.0
+        assert bridge._detector is None
 
 
 def test_service_ready_without_status_requires_motion_confirmation() -> None:
@@ -464,7 +562,7 @@ def test_get_waypoints_prefers_live_recorded_trajectory() -> None:
         assert waypoints["waypoints"][0]["name"] == "waypoint_001"
 
 
-def test_get_waypoints_falls_back_to_disk_when_live_recording_is_stale() -> None:
+def test_get_waypoints_keeps_dirty_recorded_trajectory_when_live_recording_is_stale() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         root = Path(temp_dir)
         trajectory_path = root / "trajectory.yaml"
@@ -523,7 +621,70 @@ def test_get_waypoints_falls_back_to_disk_when_live_recording_is_stale() -> None
 
         waypoints = UiRosBridge.get_waypoints(bridge)
 
-        assert waypoints["trajectory_path"] == str(trajectory_path)
+        assert waypoints["source"] == "recorded_trajectory"
+        assert waypoints["dirty"] is True
+        assert waypoints["waypoints"][0]["name"] == "waypoint_live"
+
+
+def test_get_waypoints_falls_back_to_disk_when_live_recording_is_stale_and_clean() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        trajectory_path = root / "trajectory.yaml"
+        trajectory_path.write_text(
+            yaml.safe_dump(
+                {
+                    "version": 1,
+                    "tool_id": 0,
+                    "user_id": 0,
+                    "defaults": {"motion": "movej", "vel": 20.0, "acc": 30.0, "dwell_s": 0.5},
+                    "waypoints": [
+                        {
+                            "name": "waypoint_disk",
+                            "motion": "movej",
+                            "joint_deg": [0, 0, 0, 0, 0, 0],
+                            "expected_tcp_pose_mmdeg": [10, 20, 30, 40, 50, 60],
+                            "vel": 20.0,
+                            "acc": 30.0,
+                            "dwell_s": 0.5,
+                            "capture": True,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        bridge = UiRosBridge.__new__(UiRosBridge)
+        bridge._last_status_lock = threading.Lock()
+        bridge._last_status = {
+            "recorded_trajectory": {
+                "version": 1,
+                "tool_id": 0,
+                "user_id": 0,
+                "defaults": {"motion": "movej", "vel": 10.0, "acc": 10.0, "dwell_s": 0.5},
+                "waypoints": [{"name": "waypoint_live", "capture": True}],
+            },
+            "trajectory_dirty": False,
+        }
+        bridge.session_store = SessionStore(
+            session_root_path=root / "sessions",
+            trajectory_path=trajectory_path,
+            max_reprojection_error_px=0.0,
+            min_board_margin_px=10.0,
+        )
+        bridge._sync_backend_state = lambda *_args: {
+            "backend_connected": True,
+            "status_recent": False,
+            "trajectory_path": trajectory_path,
+            "session_root_path": root / "sessions",
+            "execute_motion": False,
+            "motion_state_known": False,
+            "config_source": "backend_service_ready",
+            "max_reprojection_error_px": 0.0,
+            "min_board_margin_px": 10.0,
+        }
+
+        waypoints = UiRosBridge.get_waypoints(bridge)
+
         assert waypoints["waypoints"][0]["name"] == "waypoint_disk"
         assert waypoints["waypoints"][0]["name"] != "waypoint_live"
 
@@ -617,7 +778,7 @@ def test_motion_summary_prefers_live_recorded_trajectory() -> None:
         assert summary["trajectory_path"] == str(trajectory_path)
 
 
-def test_start_run_reports_queued_request_as_pending_not_success() -> None:
+def test_start_run_reports_queued_request_as_accepted_success() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         root = Path(temp_dir)
         bridge = UiRosBridge.__new__(UiRosBridge)
@@ -650,7 +811,7 @@ def test_start_run_reports_queued_request_as_pending_not_success() -> None:
 
         assert result["accepted"] is True
         assert result["queued"] is True
-        assert result["success"] is False
+        assert result["success"] is True
         assert bridge._last_command_result == result
 
 

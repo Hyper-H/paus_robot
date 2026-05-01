@@ -177,6 +177,53 @@ class EyeToHandSessionTests(unittest.TestCase):
             self.assertEqual(archived_path.read_text(encoding="utf-8"), trajectory_path.read_text(encoding="utf-8"))
             self.assertEqual(node.session_owner, "manual")
 
+    def test_save_trajectory_clears_empty_trajectory_file_after_delete(self) -> None:
+        class FakeTrajectory:
+            def __init__(self) -> None:
+                self.waypoints = []
+
+            def to_payload(self) -> dict[str, object]:
+                return {"waypoints": []}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            trajectory_path = root / "trajectory.yaml"
+            trajectory_path.write_text("old: true\n", encoding="utf-8")
+
+            node = EyeToHandCalibrationNode.__new__(EyeToHandCalibrationNode)
+            node._semi_auto_lock = threading.Lock()
+            node._semi_auto_active = False
+            node.recorded_trajectory = FakeTrajectory()
+            node.trajectory_path = trajectory_path
+            node.session_root_path = session_root
+            node.session_dir = None
+            node.sample_log_path = None
+            node.report_path = None
+            node.run_log_path = None
+            node.session_owner = None
+            node.samples = []
+            node.current_solution = None
+            node._publish_status = lambda *_args, **_kwargs: None
+            node._write_recorded_trajectory = lambda: (_ for _ in ()).throw(AssertionError("_write_recorded_trajectory should not run"))
+            started_modes: list[str] = []
+
+            def ensure_session_started(owner: str = "manual") -> None:
+                started_modes.append(owner)
+                node.session_dir = session_root / "manual_session"
+                node.session_owner = owner
+
+            node._ensure_session_started = ensure_session_started
+
+            response = EyeToHandCalibrationNode._save_trajectory_callback(node, Trigger.Request(), Trigger.Response())
+
+            self.assertTrue(response.success)
+            self.assertFalse(trajectory_path.exists())
+            self.assertEqual(started_modes, ["manual"])
+            self.assertIsNotNone(node.session_dir)
+            self.assertEqual(node.session_owner, "manual")
+
     def test_semi_auto_validation_failure_does_not_create_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

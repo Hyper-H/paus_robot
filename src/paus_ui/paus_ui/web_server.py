@@ -1,15 +1,26 @@
+from __future__ import annotations
+
 import asyncio
 from pathlib import Path
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import rclpy
-from rclpy.executors import MultiThreadedExecutor
-
-from .ros_bridge import UiRosBridge
+if TYPE_CHECKING:
+    from .ros_bridge import UiRosBridge
 
 
-def create_app(bridge: UiRosBridge):
+def _parse_confirmed_flag(body: dict[str, Any] | None) -> bool:
+    if body is None:
+        return False
+    if not isinstance(body, dict):
+        raise ValueError("confirmed must be provided in a JSON object.")
+    confirmed = body.get("confirmed", False)
+    if isinstance(confirmed, bool):
+        return confirmed
+    raise ValueError("confirmed must be a JSON boolean.")
+
+
+def create_app(bridge: "UiRosBridge"):
     try:
         from fastapi import Body, FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
         from fastapi.responses import FileResponse
@@ -60,7 +71,10 @@ def create_app(bridge: UiRosBridge):
 
     @app.post("/api/handeye/run")
     async def run_handeye(body: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
-        confirmed = bool(body.get("confirmed", False)) if isinstance(body, dict) else False
+        try:
+            confirmed = _parse_confirmed_flag(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         return await asyncio.to_thread(bridge.start_semi_auto_run, confirmed=confirmed)
 
     @app.post("/api/handeye/stop")
@@ -121,6 +135,11 @@ def create_app(bridge: UiRosBridge):
 
 
 def main(args: list[str] | None = None) -> None:
+    import rclpy
+    from rclpy.executors import MultiThreadedExecutor
+
+    from .ros_bridge import UiRosBridge
+
     rclpy.init(args=args)
     bridge = UiRosBridge()
     executor = MultiThreadedExecutor()

@@ -935,9 +935,20 @@ class EyeToHandCalibrationNode(Node):
         if self._reject_manual_service_if_semi_auto_active(response, status="save_trajectory_rejected", operation="trajectory save"):
             return response
         if not self.recorded_trajectory.waypoints:
-            response.success = False
-            response.message = "No recorded waypoints to save."
-            self._publish_status("save_trajectory_failed", response.message)
+            if not self.trajectory_path.exists():
+                response.success = False
+                response.message = "No recorded waypoints to save."
+                self._publish_status("save_trajectory_failed", response.message)
+                return response
+            self._ensure_session_started("manual")
+            self.trajectory_path.unlink()
+            response.success = True
+            response.message = f"Cleared stale trajectory file at {self.trajectory_path}."
+            self._publish_status(
+                "trajectory_saved",
+                response.message,
+                {"trajectory_path": str(self.trajectory_path), **self._recorded_trajectory_status(dirty=False)},
+            )
             return response
         self._ensure_session_started("manual")
         self._write_recorded_trajectory()
