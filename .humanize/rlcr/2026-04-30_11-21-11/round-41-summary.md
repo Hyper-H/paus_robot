@@ -18,4 +18,6 @@ Fixed two review issues in the handeye UI:
 
 ## BitLesson Delta
 
-- No new bitlesson entry was available; `.humanize/bitlesson.md` remains template-only and the selector tool is not installed in this environment.
+- Action: add
+- Lesson ID(s): BL-20260501-handeye-ui-archived-default-board-angle
+- Notes: Captured the archived-session default selection and board-angle preview fix as a reusable lesson so future UI rounds can reuse the same selection and data-propagation pattern.
