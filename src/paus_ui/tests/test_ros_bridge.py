@@ -94,7 +94,7 @@ def test_backend_status_overrides_ui_local_motion_and_paths() -> None:
         assert bridge.session_store.session_root_path == root / "backend_sessions"
 
 
-def test_backend_status_does_not_expire_when_node_is_idle() -> None:
+def test_stale_status_uses_service_ready_fallback() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         root = Path(temp_dir)
         bridge = UiRosBridge.__new__(UiRosBridge)
@@ -119,7 +119,10 @@ def test_backend_status_does_not_expire_when_node_is_idle() -> None:
         state = UiRosBridge._sync_backend_state(bridge, {"execute_motion": False}, 120.0)
 
         assert state["backend_connected"] is True
-        assert state["config_source"] == "backend_status"
+        assert state["status_recent"] is False
+        assert state["motion_state_known"] is False
+        assert state["config_source"] == "backend_service_ready"
+        assert state["execute_motion"] is False
 
 
 def test_stale_status_disconnects_when_services_disappear() -> None:
@@ -182,7 +185,8 @@ def test_service_ready_without_status_requires_motion_confirmation() -> None:
 
         assert state["backend_connected"] is True
         assert state["motion_state_known"] is False
-        assert state["execute_motion"] is True
+        assert state["execute_motion"] is False
+        assert state["config_source"] == "backend_service_ready"
 
 
 def test_backend_status_updates_overlay_detector_settings() -> None:
@@ -278,6 +282,7 @@ def test_get_status_does_not_recompute_latest_quality() -> None:
             "backend_connected": True,
             "execute_motion": False,
             "motion_state_known": True,
+            "status_recent": True,
             "config_source": "backend_status",
             "trajectory_path": trajectory_path,
             "session_root_path": root / "sessions",
@@ -326,6 +331,7 @@ def test_get_status_drops_stale_backend_payload_when_disconnected() -> None:
             "backend_connected": False,
             "execute_motion": False,
             "motion_state_known": False,
+            "status_recent": False,
             "config_source": "ui_local_fallback",
             "trajectory_path": trajectory_path,
             "session_root_path": root / "sessions",

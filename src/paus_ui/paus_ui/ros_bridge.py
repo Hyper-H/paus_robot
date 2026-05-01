@@ -188,7 +188,7 @@ class UiRosBridge(Node):
         services_ready = any(client.service_is_ready() for client in self._service_clients.values())
         status_recent = last_status is not None and (last_status_age_s is None or last_status_age_s < 10.0)
         backend_connected = services_ready or status_recent
-        payload = last_status if backend_connected and last_status is not None else {}
+        payload = last_status if status_recent and last_status is not None else {}
         trajectory_path = Path(str(payload.get("trajectory_path") or self.trajectory_path))
         session_root_path = Path(str(payload.get("session_root_path") or self.session_root_path))
         max_reprojection_error_px = _to_float(payload.get("max_reprojection_error_px"))
@@ -228,11 +228,9 @@ class UiRosBridge(Node):
         self.effective_session_root_path = session_root_path
         self.effective_max_reprojection_error_px = self.max_reprojection_error_px if max_reprojection_error_px is None else max_reprojection_error_px
         self.effective_min_board_margin_px = self.min_board_margin_px if min_board_margin_px is None else min_board_margin_px
-        motion_state_known = bool(backend_connected and last_status is not None)
+        motion_state_known = bool(status_recent and last_status is not None)
         if motion_state_known:
             self.effective_execute_motion = _to_bool(payload.get("execute_motion"), self.execute_motion)
-        elif services_ready:
-            self.effective_execute_motion = True
         else:
             self.effective_execute_motion = self.execute_motion
         if (
@@ -258,7 +256,7 @@ class UiRosBridge(Node):
             "board_cols": self.board_cols,
             "square_size_m": self.square_size_m,
             "camera_config_path": self.camera_config_path,
-            "config_source": "backend_status" if backend_connected and last_status is not None else ("backend_service_ready" if services_ready else "ui_local_fallback"),
+            "config_source": "backend_status" if status_recent and last_status is not None else ("backend_service_ready" if services_ready else "ui_local_fallback"),
             "services_ready": services_ready,
             "status_recent": status_recent,
             "motion_state_known": motion_state_known,
@@ -272,7 +270,7 @@ class UiRosBridge(Node):
             last_status_age_s = (time.monotonic() - self._last_status_time_s) if self._last_status_time_s else None
         camera_age_s = self._image_age_s(latest_image)
         backend_state = self._sync_backend_state(last_status, last_status_age_s)
-        live_status = last_status if backend_state["backend_connected"] and last_status is not None else None
+        live_status = last_status if backend_state.get("status_recent") and last_status is not None else None
         shaped_status = self._shape_status_payload(live_status)
         current_waypoint = dict(shaped_status["current_waypoint"])
         status_payload = live_status or {}

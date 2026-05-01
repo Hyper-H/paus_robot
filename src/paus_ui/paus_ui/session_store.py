@@ -405,7 +405,9 @@ class SessionStore:
                 payload = yaml.safe_load(handle) or {}
         except (yaml.YAMLError, OSError, ValueError) as exc:
             return {"error": str(exc)}
-        return payload if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict):
+            return {"error": f"{path.name} must contain a mapping."}
+        return payload
 
     def _read_jsonl(self, path: Path) -> list[dict[str, Any]]:
         if not path.exists():

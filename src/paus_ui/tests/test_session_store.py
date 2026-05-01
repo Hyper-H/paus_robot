@@ -350,6 +350,29 @@ def test_session_store_ignores_malformed_archive_yaml(tmp_path: Path) -> None:
     assert store.read_session_waypoints("2026-04-29_123700") == []
 
 
+def test_session_store_marks_non_mapping_report_yaml_invalid(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
+    trajectory_path.write_text(
+        yaml.safe_dump({"version": 1, "tool_id": 0, "user_id": 0, "defaults": {"motion": "movej"}, "waypoints": []}),
+        encoding="utf-8",
+    )
+    session_root = tmp_path / "calibration_sessions"
+    session_path = session_root / "2026-04-29_123800"
+    session_path.mkdir(parents=True)
+    (session_path / "report.yaml").write_text(yaml.safe_dump(["not", "a", "mapping"]), encoding="utf-8")
+
+    store = SessionStore(session_root_path=session_root, trajectory_path=trajectory_path)
+
+    sessions = store.list_sessions()
+    assert len(sessions) == 1
+    assert sessions[0]["is_invalid"] is True
+    assert sessions[0]["report_error"] == "report.yaml must contain a mapping."
+    assert store.latest_valid_session_id() is None
+    report = store.read_report("2026-04-29_123800")
+    assert report["is_invalid"] is True
+    assert report["report_error"] == "report.yaml must contain a mapping."
+
+
 def test_session_store_detects_fallback_sample_images(tmp_path: Path) -> None:
     trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
     trajectory_path.write_text(
