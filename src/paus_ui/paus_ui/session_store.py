@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -131,6 +132,7 @@ class SessionStore:
                 sample["image_path"] = str(resolved_image_path)
             sample["camera_to_board_translation_m"] = sample.get("camera_to_board_translation_m") or _matrix_translation(sample.get("camera_to_board_matrix"))
             sample["camera_to_board_rotation_rpy_deg"] = sample.get("camera_to_board_rotation_rpy_deg") or _matrix_rotation_rpy_deg(sample.get("camera_to_board_matrix"))
+            sample["board_angle_deg"] = sample.get("board_angle_deg") if sample.get("board_angle_deg") is not None else _matrix_board_angle_deg(sample.get("camera_to_board_matrix"))
             sample["capture_time_s"] = sample.get("image_header_time_s") or sample.get("image_received_time_s")
             sample["thresholds"] = self._quality_flags(sample.get("reprojection_error_px"), sample.get("board_margin_px"))
         return samples
@@ -328,6 +330,7 @@ class SessionStore:
             "thresholds": flags,
             "camera_to_board_translation_m": camera_to_board_translation_m,
             "camera_to_board_rotation_rpy_deg": sample.get("camera_to_board_rotation_rpy_deg") if sample else None,
+            "board_angle_deg": sample.get("board_angle_deg") if sample else None,
             "tcp_pose_mmdeg": sample.get("tcp_pose_mmdeg") if sample else None,
             "image_sequence": sample.get("image_sequence") if sample else None,
             "capture_time_s": sample.get("capture_time_s") if sample else None,
@@ -466,6 +469,16 @@ def _matrix_rotation_rpy_deg(matrix: Any) -> list[float] | None:
     except (TypeError, ValueError, IndexError):
         return None
     return rotation_matrix_to_rpy_deg(rotation)
+
+
+def _matrix_board_angle_deg(matrix: Any) -> float | None:
+    if not isinstance(matrix, list) or len(matrix) < 3:
+        return None
+    try:
+        normal_z = float(matrix[2][2])
+    except (TypeError, ValueError, IndexError):
+        return None
+    return float(math.degrees(math.acos(max(min(abs(normal_z), 1.0), 0.0))))
 
 
 def _to_float(value: Any) -> float | None:

@@ -200,6 +200,14 @@ async function refreshSessions() {
     state.autoSelectedSession = false;
     state.userSelectedSession = false;
   }
+  const handeye = (state.status && state.status.handeye) || {};
+  const latestReportSession = sessions.find((session) => session.has_solution || (session.has_report && !session.is_invalid));
+  if (!handeye.run_active && !state.userSelectedSession && !state.selectedSession && latestReportSession) {
+    state.selectedSession = latestReportSession.id;
+    state.autoSelectedSession = true;
+    state.selectedWaypointName = "";
+    state.selectedSampleRow = null;
+  }
   const options = ['<option value="">当前示教轨迹</option>'];
   options.push(...sessions.map((session) => {
     const label = `${session.id} (${session.sample_count || 0})${session.has_solution ? "" : session.has_report ? " unsolved" : " no report"}`;
@@ -348,6 +356,7 @@ function renderPreview(item) {
   els.previewDetails.innerHTML = [
     ["reprojection_error_px", fmt(item.reprojection_error_px, 3)],
     ["board_margin_px", fmt(item.board_margin_px, 1)],
+    ["board_angle_deg", fmt(item.board_angle_deg, 2, " deg")],
     ["T_camera_board x", fmt(t[0], 3, " m")],
     ["T_camera_board y", fmt(t[1], 3, " m")],
     ["T_camera_board z", fmt(t[2], 3, " m")],
