@@ -914,11 +914,17 @@ class EyeToHandCalibrationNode(Node):
         removed = self.recorded_trajectory.waypoints.pop()
         response.success = True
         response.message = f"Deleted {removed.name} from the in-memory recording."
-        self._append_run_log("waypoint_deleted", removed.to_payload())
+        removed_payload = removed.to_payload()
+        deleted_progress = {
+            "waypoint_name": removed.name,
+            "waypoint": removed_payload,
+            "waypoint_count": len(self.recorded_trajectory.waypoints),
+        }
+        self._append_run_log("waypoint_deleted", deleted_progress)
         self._publish_status(
             "waypoint_deleted",
             response.message,
-            {"waypoint_count": len(self.recorded_trajectory.waypoints), **self._recorded_trajectory_status(dirty=True)},
+            {**deleted_progress, **self._recorded_trajectory_status(dirty=True)},
         )
         return response
 
@@ -979,15 +985,16 @@ class EyeToHandCalibrationNode(Node):
                 self._publish_status("semi_auto_rejected", response.message)
                 return response
             self._semi_auto_active = True
+        started_session_dir: str | None = None
         try:
-            self._begin_new_semi_auto_session()
             if not self.trajectory_path.exists():
                 response.success = False
                 response.message = f"Trajectory YAML does not exist: {self.trajectory_path}. Record waypoints first."
-                self._append_run_log("semi_auto_failed", {"error": response.message})
-                self._publish_status("semi_auto_failed", response.message)
+                self._publish_status("semi_auto_failed", response.message, {"session_dir": None})
                 return response
             trajectory = load_trajectory(self.trajectory_path)
+            self._begin_new_semi_auto_session()
+            started_session_dir = str(self.session_dir) if self.session_dir is not None else None
             shutil.copy2(self.trajectory_path, self.session_dir / "trajectory_used.yaml")
             self._append_run_log("semi_auto_started", {"trajectory_path": str(self.trajectory_path), "execute_motion": self.execute_motion})
             self._publish_status(
@@ -1181,8 +1188,9 @@ class EyeToHandCalibrationNode(Node):
         except Exception as exc:
             response.success = False
             response.message = repr(exc)
-            self._append_run_log("semi_auto_failed", {"error": response.message})
-            self._publish_status("semi_auto_failed", response.message, {"session_dir": str(self.session_dir) if self.session_dir is not None else None})
+            if started_session_dir is not None:
+                self._append_run_log("semi_auto_failed", {"error": response.message})
+            self._publish_status("semi_auto_failed", response.message, {"session_dir": started_session_dir})
         finally:
             with self._semi_auto_lock:
                 self._semi_auto_active = False

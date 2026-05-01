@@ -186,6 +186,10 @@ class SessionStore:
             if not waypoint_name:
                 continue
             name = str(waypoint_name)
+            event_name = str(event.get("event", ""))
+            if event_name == "waypoint_deleted":
+                records.pop(name, None)
+                continue
             record_quality = waypoint.get("record_quality") if isinstance(waypoint, dict) and isinstance(waypoint.get("record_quality"), dict) else {}
             record = records.setdefault(
                 name,
@@ -202,7 +206,6 @@ class SessionStore:
                     board_margin_px=record_quality.get("board_margin_px"),
                 ),
             )
-            event_name = str(event.get("event", ""))
             if event_name in {"waypoint_capture_skipped", "waypoint_capture_disabled", "waypoint_dry_run_complete"}:
                 reason = str(event.get("reason", event.get("message", "")))
                 if event_name == "waypoint_capture_disabled" and not reason:

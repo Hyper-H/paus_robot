@@ -238,6 +238,68 @@ def test_session_store_marks_dry_run_waypoints_terminal(tmp_path: Path) -> None:
     assert all(waypoint["status"] == "skipped" for waypoint in waypoints)
 
 
+def test_session_store_removes_deleted_waypoints_from_archive(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
+    trajectory_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "tool_id": 0,
+                "user_id": 0,
+                "defaults": {"motion": "movej", "vel": 10.0, "acc": 10.0, "dwell_s": 0.5},
+                "waypoints": [
+                    {
+                        "name": "waypoint_001",
+                        "motion": "movej",
+                        "joint_deg": [0, 0, 0, 0, 0, 0],
+                        "expected_tcp_pose_mmdeg": [1, 2, 3, 4, 5, 6],
+                        "vel": 10.0,
+                        "acc": 10.0,
+                        "dwell_s": 0.5,
+                        "capture": True,
+                    },
+                    {
+                        "name": "waypoint_002",
+                        "motion": "movej",
+                        "joint_deg": [1, 1, 1, 1, 1, 1],
+                        "expected_tcp_pose_mmdeg": [6, 5, 4, 3, 2, 1],
+                        "vel": 10.0,
+                        "acc": 10.0,
+                        "dwell_s": 0.5,
+                        "capture": True,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    session_root = tmp_path / "calibration_sessions"
+    session_path = session_root / "2026-04-29_123000"
+    session_path.mkdir(parents=True)
+    (session_path / "trajectory_used.yaml").write_text(trajectory_path.read_text(encoding="utf-8"), encoding="utf-8")
+    _write_jsonl(
+        session_path / "run.log",
+        [
+            {
+                "event": "waypoint_recorded",
+                "waypoint_name": "waypoint_001",
+                "waypoint": {"name": "waypoint_001", "motion": "movej", "capture": True},
+            },
+            {
+                "event": "waypoint_deleted",
+                "waypoint_name": "waypoint_001",
+                "waypoint": {"name": "waypoint_001", "motion": "movej", "capture": True},
+            },
+        ],
+    )
+
+    store = SessionStore(session_root_path=session_root, trajectory_path=trajectory_path)
+
+    waypoints = store.read_session_waypoints("2026-04-29_123000")
+    assert [waypoint["name"] for waypoint in waypoints] == ["waypoint_002"]
+    assert waypoints[0]["status"] == "pending"
+
+
 def test_manual_session_without_trajectory_has_no_phantom_waypoints(tmp_path: Path) -> None:
     trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
     trajectory_path.write_text(

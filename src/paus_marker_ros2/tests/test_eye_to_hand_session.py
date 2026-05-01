@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sys
 import tempfile
 import threading
@@ -44,7 +43,44 @@ class EyeToHandSessionTests(unittest.TestCase):
         self.assertEqual(sample_log_targets(session_path, session_path), [session_path])
         self.assertEqual(sample_log_targets(session_path, None), [session_path])
 
-    def test_semi_auto_validation_failure_uses_fresh_session(self) -> None:
+    def test_delete_last_waypoint_logs_normalized_payload(self) -> None:
+        class FakeWaypoint:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            def to_payload(self) -> dict[str, object]:
+                return {"name": self.name, "motion": "movej", "capture": True}
+
+        class FakeTrajectory:
+            def __init__(self) -> None:
+                self.waypoints = [FakeWaypoint("waypoint_001")]
+
+            def to_payload(self) -> dict[str, object]:
+                return {"waypoints": [waypoint.to_payload() for waypoint in self.waypoints]}
+
+        node = EyeToHandCalibrationNode.__new__(EyeToHandCalibrationNode)
+        node._semi_auto_lock = threading.Lock()
+        node._semi_auto_active = False
+        node.recorded_trajectory = FakeTrajectory()
+        appended: list[tuple[str, dict[str, object] | None]] = []
+        published: list[dict[str, object]] = []
+        node._append_run_log = lambda event, payload=None: appended.append((event, payload))
+        node._publish_status = lambda status, message, payload=None: published.append(
+            {"status": status, "message": message, "payload": payload or {}}
+        )
+        node._reject_manual_service_if_semi_auto_active = lambda response, **kwargs: False
+
+        response = EyeToHandCalibrationNode._delete_last_waypoint_callback(node, Trigger.Request(), Trigger.Response())
+
+        self.assertTrue(response.success)
+        self.assertEqual(appended[-1][0], "waypoint_deleted")
+        self.assertEqual(appended[-1][1]["waypoint_name"], "waypoint_001")
+        self.assertEqual(appended[-1][1]["waypoint"]["name"], "waypoint_001")
+        self.assertEqual(published[-1]["status"], "waypoint_deleted")
+        self.assertEqual(published[-1]["payload"]["waypoint_name"], "waypoint_001")
+        self.assertEqual(published[-1]["payload"]["waypoint"]["name"], "waypoint_001")
+
+    def test_semi_auto_validation_failure_does_not_create_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             session_root = root / "sessions"
@@ -93,13 +129,11 @@ class EyeToHandSessionTests(unittest.TestCase):
             response = EyeToHandCalibrationNode._run_semi_auto_callback(node, Trigger.Request(), Trigger.Response())
 
             self.assertFalse(response.success)
-            self.assertNotEqual(node.session_dir, old_session)
+            self.assertEqual(node.session_dir, old_session)
             self.assertEqual(old_run_log.read_text(encoding="utf-8"), old_content)
-            self.assertIsNotNone(node.run_log_path)
-            records = [json.loads(line) for line in node.run_log_path.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(records[-1]["event"], "semi_auto_failed")
+            self.assertEqual([item.name for item in session_root.iterdir()], ["old_session"])
             self.assertEqual(published[-1]["status"], "semi_auto_failed")
-            self.assertEqual(Path(published[-1]["payload"]["session_dir"]), node.session_dir)
+            self.assertIsNone(published[-1]["payload"]["session_dir"])
 
 
 if __name__ == "__main__":
