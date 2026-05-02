@@ -36,3 +36,4 @@ tmp_pose_smoke_ros/
 Thumbs.db
 .vscode/
 .idea/
+.humanize*
