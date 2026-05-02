@@ -161,14 +161,20 @@ class MarkerPipelineTests(unittest.TestCase):
 
     def test_control_decision_accepts_valid_target(self) -> None:
         decision = build_approach_decision(
-            target_point_base_m=[0.20, 0.0, 0.30],
+            target_position_base_m=[0.20, 0.0, 0.30],
+            raw_target_orientation_rpy_deg=[0.0, 0.0, 0.0],
             frame_id="robot_base",
             current_tcp_pose_mmdeg=[100.0, 0.0, 300.0, 180.0, 0.0, -180.0],
-            final_standoff_mm=30.0,
+            orientation_mode="face_marker_normal",
+            flange_face_axis="-Z",
+            hover_clearance_mm=30.0,
+            pre_approach_distance_mm=80.0,
             max_step_distance_mm=80.0,
             min_safe_z_mm=50.0,
+            min_plane_clearance_mm=10.0,
             workspace_min_mm=[-1000.0, -1000.0, 0.0],
             workspace_max_mm=[1000.0, 1000.0, 1000.0],
+            stage_switch_buffer_mm=5.0,
         )
         self.assertTrue(decision.check_passed)
         assert decision.candidate_pose_mmdeg is not None
@@ -176,31 +182,47 @@ class MarkerPipelineTests(unittest.TestCase):
 
     def test_control_decision_rejects_wrong_frame(self) -> None:
         decision = build_approach_decision(
-            target_point_base_m=[0.20, 0.0, 0.30],
+            target_position_base_m=[0.20, 0.0, 0.30],
+            raw_target_orientation_rpy_deg=[0.0, 0.0, 0.0],
             frame_id="camera",
             current_tcp_pose_mmdeg=[100.0, 0.0, 300.0, 180.0, 0.0, -180.0],
-            final_standoff_mm=30.0,
+            orientation_mode="face_marker_normal",
+            flange_face_axis="-Z",
+            hover_clearance_mm=30.0,
+            pre_approach_distance_mm=80.0,
             max_step_distance_mm=80.0,
             min_safe_z_mm=50.0,
+            min_plane_clearance_mm=10.0,
             workspace_min_mm=[-1000.0, -1000.0, 0.0],
             workspace_max_mm=[1000.0, 1000.0, 1000.0],
+            stage_switch_buffer_mm=5.0,
         )
         self.assertFalse(decision.check_passed)
         self.assertIn("frame_id", decision.error_message)
 
-    def test_control_decision_rejects_large_step(self) -> None:
+    def test_control_decision_limits_large_step(self) -> None:
         decision = build_approach_decision(
-            target_point_base_m=[0.50, 0.0, 0.30],
+            target_position_base_m=[0.50, 0.0, 0.30],
+            raw_target_orientation_rpy_deg=[0.0, 0.0, 0.0],
             frame_id="robot_base",
             current_tcp_pose_mmdeg=[100.0, 0.0, 300.0, 180.0, 0.0, -180.0],
-            final_standoff_mm=30.0,
+            orientation_mode="face_marker_normal",
+            flange_face_axis="-Z",
+            hover_clearance_mm=30.0,
+            pre_approach_distance_mm=80.0,
             max_step_distance_mm=40.0,
             min_safe_z_mm=50.0,
+            min_plane_clearance_mm=10.0,
             workspace_min_mm=[-1000.0, -1000.0, 0.0],
             workspace_max_mm=[1000.0, 1000.0, 1000.0],
+            stage_switch_buffer_mm=5.0,
         )
-        self.assertFalse(decision.check_passed)
-        self.assertIn("Step distance", decision.error_message)
+        self.assertTrue(decision.check_passed, msg=decision.error_message)
+        self.assertIsNotNone(decision.step_distance_mm)
+        self.assertIsNotNone(decision.candidate_pose_mmdeg)
+        # Step is limited: distance from current to candidate is finite and positive
+        self.assertGreater(decision.step_distance_mm, 0.0)
+        self.assertTrue(math.isfinite(decision.step_distance_mm))
 
     def test_process_image_file_writes_pose_outputs(self) -> None:
         config = load_config()

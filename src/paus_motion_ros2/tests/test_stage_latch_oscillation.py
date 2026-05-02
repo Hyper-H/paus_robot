@@ -395,5 +395,132 @@ class StageSwitchBufferTests(unittest.TestCase):
         self.assertEqual(decision.candidate_stage, PRE_APPROACH_STAGE)
 
 
+class TargetLossPreservesStateTests(unittest.TestCase):
+    '''AC-4: Brief target loss preserves last_valid_* and stage_latch.'''
+
+    def test_stage_latch_survives_repeated_build_approach_calls(self):
+        '''Simulating brief loss: stage_latch survives across multiple call invocations.'''
+        target_pt, target_rpy = _marker_at()
+        tcp = _tcp_at([500.0, 0.0, 230.0])
+
+        latch = FINAL_HOVER_STAGE
+        for i in range(5):
+            decision = build_approach_decision(
+                target_position_base_m=target_pt,
+                raw_target_orientation_rpy_deg=target_rpy,
+                frame_id='robot_base',
+                current_tcp_pose_mmdeg=tcp,
+                orientation_mode='face_marker_normal',
+                flange_face_axis='-Z',
+                hover_clearance_mm=30.0,
+                pre_approach_distance_mm=80.0,
+                max_step_distance_mm=80.0,
+                min_safe_z_mm=50.0,
+                min_plane_clearance_mm=10.0,
+                workspace_min_mm=[-1000.0, -1000.0, 0.0],
+                workspace_max_mm=[1000.0, 1000.0, 1000.0],
+                stage_switch_buffer_mm=5.0,
+                stage_latch=latch,
+            )
+            self.assertTrue(decision.check_passed, msg=f'Call {i}: {decision.error_message}')
+            self.assertEqual(decision.candidate_stage, FINAL_HOVER_STAGE,
+                             f'Latch must survive call {i}')
+            # Simulate what the node does: advance latch monotonically
+            if decision.candidate_stage in (REORIENT_STAGE, FINAL_HOVER_STAGE):
+                new_order = STAGE_ORDER.get(decision.candidate_stage, 0)
+                current_order = STAGE_ORDER.get(latch, 0)
+                if new_order > current_order:
+                    latch = decision.candidate_stage
+
+    def test_last_valid_cache_fields_in_decision(self):
+        '''Decision carries surface_normal and final_hover even when latched.'''
+        target_pt, target_rpy = _marker_at()
+        tcp = _tcp_at([500.0, 0.0, 310.0])  # at pre_approach position, facing correctly
+
+        decision = build_approach_decision(
+            target_position_base_m=target_pt,
+            raw_target_orientation_rpy_deg=target_rpy,
+            frame_id='robot_base',
+            current_tcp_pose_mmdeg=tcp,
+            orientation_mode='face_marker_normal',
+            flange_face_axis='-Z',
+            hover_clearance_mm=30.0,
+            pre_approach_distance_mm=80.0,
+            max_step_distance_mm=80.0,
+            min_safe_z_mm=50.0,
+            min_plane_clearance_mm=10.0,
+            workspace_min_mm=[-1000.0, -1000.0, 0.0],
+            workspace_max_mm=[1000.0, 1000.0, 1000.0],
+            stage_switch_buffer_mm=5.0,
+            stage_latch=FINAL_HOVER_STAGE,
+        )
+        self.assertTrue(decision.check_passed, msg=decision.error_message)
+        # These fields are stored as last_valid_* by the node
+        self.assertIsNotNone(decision.surface_normal_base)
+        self.assertIsNotNone(decision.final_hover_pose_mmdeg)
+        self.assertIsNotNone(decision.target_pose_base_mmdeg)
+
+
+class TargetLossExtendedTests(unittest.TestCase):
+    '''AC-5: Extended target loss does NOT issue pre_approach; reports lost.'''
+
+    def test_latched_final_hover_never_produces_pre_approach_on_loss(self):
+        '''With stage_latch=FINAL_HOVER, geometry cannot produce PRE_APPROACH
+        even when marker position would normally trigger it (simulating loss).'''
+        target_pt, target_rpy = _marker_at()
+        tcp = _tcp_at([500.0, 0.0, 230.0])
+
+        # Multiple calls with the same state - latch prevents regression
+        for _ in range(10):
+            decision = build_approach_decision(
+                target_position_base_m=target_pt,
+                raw_target_orientation_rpy_deg=target_rpy,
+                frame_id='robot_base',
+                current_tcp_pose_mmdeg=tcp,
+                orientation_mode='face_marker_normal',
+                flange_face_axis='-Z',
+                hover_clearance_mm=30.0,
+                pre_approach_distance_mm=80.0,
+                max_step_distance_mm=80.0,
+                min_safe_z_mm=50.0,
+                min_plane_clearance_mm=10.0,
+                workspace_min_mm=[-1000.0, -1000.0, 0.0],
+                workspace_max_mm=[1000.0, 1000.0, 1000.0],
+                stage_switch_buffer_mm=5.0,
+                stage_latch=FINAL_HOVER_STAGE,
+            )
+            self.assertTrue(decision.check_passed, msg=decision.error_message)
+            self.assertEqual(decision.candidate_stage, FINAL_HOVER_STAGE,
+                             'Latched FINAL_HOVER must not regress to PRE_APPROACH')
+
+    def test_far_tcp_with_latch_stays_at_latched_stage(self):
+        '''Even when TCP is far from marker (as after a loss/reacquire cycle),
+        latch prevents going back to geometric pre_approach.'''
+        target_pt, target_rpy = _marker_at()
+        # TCP far away - geometry would say pre_approach
+        tcp = _tcp_at([100.0, 0.0, 500.0])
+
+        decision = build_approach_decision(
+            target_position_base_m=target_pt,
+            raw_target_orientation_rpy_deg=target_rpy,
+            frame_id='robot_base',
+            current_tcp_pose_mmdeg=tcp,
+            orientation_mode='face_marker_normal',
+            flange_face_axis='-Z',
+            hover_clearance_mm=30.0,
+            pre_approach_distance_mm=80.0,
+            max_step_distance_mm=80.0,
+            min_safe_z_mm=50.0,
+            min_plane_clearance_mm=10.0,
+            workspace_min_mm=[-1000.0, -1000.0, 0.0],
+            workspace_max_mm=[1000.0, 1000.0, 1000.0],
+            stage_switch_buffer_mm=5.0,
+            stage_latch=FINAL_HOVER_STAGE,
+        )
+        self.assertTrue(decision.check_passed, msg=decision.error_message)
+        # Latch prevents regression; stage stays at FINAL_HOVER
+        self.assertEqual(decision.candidate_stage, FINAL_HOVER_STAGE)
+
+
 if __name__ == "__main__":
     unittest.main()
