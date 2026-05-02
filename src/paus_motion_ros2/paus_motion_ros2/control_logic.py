@@ -18,6 +18,13 @@ REORIENT_STAGE = "reorient"
 FINAL_HOVER_STAGE = "final_hover"
 SAFE_LIFT_STAGE = "safe_lift"
 
+STAGE_ORDER: dict[str, int] = {
+    SAFE_LIFT_STAGE: -1,
+    PRE_APPROACH_STAGE: 0,
+    REORIENT_STAGE: 1,
+    FINAL_HOVER_STAGE: 2,
+}
+
 DEFAULT_REORIENT_TOLERANCE_DEG = 5.0
 DEFAULT_MAX_REORIENT_STEP_DEG = 25.0
 
@@ -265,6 +272,7 @@ def build_approach_decision(
     workspace_min_mm: list[float],
     workspace_max_mm: list[float],
     stage_switch_buffer_mm: float,
+    stage_latch: str | None = None,
     prefer_positive_z_surface_normal: bool = True,
     enable_safe_lift_on_low_clearance: bool = True,
     safe_lift_step_mm: float = 80.0,
@@ -429,6 +437,36 @@ def build_approach_decision(
             float(max_step_distance_mm),
         )
         candidate_rotation = final_hover_rotation
+
+    # Apply stage latch to prevent regression (safe_lift always overrides).
+    if stage_latch is not None and candidate_stage != SAFE_LIFT_STAGE:
+        latch_order = STAGE_ORDER.get(stage_latch, -1)
+        candidate_order = STAGE_ORDER.get(candidate_stage, -1)
+        if candidate_order < latch_order:
+            if stage_latch == REORIENT_STAGE:
+                candidate_stage = REORIENT_STAGE
+                candidate_position = pre_approach_position.copy()
+                step_distance = float(np.linalg.norm(candidate_position - current_position))
+                candidate_rotation = _interpolate_rotation_towards(
+                    current_rotation,
+                    final_hover_rotation,
+                    float(DEFAULT_MAX_REORIENT_STEP_DEG),
+                )
+            elif stage_latch == FINAL_HOVER_STAGE:
+                candidate_stage = FINAL_HOVER_STAGE
+                candidate_position, step_distance = _limit_translation_step(
+                    current_position,
+                    final_hover_position,
+                    float(max_step_distance_mm),
+                )
+                candidate_rotation = _interpolate_rotation_towards(
+                    current_rotation,
+                    final_hover_rotation,
+                    float(DEFAULT_MAX_REORIENT_STEP_DEG),
+                )
+            else:
+                # Unknown latch stage; keep geometric result.
+                pass
 
     clearance_to_plane_mm = _signed_plane_clearance_mm(candidate_position, marker_center, surface_normal)
     if (
