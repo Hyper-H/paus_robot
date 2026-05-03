@@ -271,14 +271,17 @@ def build_approach_decision(
     min_plane_clearance_mm: float,
     workspace_min_mm: list[float],
     workspace_max_mm: list[float],
+    *,
     stage_latch: str | None = None,
-    stage_switch_buffer_mm: float = 5.0,
+    stage_switch_buffer_mm: float | None = None,
     prefer_positive_z_surface_normal: bool = True,
     enable_safe_lift_on_low_clearance: bool = True,
     safe_lift_step_mm: float = 80.0,
     safe_lift_above_marker_mm: float = 180.0,
     safe_lift_max_z_mm: float = 500.0,
 ) -> ControlDecision:
+    if stage_switch_buffer_mm is None:
+        stage_switch_buffer_mm = 5.0
     target_point_base_mm = point_m_to_mm(target_position_base_m)
     raw_target_pose_base_mmdeg = target_point_base_mm + [float(value) for value in raw_target_orientation_rpy_deg]
 
@@ -438,7 +441,6 @@ def build_approach_decision(
         )
         candidate_rotation = final_hover_rotation
 
-    # Apply stage latch to prevent regression (safe_lift always overrides).
     if stage_latch is not None and candidate_stage != SAFE_LIFT_STAGE:
         latch_order = STAGE_ORDER.get(stage_latch, -1)
         candidate_order = STAGE_ORDER.get(candidate_stage, -1)
@@ -459,14 +461,7 @@ def build_approach_decision(
                     final_hover_position,
                     float(max_step_distance_mm),
                 )
-                candidate_rotation = _interpolate_rotation_towards(
-                    current_rotation,
-                    final_hover_rotation,
-                    float(DEFAULT_MAX_REORIENT_STEP_DEG),
-                )
-            else:
-                # Unknown latch stage; keep geometric result.
-                pass
+                candidate_rotation = final_hover_rotation
 
     clearance_to_plane_mm = _signed_plane_clearance_mm(candidate_position, marker_center, surface_normal)
     if (
