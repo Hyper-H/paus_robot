@@ -484,7 +484,6 @@ class FairinoControlNode(Node):
             }
         )
 
-
     def _update_stage_latch(self, candidate_stage: str | None) -> None:
         if candidate_stage == SAFE_LIFT_STAGE:
             self.stage_latch = None
@@ -493,6 +492,7 @@ class FairinoControlNode(Node):
             current_order = STAGE_ORDER.get(self.stage_latch, 0)
             if new_order > current_order:
                 self.stage_latch = candidate_stage
+
     def _status_timer_event_for_state(self, tracking_state: str) -> str:
         return {
             TRACKING_IDLE: "tracking_idle",
@@ -647,7 +647,6 @@ class FairinoControlNode(Node):
 
         if decision.check_passed:
             self._update_last_valid_target_cache(target_point_base_m, decision, now)
-            self._update_stage_latch(decision.candidate_stage)
 
         current_tcp_for_status = list(decision.current_tcp_pose_mmdeg)
         common_status = {
@@ -772,8 +771,6 @@ class FairinoControlNode(Node):
             self._execute_move(decision.candidate_pose_mmdeg, decision.candidate_stage)
             self.last_executed_candidate_pose_mmdeg = list(decision.candidate_pose_mmdeg)
             self.last_executed_stage = decision.candidate_stage
-            # Update stage latch: safe_lift clears the latch (robot re-approaches),
-            # other stages advance monotonically.
             self._update_stage_latch(decision.candidate_stage)
 
             post_move_tcp_pose_mmdeg = self._safe_get_current_tcp_pose_mmdeg() or current_tcp_for_status

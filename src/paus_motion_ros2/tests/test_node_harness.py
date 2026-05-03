@@ -227,15 +227,14 @@ class RealNodeTargetLossTests(unittest.TestCase):
         self.node._get_current_tcp_pose_mmdeg.return_value = [
             500.0, 0.0, 230.0, 180.0, 0.0, -180.0
         ]
-        self.node._marker_visibility_status.return_value = "ok"
-        self.node._transform_validity_status.return_value = "ok"
+        # Simulate prior execution: latch was set from a real motion.
+        self.node.stage_latch = FINAL_HOVER_STAGE
+        self.node.last_valid_target_time = _make_ros_time(0)
+        self.node.last_valid_target_pose_base_mmdeg = [500.0, 0.0, 230.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_final_hover_pose_mmdeg = [500.0, 0.0, 230.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_surface_normal_base = [0.0, 0.0, 1.0]
 
-        msg = _make_pose_stamped(0.5, 0.0, 0.2)
-        self.node._target_callback(msg)
-
-        self.assertIsNotNone(self.node.stage_latch)
         latched = self.node.stage_latch
-        self.assertIn(latched, (REORIENT_STAGE, FINAL_HOVER_STAGE))
 
         self.node._marker_visibility_status.return_value = "not_found"
         self.node._transform_validity_status.return_value = "invalid"
@@ -407,7 +406,7 @@ class RealNodeTargetLossTests(unittest.TestCase):
 
     # ── AC-6: safe_lift ──
 
-    def test_safe_lift_clears_latch_via_callback(self):
+    def test_safe_lift_candidate_is_reported(self):
         self.node.stage_latch = FINAL_HOVER_STAGE
         self.node.last_valid_target_time = _make_ros_time(0)
         self.node._get_current_tcp_pose_mmdeg.return_value = [
@@ -419,7 +418,16 @@ class RealNodeTargetLossTests(unittest.TestCase):
 
         candidate = self.node.last_status_fields.get("candidate_stage")
         if candidate == SAFE_LIFT_STAGE:
-            self.assertIsNone(self.node.stage_latch)
+            # Latch persists because no motion was executed (dry-run mode).
+            # _update_stage_latch is only called after actual execution to
+            # prevent gated stages from poisoning the latch.
+            self.assertEqual(self.node.stage_latch, FINAL_HOVER_STAGE)
+
+    def test_safe_lift_clears_latch_on_execution(self):
+        """AC-6: _update_stage_latch clears the latch on safe_lift execution."""
+        self.node.stage_latch = FINAL_HOVER_STAGE
+        self.node._update_stage_latch(SAFE_LIFT_STAGE)
+        self.assertIsNone(self.node.stage_latch)
 
 
 class RealNodeInitializationTests(unittest.TestCase):
