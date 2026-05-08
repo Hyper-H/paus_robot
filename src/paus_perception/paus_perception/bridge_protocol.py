@@ -6,6 +6,7 @@ import json
 import socket
 # 导入 struct，用于打包和解包固定长度头部。
 import struct
+import zlib
 from typing import Any
 
 
@@ -64,3 +65,13 @@ def recv_frame_packet(sock: socket.socket) -> tuple[dict[str, Any], bytes]:
     payload = recv_exact(sock, payload_size)
     # 返回头和负载。
     return header, payload
+
+
+# 压缩桥接层负载。
+def compress_payload(payload: bytes, level: int = 6) -> bytes:
+    return zlib.compress(payload, int(level))
+
+
+# 解压桥接层负载。
+def decompress_payload(payload: bytes) -> bytes:
+    return zlib.decompress(payload)

@@ -62,8 +62,8 @@ class FairinoLinuxClient:
     # 读取当前关节角，单位为度。
     def get_actual_joint_pos_degree(self) -> tuple[int, list[float]]:
         self.ensure_connection()
-        error, values = self.robot.GetActualJointPosDegree()
-        return int(error), [float(value) for value in values]
+        result = self.robot.GetActualJointPosDegree()
+        return self._normalize_pose_result(result, "GetActualJointPosDegree")
 
     # 读取当前 TCP 位姿，位置单位为 mm，姿态单位为 deg。
     def get_actual_tcp_pose(self) -> tuple[int, list[float]]:
@@ -105,16 +105,19 @@ class FairinoLinuxClient:
         return self._normalize_pose_result(result, "GetInverseKinRef")
 
     # 执行关节空间运动。
-    def move_j(self, joint_pos: list[float], tool_id: int, user_id: int, vel: float) -> int:
+    def move_j(self, joint_pos: list[float], tool_id: int, user_id: int, vel: float, acc: float | None = None) -> int:
         self.ensure_connection()
-        return int(self.robot.MoveJ([float(v) for v in joint_pos], tool=int(tool_id), user=int(user_id), vel=float(vel)))
+        kwargs = {"tool": int(tool_id), "user": int(user_id), "vel": float(vel)}
+        if acc is not None:
+            kwargs["acc"] = float(acc)
+        return int(self.robot.MoveJ([float(v) for v in joint_pos], **kwargs))
 
     # 先求逆解，再执行关节空间运动。
-    def move_j_pose(self, pose_mmdeg: list[float], joint_pos_ref_deg: list[float], tool_id: int, user_id: int, vel: float) -> int:
+    def move_j_pose(self, pose_mmdeg: list[float], joint_pos_ref_deg: list[float], tool_id: int, user_id: int, vel: float, acc: float | None = None) -> int:
         error, joint_pos = self.solve_inverse_kin_ref(pose_mmdeg, joint_pos_ref_deg)
         if error != 0:
             return int(error)
-        return self.move_j(joint_pos, tool_id=tool_id, user_id=user_id, vel=vel)
+        return self.move_j(joint_pos, tool_id=tool_id, user_id=user_id, vel=vel, acc=acc)
 
     # 执行笛卡尔空间直线运动。
     def move_l(self, pose_mmdeg: list[float], tool_id: int, user_id: int, vel: float) -> int:
