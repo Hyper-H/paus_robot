@@ -7,12 +7,14 @@ from dataclasses import asdict, dataclass
 # 导入 Path，便于处理输出路径。
 from pathlib import Path
 import math
+import shutil
 import threading
 import time
 
 # 导入 OpenCV 与 NumPy，用于棋盘格检测和矩阵运算。
 import cv2
 import numpy as np
+import yaml
 # 导入 ament 索引，用于定位默认配置目录。(ROS2 的“包注册表 + 查找器”)
 from ament_index_python.packages import get_package_share_directory
 # 导入 cv_bridge，用于 ROS Image 转 OpenCV 图像。
@@ -23,6 +25,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 # 导入消息与服务类型。
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
@@ -38,6 +41,17 @@ from .board_observation import (
     estimate_depth_aligned_board_pose,
     estimate_rgb_pnp_board_pose,
     normalize_observation_mode,
+)
+from .semi_auto_calibration import (
+    CalibrationTrajectory,
+    TrajectoryValidationError,
+    build_recorded_waypoint,
+    create_session_dir,
+    empty_trajectory,
+    load_trajectory,
+    sample_log_targets,
+    save_trajectory,
+    session_owner_matches,
 )
 # 导入项目中的相机标定读取与坐标变换工具。
 from paus_motion_ros2 import FairinoLinuxClient
@@ -55,6 +69,9 @@ from paus_perception import (
     solve_eye_to_hand_opencv_handeye,
     solve_ax_xb_hand_eye_park,
 )
+
+
+STATUS_QOS = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 
 def _normalize_solver_method(value: str) -> str:
@@ -86,6 +103,8 @@ class CalibrationSample:
     observation_mode: str
     # 单样本质量字段，供 UI / 日志判断样本是否可靠。
     sample_quality: dict[str, object]
+    # 可选保存的样本图像路径。
+    image_path: str | None = None
     # hybrid_compare 诊断时保留两条链路的结果。
     camera_to_board_rgb_pnp_matrix: np.ndarray | None = None
     camera_to_board_depth_aligned_matrix: np.ndarray | None = None
@@ -106,6 +125,13 @@ class CapturedDepth:
     header_time_s: float | None
     received_time_s: float
     sequence: int
+
+
+class SampleRejectedError(RuntimeError):
+    def __init__(self, reject_reason: str, sample_quality: dict[str, object]) -> None:
+        super().__init__(reject_reason)
+        self.reject_reason = reject_reason
+        self.sample_quality = sample_quality
 
 
 # 这个节点负责采集 eye-to-hand 标定样本，并求解 `base -> camera` 外参。
@@ -155,6 +181,27 @@ class EyeToHandCalibrationNode(Node):
         self.declare_parameter("max_board_model_fit_max_mm", float(calibration_cfg.get("max_board_model_fit_max_mm", 5.0)))
         self.declare_parameter("min_board_center_z_m", float(calibration_cfg.get("min_board_center_z_m", 0.20)))
         self.declare_parameter("max_board_center_z_m", float(calibration_cfg.get("max_board_center_z_m", 0.80)))
+        self.declare_parameter("tool_id", int(control_cfg.get("tool_id", 0)))
+        self.declare_parameter("user_id", int(control_cfg.get("user_id", 0)))
+        self.declare_parameter("move_vel", float(control_cfg.get("move_vel", 10.0)))
+        self.declare_parameter("move_acc", float(control_cfg.get("move_acc", 10.0)))
+        self.declare_parameter("execute_motion", bool(control_cfg.get("execute_motion", False)))
+        self.declare_parameter(
+            "trajectory_path",
+            str(calibration_cfg.get("trajectory_path", bringup_share / "configs" / "eye_to_hand_trajectory.yaml")),
+        )
+        self.declare_parameter(
+            "session_root_path",
+            str(calibration_cfg.get("session_root_path", "/home/chen_lab/paus_robot/calibration_sessions")),
+        )
+        self.declare_parameter("save_sample_images", bool(calibration_cfg.get("save_sample_images", True)))
+        self.declare_parameter("max_reprojection_error_px", float(calibration_cfg.get("max_reprojection_error_px", 2.5)))
+        self.declare_parameter("min_board_margin_px", float(calibration_cfg.get("min_board_margin_px", 10.0)))
+        self.declare_parameter("stable_position_tolerance_mm", float(calibration_cfg.get("stable_position_tolerance_mm", 0.2)))
+        self.declare_parameter("stable_rotation_tolerance_deg", float(calibration_cfg.get("stable_rotation_tolerance_deg", 0.1)))
+        self.declare_parameter("stable_window_s", float(calibration_cfg.get("stable_window_s", 0.5)))
+        self.declare_parameter("stable_timeout_s", float(calibration_cfg.get("stable_timeout_s", 10.0)))
+        self.declare_parameter("dwell_s", float(calibration_cfg.get("dwell_s", 0.5)))
 
         camera_config_path = self.get_parameter("camera_config_path").get_parameter_value().string_value
         self.image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
@@ -173,13 +220,37 @@ class EyeToHandCalibrationNode(Node):
         self.observation_mode = normalize_observation_mode(self.get_parameter("observation_mode").get_parameter_value().string_value)
         self.fresh_image_timeout_s = float(self.get_parameter("fresh_image_timeout_s").get_parameter_value().double_value)
         self.max_rgb_depth_delta_ms = float(self.get_parameter("max_rgb_depth_delta_ms").get_parameter_value().double_value)
-        self.sample_log_path = Path(self.get_parameter("sample_log_path").get_parameter_value().string_value)
+        sample_log_path_value = self.get_parameter("sample_log_path").get_parameter_value().string_value.strip()
+        self.sample_log_override_path = Path(sample_log_path_value) if sample_log_path_value else None
         self.tool_to_board_translation = [float(value) for value in self.get_parameter("tool_to_board.translation_m").get_parameter_value().double_array_value]
         self.tool_to_board_rotation_rpy = [float(value) for value in self.get_parameter("tool_to_board.rotation_rpy_deg").get_parameter_value().double_array_value]
         self.min_sample_count = int(self.get_parameter("min_sample_count").get_parameter_value().integer_value)
         self.output_path = Path(self.get_parameter("output_path").get_parameter_value().string_value)
         self.robot_ip = self.get_parameter("robot_ip").get_parameter_value().string_value
         self.linux_fairino_sdk_root = self.get_parameter("linux_fairino_sdk_root").get_parameter_value().string_value
+        self.tool_id = int(self.get_parameter("tool_id").get_parameter_value().integer_value)
+        self.user_id = int(self.get_parameter("user_id").get_parameter_value().integer_value)
+        self.move_vel = float(self.get_parameter("move_vel").get_parameter_value().double_value)
+        self.move_acc = float(self.get_parameter("move_acc").get_parameter_value().double_value)
+        self.execute_motion = bool(self.get_parameter("execute_motion").get_parameter_value().bool_value)
+        self.trajectory_path = Path(self.get_parameter("trajectory_path").get_parameter_value().string_value)
+        self.session_root_path = Path(self.get_parameter("session_root_path").get_parameter_value().string_value)
+        self.save_sample_images = bool(self.get_parameter("save_sample_images").get_parameter_value().bool_value)
+        self.max_reprojection_error_px = float(self.get_parameter("max_reprojection_error_px").get_parameter_value().double_value)
+        self.min_board_margin_px = float(self.get_parameter("min_board_margin_px").get_parameter_value().double_value)
+        self.stable_position_tolerance_mm = float(self.get_parameter("stable_position_tolerance_mm").get_parameter_value().double_value)
+        self.stable_rotation_tolerance_deg = float(self.get_parameter("stable_rotation_tolerance_deg").get_parameter_value().double_value)
+        self.stable_window_s = float(self.get_parameter("stable_window_s").get_parameter_value().double_value)
+        self.stable_timeout_s = float(self.get_parameter("stable_timeout_s").get_parameter_value().double_value)
+        self.dwell_s = float(self.get_parameter("dwell_s").get_parameter_value().double_value)
+        self.session_dir: Path | None = None
+        self.session_owner: str | None = None
+        self.sample_log_path: Path | None = None
+        self.report_path: Path | None = None
+        self.run_log_path: Path | None = None
+        self.recorded_trajectory = self._load_or_create_trajectory_for_recording()
+        self._semi_auto_lock = threading.Lock()
+        self._semi_auto_active = False
 
         # 标定节点必须有相机内参文件，否则没法 solvePnP。
         ##runtimeerror表示运行时报错，即运行到这里时，状态不满足要求，所以不能继续
@@ -210,15 +281,36 @@ class EyeToHandCalibrationNode(Node):
         self.depth_subscription = None
         if self._uses_depth_observation():
             self.depth_subscription = self.create_subscription(Image, self.depth_topic, self._depth_callback, 10, callback_group=self.callback_group)
-        self.status_publisher = self.create_publisher(String, self.status_topic, 10)
+        self.status_publisher = self.create_publisher(String, self.status_topic, STATUS_QOS)
 
-        # 创建“采样 / 求解 / 保存”三个服务接口。 service是按一下就执行一次的“请求-响应接口”是 node 提供的一次性请求-响应接口。
+        # 创建“采样 / 求解 / 保存”以及半自动轨迹服务接口。
         self.capture_service = self.create_service(Trigger, "/eye_to_hand/capture_sample", self._capture_sample_callback, callback_group=self.callback_group)
         self.solve_service = self.create_service(Trigger, "/eye_to_hand/solve", self._solve_callback, callback_group=self.callback_group)
         self.save_service = self.create_service(Trigger, "/eye_to_hand/save", self._save_callback, callback_group=self.callback_group)
+        self.record_waypoint_service = self.create_service(Trigger, "/eye_to_hand/record_waypoint", self._record_waypoint_callback, callback_group=self.callback_group)
+        self.delete_waypoint_service = self.create_service(Trigger, "/eye_to_hand/delete_last_waypoint", self._delete_last_waypoint_callback, callback_group=self.callback_group)
+        self.save_trajectory_service = self.create_service(Trigger, "/eye_to_hand/save_trajectory", self._save_trajectory_callback, callback_group=self.callback_group)
+        self.run_semi_auto_service = self.create_service(Trigger, "/eye_to_hand/run_semi_auto_calibration", self._run_semi_auto_callback, callback_group=self.callback_group)
 
         # 节点启动后发布初始状态。
-        self._publish_status("ready", "Eye-to-hand calibration node started.")
+        self._append_run_log(
+            "node_started",
+            {
+                "trajectory_path": str(self.trajectory_path),
+                "sample_log_override_path": str(self.sample_log_override_path) if self.sample_log_override_path else None,
+                "session_root_path": str(self.session_root_path),
+            },
+        )
+        self._publish_status(
+            "ready",
+            "Eye-to-hand calibration node started.",
+            {
+                "trajectory_path": str(self.trajectory_path),
+                "session_dir": str(self.session_dir) if self.session_dir else None,
+                "sample_log_path": str(self.sample_log_path) if self.sample_log_path else None,
+                "sample_log_override_path": str(self.sample_log_override_path) if self.sample_log_override_path else None,
+            },
+        )
 
     def _uses_depth_observation(self) -> bool:
         return self.observation_mode in {DEPTH_ALIGNED_MODE, HYBRID_COMPARE_MODE}
@@ -285,6 +377,97 @@ class EyeToHandCalibrationNode(Node):
         status_message.data = json.dumps(payload, ensure_ascii=False)
         self.status_publisher.publish(status_message)
         self.get_logger().info(status_message.data)
+
+    def _append_run_log(self, event: str, payload: dict[str, object] | None = None) -> None:
+        run_log_path = getattr(self, "run_log_path", None)
+        if run_log_path is None:
+            return
+        record: dict[str, object] = {
+            "event": event,
+            "monotonic_time_s": time.monotonic(),
+            "sample_count": len(getattr(self, "samples", [])),
+            "session_owner": getattr(self, "session_owner", None),
+        }
+        if payload:
+            record.update(payload)
+        run_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with run_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _ensure_session_started(self, owner: str = "manual") -> None:
+        session_dir = getattr(self, "session_dir", None)
+        if session_dir is not None and session_owner_matches(getattr(self, "session_owner", None), owner):
+            return
+        self.session_dir = create_session_dir(self.session_root_path)
+        self.session_owner = owner
+        self.sample_log_path = self.session_dir / "samples.jsonl"
+        self.report_path = self.session_dir / "report.yaml"
+        self.run_log_path = self.session_dir / "run.log"
+        self.samples = []
+        self.current_solution = None
+        self._append_run_log(
+            "session_started",
+            {
+                "session_dir": str(self.session_dir),
+                "trajectory_path": str(getattr(self, "trajectory_path", "")),
+                "sample_log_path": str(self.sample_log_path),
+                "sample_log_override_path": str(self.sample_log_override_path) if getattr(self, "sample_log_override_path", None) else None,
+                "observation_mode": getattr(self, "observation_mode", RGB_PNP_MODE),
+            },
+        )
+
+    def _load_or_create_trajectory_for_recording(self) -> CalibrationTrajectory:
+        if self.trajectory_path.exists():
+            try:
+                return load_trajectory(self.trajectory_path)
+            except TrajectoryValidationError as exc:
+                self.get_logger().warning(f"Existing trajectory is invalid and will not be used for recording cache: {exc}")
+        return empty_trajectory(
+            tool_id=self.tool_id,
+            user_id=self.user_id,
+            default_vel=self.move_vel,
+            default_acc=self.move_acc,
+            default_dwell_s=self.dwell_s,
+        )
+
+    def _write_recorded_trajectory(self) -> None:
+        save_trajectory(self.recorded_trajectory, self.trajectory_path)
+
+    def _archive_current_trajectory(self) -> None:
+        if getattr(self, "session_dir", None) is None or not self.trajectory_path.exists():
+            return
+        shutil.copy2(self.trajectory_path, self.session_dir / "trajectory_used.yaml")
+
+    def _reject_manual_service_if_semi_auto_active(
+        self,
+        response: Trigger.Response,
+        *,
+        status: str = "manual_service_rejected",
+        message: str = "Semi-auto calibration is currently running.",
+    ) -> bool:
+        if not bool(getattr(self, "_semi_auto_active", False)):
+            return False
+        session_dir = getattr(self, "session_dir", None)
+        response.success = False
+        response.message = message
+        self._publish_status(status, message, {"session_dir": str(session_dir) if session_dir else None})
+        return True
+
+    def _write_report(self, payload: dict[str, object]) -> None:
+        report_path = getattr(self, "report_path", None)
+        if report_path is None:
+            return
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        with report_path.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(payload, handle, sort_keys=False, allow_unicode=True)
+
+    def _save_sample_image(self, image_bgr: np.ndarray, sample_index: int) -> str | None:
+        if not bool(getattr(self, "save_sample_images", False)) or getattr(self, "session_dir", None) is None:
+            return None
+        image_path = self.session_dir / "images" / f"sample_{sample_index:03d}.png"
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(image_path), image_bgr)
+        return str(image_path)
 
     # 构造棋盘格的三维角点模板。
     def _build_board_object_points(self) -> np.ndarray:
@@ -406,6 +589,56 @@ class EyeToHandCalibrationNode(Node):
         rotation_matrix = rpy_deg_to_rotation_matrix(self.tool_to_board_rotation_rpy)
         return make_transform_matrix(self.tool_to_board_translation, rotation_matrix)
 
+    def _compute_board_margin_px(self, corners_xy: np.ndarray, image_shape: tuple[int, int, int] | tuple[int, int]) -> float:
+        corners = np.asarray(corners_xy, dtype=np.float64).reshape((-1, 2))
+        height, width = image_shape[:2]
+        return float(
+            min(
+                np.min(corners[:, 0]),
+                np.min(corners[:, 1]),
+                width - 1.0 - np.max(corners[:, 0]),
+                height - 1.0 - np.max(corners[:, 1]),
+            )
+        )
+
+    def _probe_current_board_quality(self) -> dict[str, object]:
+        with self._image_condition:
+            latest_image = self.latest_image
+        if latest_image is None:
+            return {
+                "detected": False,
+                "accepted": False,
+                "status": "rejected",
+                "reject_reason": "image_frame_missing",
+                "observation_mode": self.observation_mode,
+            }
+        captured_image = CapturedImage(
+            image_bgr=latest_image.image_bgr.copy(),
+            header_time_s=latest_image.header_time_s,
+            received_time_s=latest_image.received_time_s,
+            sequence=latest_image.sequence,
+        )
+        captured_depth = None
+        if self._uses_depth_observation():
+            with self._depth_condition:
+                latest_depth = self.latest_depth
+            if latest_depth is not None:
+                captured_depth = CapturedDepth(
+                    depth_m=latest_depth.depth_m.copy(),
+                    header_time_s=latest_depth.header_time_s,
+                    received_time_s=latest_depth.received_time_s,
+                    sequence=latest_depth.sequence,
+                )
+        observation = self._estimate_camera_to_board_observation(captured_image, captured_depth)
+        quality = dict(observation.quality)
+        if "reprojection_rms_px" in quality and "reprojection_error_px" not in quality:
+            quality["reprojection_error_px"] = quality["reprojection_rms_px"]
+        if "reprojection_error_px" in quality and "reprojection_rms_px" not in quality:
+            quality["reprojection_rms_px"] = quality["reprojection_error_px"]
+        if observation.corners_xy is not None and "board_margin_px" not in quality:
+            quality["board_margin_px"] = self._compute_board_margin_px(observation.corners_xy, captured_image.image_bgr.shape)
+        return quality
+
     def _sample_to_log_record(self, sample: CalibrationSample) -> dict[str, object]:
         tcp_mid_time_s = (sample.tcp_read_start_time_s + sample.tcp_read_end_time_s) * 0.5
         record: dict[str, object] = {
@@ -419,6 +652,7 @@ class EyeToHandCalibrationNode(Node):
             "tcp_pose_mmdeg": sample.tcp_pose_mmdeg,
             "observation_mode": sample.observation_mode,
             "sample_quality": sample.sample_quality,
+            "image_path": sample.image_path,
             "base_to_tool_matrix": sample.base_to_tool_matrix.tolist(),
             "camera_to_board_matrix": sample.camera_to_board_matrix.tolist(),
         }
@@ -431,9 +665,11 @@ class EyeToHandCalibrationNode(Node):
         return record
 
     def _append_sample_log(self, sample: CalibrationSample) -> None:
-        self.sample_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.sample_log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(self._sample_to_log_record(sample), ensure_ascii=False) + "\n")
+        record = json.dumps(self._sample_to_log_record(sample), ensure_ascii=False) + "\n"
+        for path in sample_log_targets(self.sample_log_path, self.sample_log_override_path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(record)
 
     # 使用旧版“直接平均 base->camera”的方式求解。
     def _solve_board_average(self) -> np.ndarray:
@@ -513,59 +749,67 @@ class EyeToHandCalibrationNode(Node):
             "sample_quality_summary": self._summarize_sample_quality(),
         }
 
+    def _capture_one_sample(self, *, owner: str) -> CalibrationSample:
+        self._ensure_session_started(owner=owner)
+        with self._image_condition:
+            previous_sequence = self.image_sequence
+        with self._depth_condition:
+            previous_depth_sequence = self.depth_sequence
+        captured_image = self._wait_for_fresh_image(previous_sequence)
+        captured_depth = None
+        if self._uses_depth_observation():
+            captured_depth = self._wait_for_fresh_depth(previous_depth_sequence, captured_image.header_time_s)
+        base_to_tool, tcp_pose_mmdeg, tcp_read_start_time_s, tcp_read_end_time_s = self._read_current_base_to_tool()
+        observation = self._estimate_camera_to_board_observation(captured_image, captured_depth)
+        if observation.camera_to_board_matrix is None or not bool(observation.quality.get("accepted", False)):
+            reject_reason = str(observation.quality.get("reject_reason", "sample_quality_rejected"))
+            raise SampleRejectedError(reject_reason, observation.quality)
+        rgb_matrix = None
+        depth_matrix = None
+        hybrid_comparison = None
+        if self.observation_mode == RGB_PNP_MODE:
+            rgb_matrix = observation.camera_to_board_matrix
+        elif self.observation_mode == DEPTH_ALIGNED_MODE:
+            depth_matrix = observation.camera_to_board_matrix
+        elif self.observation_mode == HYBRID_COMPARE_MODE:
+            depth_matrix = observation.camera_to_board_matrix
+            hybrid_comparison = observation.quality.get("hybrid_comparison") if isinstance(observation.quality.get("hybrid_comparison"), dict) else None
+        sample_quality = dict(observation.quality)
+        if "reprojection_rms_px" in sample_quality and "reprojection_error_px" not in sample_quality:
+            sample_quality["reprojection_error_px"] = sample_quality["reprojection_rms_px"]
+        if "reprojection_error_px" in sample_quality and "reprojection_rms_px" not in sample_quality:
+            sample_quality["reprojection_rms_px"] = sample_quality["reprojection_error_px"]
+        if observation.corners_xy is not None and "board_margin_px" not in sample_quality:
+            sample_quality["board_margin_px"] = self._compute_board_margin_px(observation.corners_xy, captured_image.image_bgr.shape)
+        image_path = self._save_sample_image(captured_image.image_bgr, len(self.samples) + 1)
+        sample = CalibrationSample(
+            base_to_tool_matrix=base_to_tool,
+            camera_to_board_matrix=observation.camera_to_board_matrix,
+            image_header_time_s=captured_image.header_time_s,
+            image_received_time_s=captured_image.received_time_s,
+            tcp_read_start_time_s=tcp_read_start_time_s,
+            tcp_read_end_time_s=tcp_read_end_time_s,
+            tcp_pose_mmdeg=tcp_pose_mmdeg,
+            image_sequence=captured_image.sequence,
+            observation_mode=self.observation_mode,
+            sample_quality=sample_quality,
+            image_path=image_path,
+            camera_to_board_rgb_pnp_matrix=rgb_matrix,
+            camera_to_board_depth_aligned_matrix=depth_matrix,
+            hybrid_comparison=hybrid_comparison,
+        )
+        self.samples.append(sample)
+        self._append_sample_log(sample)
+        self._append_run_log("sample_captured", self._sample_to_log_record(sample))
+        return sample
+
     # 采集一次样本。
     def _capture_sample_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         del request
+        if self._reject_manual_service_if_semi_auto_active(response, status="capture_rejected"):
+            return response
         try:
-            with self._image_condition:
-                previous_sequence = self.image_sequence
-            with self._depth_condition:
-                previous_depth_sequence = self.depth_sequence
-            # 先等待服务调用后的新图像，再尽快读取当前 `base -> tool`。
-            captured_image = self._wait_for_fresh_image(previous_sequence)
-            captured_depth = None
-            if self._uses_depth_observation():
-                captured_depth = self._wait_for_fresh_depth(previous_depth_sequence, captured_image.header_time_s)
-            base_to_tool, tcp_pose_mmdeg, tcp_read_start_time_s, tcp_read_end_time_s = self._read_current_base_to_tool()
-            observation = self._estimate_camera_to_board_observation(captured_image, captured_depth)
-            if observation.camera_to_board_matrix is None or not bool(observation.quality.get("accepted", False)):
-                reject_reason = str(observation.quality.get("reject_reason", "sample_quality_rejected"))
-                response.success = False
-                response.message = f"Sample rejected: {reject_reason}."
-                self._publish_status(
-                    "sample_rejected",
-                    response.message,
-                    {"sample_quality": observation.quality},
-                )
-                return response
-            # 保存当前样本的绝对位姿，供后续 AX=XB 或旧方法统一求解。
-            rgb_matrix = None
-            depth_matrix = None
-            hybrid_comparison = None
-            if self.observation_mode == RGB_PNP_MODE:
-                rgb_matrix = observation.camera_to_board_matrix
-            elif self.observation_mode == DEPTH_ALIGNED_MODE:
-                depth_matrix = observation.camera_to_board_matrix
-            elif self.observation_mode == HYBRID_COMPARE_MODE:
-                depth_matrix = observation.camera_to_board_matrix
-                hybrid_comparison = observation.quality.get("hybrid_comparison") if isinstance(observation.quality.get("hybrid_comparison"), dict) else None
-            sample = CalibrationSample(
-                base_to_tool_matrix=base_to_tool,
-                camera_to_board_matrix=observation.camera_to_board_matrix,
-                image_header_time_s=captured_image.header_time_s,
-                image_received_time_s=captured_image.received_time_s,
-                tcp_read_start_time_s=tcp_read_start_time_s,
-                tcp_read_end_time_s=tcp_read_end_time_s,
-                tcp_pose_mmdeg=tcp_pose_mmdeg,
-                image_sequence=captured_image.sequence,
-                observation_mode=self.observation_mode,
-                sample_quality=observation.quality,
-                camera_to_board_rgb_pnp_matrix=rgb_matrix,
-                camera_to_board_depth_aligned_matrix=depth_matrix,
-                hybrid_comparison=hybrid_comparison,
-            )
-            self.samples.append(sample)
-            self._append_sample_log(sample)
+            sample = self._capture_one_sample(owner="manual")
             response.success = True
             response.message = f"Captured sample #{len(self.samples)}."
             self._publish_status(
@@ -574,30 +818,33 @@ class EyeToHandCalibrationNode(Node):
                 {
                     "robot_ip": self.robot_ip,
                     "sdk_root": self.linux_fairino_sdk_root,
-                    "sample_log_path": str(self.sample_log_path),
+                    "sample_log_path": str(self.sample_log_path) if self.sample_log_path else None,
                     "capture_timing": self._sample_to_log_record(sample),
                     "sample_quality": sample.sample_quality,
+                    "session_dir": str(self.session_dir) if self.session_dir else None,
                 },
             )
+        except SampleRejectedError as exc:
+            response.success = False
+            response.message = f"Sample rejected: {exc.reject_reason}."
+            self._publish_status("sample_rejected", response.message, {"sample_quality": exc.sample_quality, "session_dir": str(self.session_dir) if self.session_dir else None})
         except Exception as exc:
             response.success = False
             response.message = repr(exc)
-            self._publish_status("capture_failed", response.message)
+            self._publish_status("capture_failed", response.message, {"session_dir": str(self.session_dir) if self.session_dir else None})
         return response
 
-    # 用已有样本求解外参。
     def _solve_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         del request
-        # 样本不足时直接拒绝求解。
+        self._ensure_session_started(owner=getattr(self, "session_owner", None) or "manual")
         if len(self.samples) < self.min_sample_count:
             response.success = False
             response.message = f"Need at least {self.min_sample_count} samples, currently {len(self.samples)}."
-            self._publish_status("solve_failed", response.message)
+            self._publish_status("solve_failed", response.message, {"session_dir": str(self.session_dir) if self.session_dir else None})
             return response
         try:
             tool_to_board = self._tool_to_board_matrix()
             solver_matrices: dict[str, np.ndarray | None] = {}
-            # 根据配置选择具体的求解方法。
             if self.solver_method == "board_average":
                 solved_matrix = self._solve_board_average()
                 solve_method = "eye_to_hand_board_average"
@@ -617,8 +864,6 @@ class EyeToHandCalibrationNode(Node):
             else:
                 raise RuntimeError(f"Unsupported solver_method: {self.solver_method}")
             solver_matrices[solve_method] = solved_matrix
-
-            # 额外对同一批样本跑其它求解器，只做诊断输出，不影响当前选择。
             for method_name, method_builder in (
                 ("eye_to_hand_board_average", self._solve_board_average),
                 (
@@ -667,7 +912,6 @@ class EyeToHandCalibrationNode(Node):
             rotation = solved_matrix[:3, :3]
             transform = make_transform_struct(translation, rotation, "robot_base", "camera")
             diagnostics = self._evaluate_session_diagnostics(solved_matrix, tool_to_board)
-            # 保存当前求解结果。
             self.current_solution = EyeToHandCalibrationSolution(
                 status="ok",
                 success=True,
@@ -682,6 +926,25 @@ class EyeToHandCalibrationNode(Node):
                 session_diagnostics=diagnostics,
                 sample_quality_summary=diagnostics.get("sample_quality_summary") if isinstance(diagnostics.get("sample_quality_summary"), dict) else None,
             )
+            report_payload = {
+                "session_dir": str(self.session_dir) if self.session_dir else None,
+                "trajectory_path": str(self.trajectory_path),
+                "sample_log_path": str(self.sample_log_path) if self.sample_log_path else None,
+                "sample_log_override_path": str(self.sample_log_override_path) if self.sample_log_override_path else None,
+                "sample_count": len(self.samples),
+                "method": solve_method,
+                "base_to_camera": asdict(transform),
+                "tool_to_board": {
+                    "translation_m": list(self.tool_to_board_translation),
+                    "rotation_rpy_deg": list(self.tool_to_board_rotation_rpy),
+                },
+                "residuals": asdict(residuals),
+                "solver_residuals": solver_residuals,
+                "session_diagnostics": diagnostics,
+                "samples": [self._sample_to_log_record(sample) for sample in self.samples],
+            }
+            self._write_report(report_payload)
+            self._append_run_log("solved", {"method": solve_method, "report_path": str(self.report_path) if self.report_path else None, "sample_count": len(self.samples)})
             response.success = True
             response.message = self.current_solution.message
             self._publish_status(
@@ -693,33 +956,274 @@ class EyeToHandCalibrationNode(Node):
                     "residuals": asdict(residuals),
                     "solver_residuals": solver_residuals,
                     **diagnostics,
+                    "session_dir": str(self.session_dir) if self.session_dir else None,
+                    "report_path": str(self.report_path) if self.report_path else None,
                 },
             )
         except Exception as exc:
             response.success = False
             response.message = repr(exc)
-            self._publish_status("solve_failed", response.message)
+            self._publish_status("solve_failed", response.message, {"session_dir": str(self.session_dir) if self.session_dir else None})
         return response
 
-    # 将当前求解结果保存成外参文件。
+    def _save_current_solution(self) -> None:
+        if self.current_solution is None or not self.current_solution.success:
+            raise RuntimeError("No solved extrinsic is available.")
+        before_path = self.session_dir / "extrinsics_before.yaml" if self.session_dir else None
+        after_path = self.session_dir / "extrinsics_after.yaml" if self.session_dir else None
+        if before_path is not None and self.output_path.exists():
+            shutil.copy2(self.output_path, before_path)
+        save_eye_to_hand_solution(self.current_solution, self.output_path)
+        if after_path is not None:
+            shutil.copy2(self.output_path, after_path)
+        self._append_run_log(
+            "extrinsics_saved",
+            {
+                "output_path": str(self.output_path),
+                "extrinsics_before": str(before_path) if before_path is not None and before_path.exists() else None,
+                "extrinsics_after": str(after_path) if after_path is not None else None,
+            },
+        )
+
     def _save_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         del request
-        # 如果还没有求解成功，就不允许保存。
+        if self._reject_manual_service_if_semi_auto_active(response, status="save_rejected"):
+            return response
         if self.current_solution is None or not self.current_solution.success:
             response.success = False
             response.message = "No solved extrinsic is available."
-            self._publish_status("save_failed", response.message)
+            self._publish_status("save_failed", response.message, {"session_dir": str(self.session_dir) if self.session_dir else None})
             return response
         try:
-            # 写出到配置文件。
-            save_eye_to_hand_solution(self.current_solution, self.output_path)
+            self._save_current_solution()
             response.success = True
             response.message = f"Saved extrinsic to {self.output_path}."
-            self._publish_status("saved", response.message, {"output_path": str(self.output_path)})
+            self._publish_status("saved", response.message, {"output_path": str(self.output_path), "session_dir": str(self.session_dir) if self.session_dir else None})
         except Exception as exc:
             response.success = False
             response.message = repr(exc)
-            self._publish_status("save_failed", response.message)
+            self._publish_status("save_failed", response.message, {"session_dir": str(self.session_dir) if self.session_dir else None})
+        return response
+
+    def _record_waypoint_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+        del request
+        if self._reject_manual_service_if_semi_auto_active(response):
+            return response
+        try:
+            self._ensure_session_started(owner="manual")
+            session_dir = getattr(self, "session_dir", None)
+            joint_error, joint_deg = self.linux_client.get_actual_joint_pos_degree()
+            if joint_error != 0:
+                raise RuntimeError(f"GetActualJointPosDegree failed with code {joint_error}.")
+            tcp_error, tcp_pose_mmdeg = self.linux_client.get_actual_tcp_pose()
+            if tcp_error != 0:
+                raise RuntimeError(f"GetActualTCPPose failed with code {tcp_error}.")
+            record_quality = self._probe_current_board_quality()
+            waypoint = build_recorded_waypoint(
+                index=len(self.recorded_trajectory.waypoints) + 1,
+                joint_deg=joint_deg,
+                tcp_pose_mmdeg=tcp_pose_mmdeg,
+                vel=self.move_vel,
+                acc=self.move_acc,
+                dwell_s=self.dwell_s,
+                capture=True,
+                record_quality=record_quality,
+            )
+            self.recorded_trajectory.waypoints.append(waypoint)
+            self._write_recorded_trajectory()
+            payload = {
+                "waypoint_name": waypoint.name,
+                "waypoint": waypoint.to_payload(),
+                "waypoint_count": len(self.recorded_trajectory.waypoints),
+                "record_quality": record_quality,
+                "trajectory_path": str(self.trajectory_path),
+                "session_dir": str(session_dir) if session_dir else None,
+            }
+            self._append_run_log("waypoint_recorded", payload)
+            response.success = True
+            response.message = f"Recorded {waypoint.name} to {self.trajectory_path}."
+            self._publish_status("waypoint_recorded", response.message, payload)
+        except Exception as exc:
+            response.success = False
+            response.message = repr(exc)
+            self._publish_status("record_waypoint_failed", response.message, {"session_dir": str(getattr(self, "session_dir", None)) if getattr(self, "session_dir", None) else None})
+        return response
+
+    def _delete_last_waypoint_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+        del request
+        if self._reject_manual_service_if_semi_auto_active(response):
+            return response
+        if not self.recorded_trajectory.waypoints:
+            response.success = False
+            response.message = "No recorded waypoint to delete."
+            session_dir = getattr(self, "session_dir", None)
+            self._publish_status("delete_waypoint_failed", response.message, {"session_dir": str(session_dir) if session_dir else None})
+            return response
+        try:
+            self._ensure_session_started(owner="manual")
+            session_dir = getattr(self, "session_dir", None)
+            removed = self.recorded_trajectory.waypoints.pop()
+            if self.recorded_trajectory.waypoints:
+                self._write_recorded_trajectory()
+            elif getattr(self, "trajectory_path", None) is not None and self.trajectory_path.exists():
+                self.trajectory_path.unlink()
+            trajectory_path = getattr(self, "trajectory_path", None)
+            payload = {
+                "waypoint_name": removed.name,
+                "waypoint": removed.to_payload(),
+                "waypoint_count": len(self.recorded_trajectory.waypoints),
+                "trajectory_path": str(trajectory_path) if trajectory_path is not None else None,
+                "session_dir": str(session_dir) if session_dir else None,
+            }
+            self._append_run_log("waypoint_deleted", payload)
+            response.success = True
+            response.message = f"Deleted {removed.name} from {trajectory_path}."
+            self._publish_status("waypoint_deleted", response.message, payload)
+        except Exception as exc:
+            response.success = False
+            response.message = repr(exc)
+            self._publish_status("delete_waypoint_failed", response.message, {"session_dir": str(getattr(self, "session_dir", None)) if getattr(self, "session_dir", None) else None})
+        return response
+
+    def _save_trajectory_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+        del request
+        if self._reject_manual_service_if_semi_auto_active(response):
+            return response
+        try:
+            self._ensure_session_started(owner="manual")
+            if not self.recorded_trajectory.waypoints:
+                if self.trajectory_path.exists():
+                    self.trajectory_path.unlink()
+                response.success = True
+                response.message = "Cleared empty trajectory state."
+                self._publish_status(
+                    "trajectory_cleared",
+                    response.message,
+                    {"trajectory_path": str(self.trajectory_path), "session_dir": str(self.session_dir) if self.session_dir else None},
+                )
+                self._append_run_log(
+                    "trajectory_cleared",
+                    {"trajectory_path": str(self.trajectory_path), "session_dir": str(self.session_dir) if self.session_dir else None},
+                )
+                return response
+            self._write_recorded_trajectory()
+            self._archive_current_trajectory()
+            payload = {
+                "trajectory_path": str(self.trajectory_path),
+                "waypoint_count": len(self.recorded_trajectory.waypoints),
+                "session_dir": str(self.session_dir) if self.session_dir else None,
+                "session_owner": self.session_owner,
+            }
+            self._append_run_log("trajectory_saved", payload)
+            response.success = True
+            response.message = f"Saved {len(self.recorded_trajectory.waypoints)} waypoints to {self.trajectory_path}."
+            self._publish_status("trajectory_saved", response.message, payload)
+        except Exception as exc:
+            response.success = False
+            response.message = repr(exc)
+            self._publish_status("save_trajectory_failed", response.message, {"session_dir": str(self.session_dir) if self.session_dir else None})
+        return response
+
+    def _wait_until_tcp_stable(self) -> list[float]:
+        deadline = time.monotonic() + self.stable_timeout_s
+        stable_since: float | None = None
+        previous_pose: list[float] | None = None
+        last_pose: list[float] | None = None
+        while time.monotonic() < deadline:
+            error, pose = self.linux_client.get_actual_tcp_pose()
+            if error != 0:
+                raise RuntimeError(f"GetActualTCPPose failed with code {error}.")
+            last_pose = pose
+            if previous_pose is not None:
+                position_delta_mm = float(np.linalg.norm(np.asarray(pose[:3], dtype=np.float64) - np.asarray(previous_pose[:3], dtype=np.float64)))
+                rotation_delta_deg = float(np.linalg.norm(np.asarray(pose[3:6], dtype=np.float64) - np.asarray(previous_pose[3:6], dtype=np.float64)))
+                if position_delta_mm <= self.stable_position_tolerance_mm and rotation_delta_deg <= self.stable_rotation_tolerance_deg:
+                    stable_since = time.monotonic() if stable_since is None else stable_since
+                    if time.monotonic() - stable_since >= self.stable_window_s:
+                        return pose
+                else:
+                    stable_since = None
+            previous_pose = pose
+            time.sleep(0.05)
+        raise RuntimeError(f"TCP did not become stable within {self.stable_timeout_s:.3f}s. Last pose: {last_pose!r}")
+
+    def _run_semi_auto_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+        del request
+        with self._semi_auto_lock:
+            if self._semi_auto_active:
+                response.success = False
+                response.message = "Semi-auto calibration is already running."
+                self._publish_status("semi_auto_failed", response.message, {"session_dir": str(self.session_dir) if self.session_dir else None})
+                return response
+            self._semi_auto_active = True
+        created_session = False
+        try:
+            if not self.trajectory_path.exists():
+                response.success = False
+                response.message = f"Trajectory YAML does not exist: {self.trajectory_path}. Record waypoints first."
+                self._publish_status("semi_auto_failed", response.message, {"session_dir": None})
+                return response
+            trajectory = load_trajectory(self.trajectory_path)
+            self._ensure_session_started(owner="semi_auto")
+            created_session = True
+            self._archive_current_trajectory()
+            self._append_run_log("semi_auto_started", {"trajectory_path": str(self.trajectory_path), "execute_motion": self.execute_motion, "waypoint_count": len(trajectory.waypoints)})
+            if not self.execute_motion:
+                for waypoint in trajectory.waypoints:
+                    self._publish_status("semi_auto_dry_run_waypoint", f"Dry-run waypoint {waypoint.name}.", {"waypoint": waypoint.to_payload(), "session_dir": str(self.session_dir)})
+                response.success = True
+                response.message = f"Dry-run complete for {len(trajectory.waypoints)} waypoints. No motion, capture, solve, or save was executed."
+                self._append_run_log("semi_auto_dry_run_complete", {"waypoint_count": len(trajectory.waypoints), "session_dir": str(self.session_dir)})
+                self._publish_status("semi_auto_dry_run_complete", response.message, {"session_dir": str(self.session_dir), "trajectory_path": str(self.trajectory_path)})
+                return response
+
+            captured_count = 0
+            for index, waypoint in enumerate(trajectory.waypoints, start=1):
+                if waypoint.motion != "movej":
+                    raise RuntimeError(f"Unsupported waypoint motion: {waypoint.motion}")
+                move_error = self.linux_client.move_j(
+                    waypoint.joint_deg,
+                    tool_id=trajectory.tool_id,
+                    user_id=trajectory.user_id,
+                    vel=waypoint.vel,
+                )
+                if move_error != 0:
+                    raise RuntimeError(f"MoveJ failed at {waypoint.name} with code {move_error}.")
+                stable_pose = self._wait_until_tcp_stable()
+                time.sleep(max(0.0, waypoint.dwell_s))
+                self._append_run_log("waypoint_reached", {"waypoint": waypoint.to_payload(), "stable_tcp_pose_mmdeg": stable_pose, "waypoint_index": index, "session_dir": str(self.session_dir)})
+                self._publish_status("semi_auto_waypoint_reached", f"Reached {waypoint.name}.", {"waypoint": waypoint.to_payload(), "session_dir": str(self.session_dir)})
+                if waypoint.capture:
+                    sample = self._capture_one_sample(owner="semi_auto")
+                    captured_count += 1
+                    self._publish_status(
+                        "sample_captured",
+                        f"Captured sample #{len(self.samples)}.",
+                        {
+                            "sample_quality": sample.sample_quality,
+                            "capture_timing": self._sample_to_log_record(sample),
+                            "sample_log_path": str(self.sample_log_path) if self.sample_log_path else None,
+                            "session_dir": str(self.session_dir),
+                        },
+                    )
+
+            solve_response = self._solve_callback(Trigger.Request(), Trigger.Response())
+            if not solve_response.success:
+                raise RuntimeError(solve_response.message)
+            self._save_current_solution()
+            response.success = True
+            response.message = f"Semi-auto calibration finished with {captured_count} captured samples."
+            self._append_run_log("semi_auto_finished", {"captured_count": captured_count, "session_dir": str(self.session_dir), "report_path": str(self.report_path) if self.report_path else None})
+            self._publish_status("semi_auto_finished", response.message, {"session_dir": str(self.session_dir), "report_path": str(self.report_path) if self.report_path else None})
+        except Exception as exc:
+            response.success = False
+            response.message = repr(exc)
+            if created_session:
+                self._append_run_log("semi_auto_failed", {"error": response.message, "session_dir": str(self.session_dir)})
+            self._publish_status("semi_auto_failed", response.message, {"session_dir": str(self.session_dir) if created_session else None})
+        finally:
+            with self._semi_auto_lock:
+                self._semi_auto_active = False
         return response
 
 
