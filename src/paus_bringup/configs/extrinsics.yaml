@@ -1,27 +1,28 @@
 extrinsic:
   base_to_camera:
     translation_m:
-    - 0.761260338470761
-    - 0.04848178323843233
-    - 0.47693582941676754
+    - 0.646752118077876
+    - 0.05317384415781412
+    - 0.6577259982108331
     rotation_matrix:
-    - - -0.981498503750259
-      - -0.1914692352175844
-      - 0.00046808246649713723
-    - - -0.18873293744484618
-      - 0.9670542040281542
-      - -0.17083923669612103
-    - - 0.03225779687830427
-      - -0.16776679777794762
-      - -0.9852988054919641
+    - - -0.9997872645234406
+      - -0.010407278105074844
+      - -0.017807702243110977
+    - - -0.011072743973727955
+      - 0.9992281939119234
+      - 0.03768833814866952
+    - - 0.0174017251336736
+      - 0.03787750062979062
+      - -0.9991308597518204
     rotation_quaternion_xyzw:
-    - -0.09584635845136572
-    - 0.9916969689968778
-    - -0.08536025748283162
-    - -0.008013968834643887
+    - -0.005371250237534012
+    - 0.9997682629223614
+    - 0.018895838561022695
+    - -0.00880439714946193
 calibration:
-  sample_count: 23
-  method: joint_absolute
+  sample_count: 16
+  method: ax_xb_park
+  observation_mode: depth_aligned
   tool_to_board:
     translation_m:
     - -0.13753006029001694
@@ -31,3 +32,45 @@ calibration:
     - 0.7349787492637659
     - 2.721616897607372
     - -10.06506436980651
+  residuals:
+    translation_rms_mm: 46.276187281089435
+    translation_mean_mm: 46.228299195236275
+    translation_max_mm: 49.06412627633003
+    rotation_rms_deg: 10.458543121262467
+    rotation_mean_deg: 10.45844087492446
+    rotation_max_deg: 10.539101819509831
+    sample_count: 16
+  session_diagnostics:
+    translation_z_mean_mm: 11.441031673998744
+    translation_z_max_mm: 27.439198604982533
+    board_normal_error_mean_deg: 3.035850282529281
+    board_normal_error_max_deg: 3.10137969962621
+    sample_quality_summary: &id001
+      observation_mode: depth_aligned
+      accepted_sample_count: 16
+      valid_corner_patch_ratio:
+        mean: 0.7940340909090909
+        min: 0.6363636363636364
+        max: 0.9090909090909091
+      plane_residual_std_mm_median:
+        mean: 0.08057966142155179
+        min: 0.05012356060921039
+        max: 0.14578586361772033
+      plane_residual_std_mm_p95:
+        mean: 0.28110378558046356
+        min: 0.17900172395447475
+        max: 0.4463052761902433
+      board_model_fit_rmse_mm:
+        mean: 1.7556321498838705
+        min: 0.09386681959043507
+        max: 2.9237098425862285
+      board_model_fit_max_mm:
+        mean: 3.0450071438507136
+        min: 0.26912387712898056
+        max: 4.977386883003773
+    solver_cross_check:
+      opencv_translation_rms_mm: 46.32640331407002
+      opencv_rotation_rms_deg: 10.458543121277172
+      ax_xb_vs_opencv_translation_mm: 0.46570645989846254
+      ax_xb_vs_opencv_rotation_deg: 1.8271553931657168e-05
+  sample_quality_summary: *id001

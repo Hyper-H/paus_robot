@@ -49,6 +49,14 @@ class EyeToHandCalibrationSolution:
     tool_to_board_rotation_rpy_deg: list[float]
     # 求解方法说明。
     method: str = "eye_to_hand_board_average"
+    # 观测模式。
+    observation_mode: str = "rgb_pnp"
+    # 会话级残差摘要。
+    residuals: CalibrationResidualSummary | None = None
+    # 会话级诊断字段。
+    session_diagnostics: dict[str, Any] | None = None
+    # 样本质量汇总。
+    sample_quality_summary: dict[str, Any] | None = None
 
 
 # 保存一组标定样本回代残差。
@@ -117,20 +125,20 @@ def rpy_deg_to_rotation_matrix(rpy_deg: list[float] | np.ndarray) -> np.ndarray:
     return rz @ ry @ rx
 
 
-# 将旋转矩阵转回固定轴 XYZ 欧拉角，单位为度。
+# 将旋转矩阵反解为欧拉角（度），顺序与 rpy_deg_to_rotation_matrix 保持一致。
 def rotation_matrix_to_rpy_deg(rotation_matrix: list[list[float]] | np.ndarray) -> list[float]:
     matrix = np.asarray(rotation_matrix, dtype=np.float64).reshape(3, 3)
-    sy = float(np.sqrt(matrix[0, 0] ** 2 + matrix[1, 0] ** 2))
-    singular = sy < 1e-9
-    if not singular:
-        roll = float(np.arctan2(matrix[2, 1], matrix[2, 2]))
-        pitch = float(np.arctan2(-matrix[2, 0], sy))
-        yaw = float(np.arctan2(matrix[1, 0], matrix[0, 0]))
+    pitch = np.arcsin(np.clip(-matrix[2, 0], -1.0, 1.0))
+    cos_pitch = float(np.cos(pitch))
+
+    if abs(cos_pitch) > 1e-9:
+        roll = np.arctan2(matrix[2, 1], matrix[2, 2])
+        yaw = np.arctan2(matrix[1, 0], matrix[0, 0])
     else:
-        roll = float(np.arctan2(-matrix[1, 2], matrix[1, 1]))
-        pitch = float(np.arctan2(-matrix[2, 0], sy))
-        yaw = 0.0
-    return [float(np.rad2deg(angle)) for angle in (roll, pitch, yaw)]
+        roll = 0.0
+        yaw = np.arctan2(-matrix[0, 1], matrix[1, 1])
+
+    return [float(np.rad2deg(roll)), float(np.rad2deg(pitch)), float(np.rad2deg(yaw))]
 
 
 # 将四元数转成旋转矩阵，输入顺序为 x y z w。
@@ -373,78 +381,6 @@ def solve_ax_xb_hand_eye_park(lhs_absolute_matrices: list[np.ndarray], rhs_absol
     return make_transform_matrix(translation, rotation)
 
 
-# 交替最小化 `base_to_tool * tool_to_board = base_to_camera * camera_to_board`，
-# 同时估计 `base_to_camera` 和 `tool_to_board`。
-def solve_eye_to_hand_joint_absolute(
-    base_to_tool_matrices: list[np.ndarray],
-    camera_to_board_matrices: list[np.ndarray],
-    initial_tool_to_board_matrix: np.ndarray | None = None,
-    iterations: int = 30,
-    tolerance: float = 1e-9,
-) -> tuple[np.ndarray, np.ndarray]:
-    if len(base_to_tool_matrices) != len(camera_to_board_matrices):
-        raise ValueError("Robot and board sample counts do not match.")
-    if len(base_to_tool_matrices) < 3:
-        raise ValueError("At least three samples are required for joint eye-to-hand solve.")
-
-    tool_to_board = (
-        np.asarray(initial_tool_to_board_matrix, dtype=np.float64).reshape(4, 4)
-        if initial_tool_to_board_matrix is not None
-        else np.eye(4, dtype=np.float64)
-    )
-    base_to_camera = np.eye(4, dtype=np.float64)
-
-    for _ in range(max(1, int(iterations))):
-        base_candidates = [
-            np.asarray(base_to_tool, dtype=np.float64).reshape(4, 4)
-            @ tool_to_board
-            @ invert_transform_matrix(np.asarray(camera_to_board, dtype=np.float64).reshape(4, 4))
-            for base_to_tool, camera_to_board in zip(base_to_tool_matrices, camera_to_board_matrices)
-        ]
-        updated_base_to_camera = average_transform_matrices(base_candidates)
-
-        updated_tool_rotation = average_rotation_matrices(
-            [
-                np.asarray(base_to_tool[:3, :3], dtype=np.float64).T
-                @ np.asarray(updated_base_to_camera[:3, :3], dtype=np.float64)
-                @ np.asarray(camera_to_board[:3, :3], dtype=np.float64)
-                for base_to_tool, camera_to_board in zip(base_to_tool_matrices, camera_to_board_matrices)
-            ]
-        )
-
-        lhs_blocks = []
-        rhs_blocks = []
-        updated_base_rotation = np.asarray(updated_base_to_camera[:3, :3], dtype=np.float64)
-        for base_to_tool_matrix, camera_to_board_matrix in zip(base_to_tool_matrices, camera_to_board_matrices):
-            base_rotation = np.asarray(base_to_tool_matrix[:3, :3], dtype=np.float64)
-            base_translation = np.asarray(base_to_tool_matrix[:3, 3], dtype=np.float64)
-            camera_translation = np.asarray(camera_to_board_matrix[:3, 3], dtype=np.float64)
-            lhs_blocks.append(np.concatenate((-np.eye(3, dtype=np.float64), base_rotation), axis=1))
-            rhs_blocks.append(updated_base_rotation @ camera_translation - base_translation)
-
-        lhs_stacked = np.concatenate(lhs_blocks, axis=0)
-        rhs_stacked = np.concatenate(rhs_blocks, axis=0)
-        stacked_solution, _, rank, _ = np.linalg.lstsq(lhs_stacked, rhs_stacked, rcond=None)
-        if rank < 6:
-            raise ValueError("Joint absolute-pose translation solve is rank deficient.")
-
-        updated_base_to_camera = make_transform_matrix(stacked_solution[:3], updated_base_rotation)
-        updated_tool_to_board = make_transform_matrix(stacked_solution[3:], updated_tool_rotation)
-
-        delta = max(
-            float(np.linalg.norm(updated_base_to_camera[:3, 3] - base_to_camera[:3, 3])),
-            float(np.linalg.norm(updated_tool_to_board[:3, 3] - tool_to_board[:3, 3])),
-            float(np.linalg.norm(updated_base_to_camera[:3, :3] - base_to_camera[:3, :3])),
-            float(np.linalg.norm(updated_tool_to_board[:3, :3] - tool_to_board[:3, :3])),
-        )
-        base_to_camera = updated_base_to_camera
-        tool_to_board = updated_tool_to_board
-        if delta <= tolerance:
-            break
-
-    return base_to_camera, tool_to_board
-
-
 # 保存 eye-to-hand 标定结果到 YAML。
 def save_eye_to_hand_solution(solution: EyeToHandCalibrationSolution, output_path: str | Path) -> None:
     output_path = Path(output_path)
@@ -460,12 +396,27 @@ def save_eye_to_hand_solution(solution: EyeToHandCalibrationSolution, output_pat
         "calibration": {
             "sample_count": solution.sample_count,
             "method": solution.method,
+            "observation_mode": solution.observation_mode,
             "tool_to_board": {
                 "translation_m": solution.tool_to_board_translation_m,
                 "rotation_rpy_deg": solution.tool_to_board_rotation_rpy_deg,
             },
         },
     }
+    if solution.residuals is not None:
+        payload["calibration"]["residuals"] = {
+            "translation_rms_mm": solution.residuals.translation_rms_mm,
+            "translation_mean_mm": solution.residuals.translation_mean_mm,
+            "translation_max_mm": solution.residuals.translation_max_mm,
+            "rotation_rms_deg": solution.residuals.rotation_rms_deg,
+            "rotation_mean_deg": solution.residuals.rotation_mean_deg,
+            "rotation_max_deg": solution.residuals.rotation_max_deg,
+            "sample_count": solution.residuals.sample_count,
+        }
+    if solution.session_diagnostics is not None:
+        payload["calibration"]["session_diagnostics"] = solution.session_diagnostics
+    if solution.sample_quality_summary is not None:
+        payload["calibration"]["sample_quality_summary"] = solution.sample_quality_summary
     with output_path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(payload, handle, sort_keys=False, allow_unicode=True)
 
@@ -496,4 +447,8 @@ def load_eye_to_hand_solution(input_path: str | Path) -> EyeToHandCalibrationSol
         tool_to_board_translation_m=[float(value) for value in tool_to_board_payload.get("translation_m", [0.0, 0.0, 0.0])],
         tool_to_board_rotation_rpy_deg=[float(value) for value in tool_to_board_payload.get("rotation_rpy_deg", [0.0, 0.0, 0.0])],
         method=str(calibration_payload.get("method", "eye_to_hand_board_average")),
+        observation_mode=str(calibration_payload.get("observation_mode", "rgb_pnp")),
+        residuals=CalibrationResidualSummary(**calibration_payload["residuals"]) if "residuals" in calibration_payload else None,
+        session_diagnostics=dict(calibration_payload.get("session_diagnostics", {})) if calibration_payload.get("session_diagnostics") is not None else None,
+        sample_quality_summary=dict(calibration_payload.get("sample_quality_summary", {})) if calibration_payload.get("sample_quality_summary") is not None else None,
     )
