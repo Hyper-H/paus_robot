@@ -45,8 +45,6 @@ class TargetTransformNode(Node):
 
         transform_cfg = self.config["transform"]
         self.max_target_distance_mm = float(transform_cfg.get("max_target_distance_mm", 1500.0))
-        self.max_target_jump_mm = float(transform_cfg.get("max_target_jump_mm", 250.0))
-        self.last_valid_target_translation_mm: np.ndarray | None = None
 
         self.status_publisher = self.create_publisher(String, status_topic, 10)
         self.target_pose_publisher = self.create_publisher(PoseStamped, target_pose_topic, 10)
@@ -78,10 +76,6 @@ class TargetTransformNode(Node):
         target_distance_mm = float(np.linalg.norm(translation_mm))
         if target_distance_mm > self.max_target_distance_mm:
             return False, f"target_distance_above_max:{target_distance_mm:.1f}mm"
-        if self.last_valid_target_translation_mm is not None:
-            jump_mm = float(np.linalg.norm(translation_mm - self.last_valid_target_translation_mm))
-            if jump_mm > self.max_target_jump_mm:
-                return False, f"target_jump_above_max:{jump_mm:.1f}mm"
         return True, ""
 
     def _marker_pose_callback(self, message: PoseStamped) -> None:
@@ -116,12 +110,10 @@ class TargetTransformNode(Node):
                 {
                     "target_point_base_mm": [float(value) for value in translation_mm.tolist()],
                     "max_target_distance_mm": self.max_target_distance_mm,
-                    "max_target_jump_mm": self.max_target_jump_mm,
                 },
             )
             return
 
-        self.last_valid_target_translation_mm = translation_mm.copy()
         transform = make_transform_struct(translation_m, rotation, "robot_base", "target_region")
 
         pose_message = PoseStamped()
