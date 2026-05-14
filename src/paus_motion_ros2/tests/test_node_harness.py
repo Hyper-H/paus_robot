@@ -68,6 +68,8 @@ def _test_config(*args, **kwargs):
             "workspace_max_mm": [1000.0, 1000.0, 1000.0],
             "repeat_distance_threshold_mm": 5.0,
             "stage_switch_buffer_mm": 10.0,
+            "max_marker_displacement_before_relatch_mm": 200.0,
+            "debug_reset_after_success": False,
             "use_mock_pose": True,
             "mock_current_tcp_pose_mmdeg": [500.0, 0.0, 300.0, 180.0, 0.0, -180.0],
             "repeat_orientation_threshold_deg": 2.0,
@@ -158,6 +160,7 @@ from paus_motion_ros2.fairino_control_node import (
     TRACKING_SUCCEEDED_VISIBLE,
     TRACKING_SUCCEEDED_AFTER_OCCLUSION,
     REASON_NO_VALID_TARGET,
+    REASON_REACHED_VISIBLE,
     REASON_TARGET_LOST_TIMEOUT,
 )
 
@@ -215,9 +218,34 @@ class RealNodeTargetLossTests(unittest.TestCase):
         self.node.last_timer_publish_signature = None
         self.node.last_tracking_state = TRACKING_IDLE
         self.node.last_completion_reason = REASON_NO_VALID_TARGET
+        self.node.tracking_episode_completed = False
+        self.node.completed_tracking_state = None
+        self.node.completed_target_point_base_m = None
+        self.node.completed_final_hover_pose_mmdeg = None
+        self.node.debug_reset_after_success = False
+        self.node._consecutive_valid_count = 0
+        self.node._last_cold_start_target_m = None
+        self.node.last_status_fields = {
+            "target_point_base_m": None,
+            "target_point_base_mm": None,
+            "target_pose_base_mmdeg": None,
+            "raw_target_pose_base_mmdeg": None,
+            "current_tcp_pose_mmdeg": None,
+            "surface_normal_base": None,
+            "final_hover_pose_mmdeg": None,
+            "pre_approach_pose_mmdeg": None,
+            "candidate_pose_mmdeg": None,
+            "candidate_stage": None,
+            "motion_command": None,
+            "step_distance_mm": None,
+            "clearance_to_plane_mm": None,
+        }
         self.node._published_events.clear()
         self.node._published_states.clear()
         type(self)._target_age_ms_value[0] = None
+        self.node._compute_completion_metrics.return_value = (100.0, 30.0)
+        self.node._completion_reached.return_value = False
+        self.node._completion_allowed.return_value = True
         self.node._marker_visibility_status.return_value = "ok"
         self.node._transform_validity_status.return_value = "ok"
 
@@ -428,6 +456,226 @@ class RealNodeTargetLossTests(unittest.TestCase):
         self.node.stage_latch = FINAL_HOVER_STAGE
         self.node._update_stage_latch(SAFE_LIFT_STAGE)
         self.assertIsNone(self.node.stage_latch)
+
+    def test_success_timer_marks_tracking_episode_completed(self):
+        self.node.last_valid_target_time = _make_ros_time(0)
+        self.node.last_valid_target_point_base_m = [0.5, 0.0, 0.2]
+        self.node.last_valid_target_pose_base_mmdeg = [500.0, 0.0, 200.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_final_hover_pose_mmdeg = [500.0, 0.0, 230.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_surface_normal_base = [0.0, 0.0, 1.0]
+        self.node._compute_completion_metrics.return_value = (0.0, 0.0)
+        self.node._completion_reached.return_value = True
+
+        self.node._status_timer_callback()
+
+        self.assertTrue(self.node.tracking_episode_completed)
+        self.assertEqual(self.node.completed_tracking_state, TRACKING_SUCCEEDED_VISIBLE)
+        self.assertEqual(self.node.completed_target_point_base_m, [0.5, 0.0, 0.2])
+
+    def test_completed_episode_holds_by_default_without_tcp_read(self):
+        self.node.tracking_episode_completed = True
+        self.node.completed_tracking_state = TRACKING_SUCCEEDED_VISIBLE
+        self.node.completed_target_point_base_m = [0.5, 0.0, 0.2]
+        self.node.last_tracking_state = TRACKING_SUCCEEDED_VISIBLE
+        self.node.last_completion_reason = REASON_REACHED_VISIBLE
+        self.node.last_valid_target_time = _make_ros_time(0)
+        self.node.last_valid_target_point_base_m = [0.5, 0.0, 0.2]
+        self.node.last_valid_target_pose_base_mmdeg = [500.0, 0.0, 200.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_final_hover_pose_mmdeg = [500.0, 0.0, 230.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_surface_normal_base = [0.0, 0.0, 1.0]
+        self.node.last_status_fields["current_tcp_pose_mmdeg"] = [500.0, 0.0, 230.0, 180.0, 0.0, -180.0]
+        self.node._get_current_tcp_pose_mmdeg.reset_mock()
+
+        self.node._target_callback(_make_pose_stamped(0.85, 0.0, 0.2))
+
+        self.node._get_current_tcp_pose_mmdeg.assert_not_called()
+        self.assertIn("control_hold_after_success", self.node._published_events)
+        self.assertTrue(self.node.tracking_episode_completed)
+
+    def test_debug_false_large_displacement_still_holds_completed_episode(self):
+        self.node.debug_reset_after_success = False
+        self.node.tracking_episode_completed = True
+        self.node.completed_tracking_state = TRACKING_SUCCEEDED_VISIBLE
+        self.node.completed_target_point_base_m = [0.5, 0.0, 0.2]
+        self.node.last_tracking_state = TRACKING_SUCCEEDED_VISIBLE
+        self.node.last_completion_reason = REASON_REACHED_VISIBLE
+        self.node.last_valid_target_time = _make_ros_time(0)
+        self.node.last_valid_target_pose_base_mmdeg = [500.0, 0.0, 200.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_final_hover_pose_mmdeg = [500.0, 0.0, 230.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_surface_normal_base = [0.0, 0.0, 1.0]
+
+        self.node._target_callback(_make_pose_stamped(0.85, 0.0, 0.2))
+
+        self.assertTrue(self.node.tracking_episode_completed)
+        self.assertIn("control_hold_after_success", self.node._published_events)
+
+    def test_debug_true_large_displacement_resets_completed_episode(self):
+        self.node.debug_reset_after_success = True
+        self.node.tracking_episode_completed = True
+        self.node.completed_tracking_state = TRACKING_SUCCEEDED_VISIBLE
+        self.node.completed_target_point_base_m = [0.5, 0.0, 0.2]
+        self.node.stage_latch = FINAL_HOVER_STAGE
+        self.node.last_executed_candidate_pose_mmdeg = [500.0, 0.0, 230.0, 180.0, 0.0, -180.0]
+        self.node.last_executed_stage = FINAL_HOVER_STAGE
+        self.node.last_valid_target_time = _make_ros_time(0)
+        self.node.last_valid_target_point_base_m = [0.5, 0.0, 0.2]
+        self.node.last_valid_target_pose_base_mmdeg = [500.0, 0.0, 200.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_final_hover_pose_mmdeg = [500.0, 0.0, 230.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_surface_normal_base = [0.0, 0.0, 1.0]
+
+        self.node._target_callback(_make_pose_stamped(0.85, 0.0, 0.2))
+
+        self.assertFalse(self.node.tracking_episode_completed)
+        self.assertIsNone(self.node.completed_tracking_state)
+        self.assertNotIn("control_hold_after_success", self.node._published_events)
+        self.assertIsNone(self.node.stage_latch)
+
+
+class RealNodeDisplacementRelatchTests(unittest.TestCase):
+    """Large marker displacement clears the stage latch so the pipeline
+    re-approaches from scratch."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.node = FairinoControlNode()
+        cls.node.execute_motion = False
+        cls.node.motion_in_progress = False
+        cls.node._get_current_tcp_pose_mmdeg = mock.MagicMock(
+            return_value=[500.0, 0.0, 300.0, 180.0, 0.0, -180.0]
+        )
+        cls.node._safe_get_current_tcp_pose_mmdeg = mock.MagicMock(
+            return_value=[500.0, 0.0, 300.0, 180.0, 0.0, -180.0]
+        )
+        cls.node._compute_completion_metrics = mock.MagicMock(
+            return_value=(100.0, 30.0)
+        )
+        cls.node._completion_reached = mock.MagicMock(return_value=False)
+        cls.node._completion_allowed = mock.MagicMock(return_value=True)
+        cls.node._marker_visibility_status = mock.MagicMock(return_value="ok")
+        cls.node._transform_validity_status = mock.MagicMock(return_value="ok")
+        cls.node._motion_command_for_stage = mock.MagicMock(return_value="MoveL")
+        cls.node._stage_allowed = mock.MagicMock(return_value=True)
+
+    def setUp(self):
+        self.node.stage_latch = None
+        self.node.last_valid_target_time = None
+        self.node.last_valid_target_pose_base_mmdeg = None
+        self.node.last_valid_final_hover_pose_mmdeg = None
+        self.node.last_valid_surface_normal_base = None
+        self.node.last_valid_target_point_base_m = None
+        self.node.last_executed_candidate_pose_mmdeg = None
+        self.node.last_executed_stage = None
+        self.node.last_tracking_state = TRACKING_IDLE
+        self.node.last_completion_reason = REASON_NO_VALID_TARGET
+        self.node.tracking_episode_completed = False
+        self.node.completed_tracking_state = None
+        self.node.completed_target_point_base_m = None
+        self.node.completed_final_hover_pose_mmdeg = None
+        self.node.debug_reset_after_success = False
+        self.node._consecutive_valid_count = 0
+        self.node._last_cold_start_target_m = None
+        self.node.last_status_fields = {
+            "target_point_base_m": None,
+            "target_point_base_mm": None,
+            "target_pose_base_mmdeg": None,
+            "raw_target_pose_base_mmdeg": None,
+            "current_tcp_pose_mmdeg": None,
+            "surface_normal_base": None,
+            "final_hover_pose_mmdeg": None,
+            "pre_approach_pose_mmdeg": None,
+            "candidate_pose_mmdeg": None,
+            "candidate_stage": None,
+            "motion_command": None,
+            "step_distance_mm": None,
+            "clearance_to_plane_mm": None,
+        }
+        self.node._compute_completion_metrics.return_value = (100.0, 30.0)
+        self.node._completion_reached.return_value = False
+        self.node._completion_allowed.return_value = True
+        self.node._marker_visibility_status.return_value = "ok"
+        self.node._transform_validity_status.return_value = "ok"
+
+    def test_large_displacement_clears_latch(self):
+        self.node.stage_latch = FINAL_HOVER_STAGE
+        self.node.last_valid_target_point_base_m = [0.5, 0.0, 0.2]
+        self.node.last_valid_target_pose_base_mmdeg = [500.0, 0.0, 230.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_final_hover_pose_mmdeg = [500.0, 0.0, 230.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_surface_normal_base = [0.0, 0.0, 1.0]
+        self.node.last_valid_target_time = _make_ros_time(0)
+
+        # Marker at [0.8, 0.0, 0.2] -> displacement = 300 mm > 200 mm threshold
+        msg = _make_pose_stamped(0.8, 0.0, 0.2)
+        self.node._target_callback(msg)
+
+        self.assertIsNone(self.node.stage_latch)
+
+    def test_small_displacement_preserves_latch(self):
+        self.node.stage_latch = FINAL_HOVER_STAGE
+        self.node.last_valid_target_point_base_m = [0.5, 0.0, 0.2]
+        self.node.last_valid_target_pose_base_mmdeg = [500.0, 0.0, 230.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_final_hover_pose_mmdeg = [500.0, 0.0, 230.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_surface_normal_base = [0.0, 0.0, 1.0]
+        self.node.last_valid_target_time = _make_ros_time(0)
+
+        # Marker at [0.55, 0.0, 0.2] -> displacement = 50 mm < 200 mm threshold
+        msg = _make_pose_stamped(0.55, 0.0, 0.2)
+        self.node._target_callback(msg)
+
+        self.assertEqual(self.node.stage_latch, FINAL_HOVER_STAGE)
+
+    def test_no_latch_skips_displacement_check(self):
+        self.node.stage_latch = None
+        self.node.last_valid_target_point_base_m = [0.5, 0.0, 0.2]
+
+        msg = _make_pose_stamped(0.8, 0.0, 0.2)
+        self.node._target_callback(msg)
+
+        self.assertIsNone(self.node.stage_latch)
+
+    def test_no_cached_position_skips_displacement_check(self):
+        self.node.stage_latch = FINAL_HOVER_STAGE
+        self.node.last_valid_target_point_base_m = None
+        self.node.last_valid_target_pose_base_mmdeg = [500.0, 0.0, 230.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_final_hover_pose_mmdeg = [500.0, 0.0, 230.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_surface_normal_base = [0.0, 0.0, 1.0]
+        self.node.last_valid_target_time = _make_ros_time(0)
+
+        msg = _make_pose_stamped(0.8, 0.0, 0.2)
+        self.node._target_callback(msg)
+
+        self.assertEqual(self.node.stage_latch, FINAL_HOVER_STAGE)
+
+    def test_displacement_at_boundary_below_threshold_preserves_latch(self):
+        self.node.stage_latch = FINAL_HOVER_STAGE
+        self.node.last_valid_target_point_base_m = [0.5, 0.0, 0.2]
+        self.node.last_valid_target_pose_base_mmdeg = [500.0, 0.0, 230.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_final_hover_pose_mmdeg = [500.0, 0.0, 230.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_surface_normal_base = [0.0, 0.0, 1.0]
+        self.node.last_valid_target_time = _make_ros_time(0)
+
+        # Marker at [0.7, 0.0, 0.2] -> displacement = 200 mm == threshold (not greater)
+        msg = _make_pose_stamped(0.7, 0.0, 0.2)
+        self.node._target_callback(msg)
+
+        self.assertEqual(self.node.stage_latch, FINAL_HOVER_STAGE)
+
+    def test_displacement_clears_then_next_frame_recomputes_stage(self):
+        self.node.stage_latch = FINAL_HOVER_STAGE
+        self.node.last_valid_target_point_base_m = [0.5, 0.0, 0.2]
+        self.node.last_valid_target_pose_base_mmdeg = [500.0, 0.0, 230.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_final_hover_pose_mmdeg = [500.0, 0.0, 230.0, 180.0, 0.0, -180.0]
+        self.node.last_valid_surface_normal_base = [0.0, 0.0, 1.0]
+        self.node.last_valid_target_time = _make_ros_time(0)
+
+        # Large displacement clears latch
+        msg = _make_pose_stamped(0.8, 0.0, 0.2)
+        self.node._target_callback(msg)
+        self.assertIsNone(self.node.stage_latch)
+
+        # Next frame: since latch is None, geometry decides stage freely
+        candidate = self.node.last_status_fields.get("candidate_stage")
+        # With latch cleared, the geometry engine should not be constrained
+        self.assertIsNotNone(candidate)
 
 
 class RealNodeInitializationTests(unittest.TestCase):
