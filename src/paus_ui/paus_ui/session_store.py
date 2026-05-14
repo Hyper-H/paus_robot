@@ -7,8 +7,10 @@ from typing import Any
 
 import yaml
 
+import numpy as np
+
 from paus_marker_ros2.semi_auto_calibration import TrajectoryValidationError, load_trajectory
-from paus_perception import rotation_matrix_to_rpy_deg
+from paus_perception import make_transform_matrix, rotation_matrix_to_rpy_deg, rpy_deg_to_rotation_matrix
 
 from .operator_messages import classify_operator_message
 
@@ -91,7 +93,9 @@ class SessionStore:
         shaped = dict(report)
         report_samples = shaped.get("samples")
         if isinstance(report_samples, list):
-            shaped["samples"] = [self._normalize_sample_record(sample) for sample in report_samples if isinstance(sample, dict)]
+            shaped["samples"] = [
+                self._normalize_sample_fields(s) for s in report_samples if isinstance(s, dict)
+            ]
         shaped.update(
             {
                 "session_id": session_id,
@@ -120,7 +124,6 @@ class SessionStore:
             report_samples = self._read_yaml(session_path / "report.yaml").get("samples", [])
             if isinstance(report_samples, list):
                 samples = [item for item in report_samples if isinstance(item, dict)]
-        samples = [self._normalize_sample_record(sample) for sample in samples]
         for index, sample in enumerate(samples, start=1):
             sample["row_index"] = index
             image_path = sample.get("image_path")
@@ -141,6 +144,42 @@ class SessionStore:
             sample["thresholds"] = self._quality_flags(sample.get("reprojection_error_px"), sample.get("board_margin_px"))
         return samples
 
+    def per_sample_residuals(self, session_id: str) -> list[dict[str, Any]]:
+        session_path = self._session_path(session_id)
+        report = self._read_yaml(session_path / "report.yaml")
+        base_to_camera = report.get("base_to_camera")
+        tool_to_board_cfg = report.get("tool_to_board")
+        if not base_to_camera or not tool_to_board_cfg:
+            return []
+        if isinstance(base_to_camera, dict):
+            base_to_camera_matrix = _matrix_from_dict(base_to_camera)
+        else:
+            base_to_camera_matrix = _parse_4x4(base_to_camera)
+        tool_to_board_matrix = _build_4x4_from_transform(tool_to_board_cfg)
+        if base_to_camera_matrix is None or tool_to_board_matrix is None:
+            return []
+        samples = self.read_samples(session_id)
+        result: list[dict[str, Any]] = []
+        for sample in samples:
+            base_to_tool = _parse_4x4(sample.get("base_to_tool_matrix"))
+            camera_to_board = _parse_4x4(sample.get("camera_to_board_matrix"))
+            if base_to_tool is None or camera_to_board is None:
+                result.append({"row_index": sample.get("row_index"), "error": "Missing matrix data"})
+                continue
+            measured_board = base_to_tool @ tool_to_board_matrix
+            estimated_board = base_to_camera_matrix @ camera_to_board
+            t_residual_mm = float(np.linalg.norm(estimated_board[:3, 3] - measured_board[:3, 3]) * 1000.0)
+            R_diff = estimated_board[:3, :3] @ measured_board[:3, :3].T
+            trace_val = float(np.clip((np.trace(R_diff) - 1.0) / 2.0, -1.0, 1.0))
+            r_residual_deg = float(np.degrees(np.arccos(trace_val)))
+            result.append({
+                "row_index": sample.get("row_index"),
+                "name": sample.get("waypoint_name", ""),
+                "translation_residual_mm": round(t_residual_mm, 3),
+                "rotation_residual_deg": round(r_residual_deg, 4),
+            })
+        return result
+
     def sample_for_row(self, session_id: str, row_index: int) -> dict[str, Any] | None:
         samples = self.read_samples(session_id)
         if row_index < 1 or row_index > len(samples):
@@ -154,7 +193,12 @@ class SessionStore:
         session_path = self._session_path(session_id)
         trajectory = self._read_waypoints_from_path(self._trajectory_path_for_session(session_path))
         samples = self.read_samples(session_id)
-        events = self.read_run_events(session_id)
+        sample_residuals = self.per_sample_residuals(session_id)
+        residuals_by_row: dict[int, dict[str, Any]] = {}
+        for res in sample_residuals:
+            row_index = res.get("row_index")
+            if row_index is not None:
+                residuals_by_row[row_index] = res
         samples_by_index: dict[int, dict[str, Any]] = {}
         for sample in samples:
             for key in ("sample_index", "row_index"):
@@ -183,6 +227,7 @@ class SessionStore:
                 board_margin_px=record_quality.get("board_margin_px"),
             )
 
+        events = self.read_run_events(session_id)
         for event in events:
             waypoint = event.get("waypoint")
             waypoint_name = event.get("waypoint_name")
@@ -237,6 +282,8 @@ class SessionStore:
                 except (TypeError, ValueError):
                     event_sample_index = None
                 sample = samples_by_index.get(event_sample_index) if event_sample_index is not None else None
+                sample_row = sample.get("row_index") if sample else None
+                residuals = residuals_by_row.get(sample_row, {}) if sample_row else {}
                 record.update(
                     self._waypoint_record(
                         session_id=session_id,
@@ -250,6 +297,7 @@ class SessionStore:
                         event_sample_index=event_sample_index,
                         reprojection_error_px=_first_present(sample, event, "reprojection_error_px"),
                         board_margin_px=_first_present(sample, event, "board_margin_px"),
+                        residuals=residuals,
                     )
                 )
             elif event_name in {"waypoint_motion_started", "waypoint_reached", "waypoint_capture_started"} and record.get("status") == "pending":
@@ -261,6 +309,8 @@ class SessionStore:
                 name = str(record.get("name", ""))
                 if not name:
                     continue
+                sample_row = sample.get("row_index") if sample else None
+                residuals = residuals_by_row.get(sample_row, {}) if sample_row else {}
                 record.update(
                     self._waypoint_record(
                         session_id=session_id,
@@ -274,6 +324,7 @@ class SessionStore:
                         event_sample_index=sample.get("row_index") or sample.get("sample_index"),
                         reprojection_error_px=sample.get("reprojection_error_px"),
                         board_margin_px=sample.get("board_margin_px"),
+                        residuals=residuals,
                     )
                 )
 
@@ -331,6 +382,7 @@ class SessionStore:
         event_sample_index: int | None = None,
         reprojection_error_px: Any = None,
         board_margin_px: Any = None,
+        residuals: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         reason_info = classify_operator_message(reason) if reason else {"code": None, "message": "", "raw": "", "clean": ""}
         row_index = sample.get("row_index") if sample else event_sample_index
@@ -363,10 +415,12 @@ class SessionStore:
             "tcp_pose_mmdeg": sample.get("tcp_pose_mmdeg") if sample else None,
             "image_sequence": sample.get("image_sequence") if sample else None,
             "capture_time_s": sample.get("capture_time_s") if sample else None,
+            "translation_residual_mm": residuals.get("translation_residual_mm") if residuals else None,
+            "rotation_residual_deg": residuals.get("rotation_residual_deg") if residuals else None,
         }
 
     def _counts_for_session(self, *, path: Path, report: dict[str, Any], samples: list[dict[str, Any]], events: list[dict[str, Any]]) -> dict[str, int]:
-        accepted = sum(1 for event in events if event.get("event") in {"waypoint_sample_captured", "sample_captured"})
+        accepted = sum(1 for event in events if event.get("event") == "waypoint_sample_captured")
         skipped = sum(1 for event in events if event.get("event") in {"waypoint_capture_skipped", "waypoint_capture_disabled", "waypoint_dry_run_complete"})
         if not accepted:
             accepted = int(report.get("sample_count", 0) or len(samples))
@@ -440,6 +494,13 @@ class SessionStore:
             )
         return rows
 
+    def _normalize_sample_fields(self, sample: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(sample)
+        normalized["camera_to_board_translation_m"] = normalized.get("camera_to_board_translation_m") or _matrix_translation(normalized.get("camera_to_board_matrix"))
+        normalized["camera_to_board_rotation_rpy_deg"] = normalized.get("camera_to_board_rotation_rpy_deg") or _matrix_rotation_rpy_deg(normalized.get("camera_to_board_matrix"))
+        normalized["board_angle_deg"] = normalized.get("board_angle_deg") if normalized.get("board_angle_deg") is not None else _matrix_board_angle_deg(normalized.get("camera_to_board_matrix"))
+        return normalized
+
     def _session_path(self, session_id: str) -> Path:
         if "/" in session_id or "\\" in session_id or session_id in {"", ".", ".."}:
             raise ValueError(f"Invalid session id: {session_id!r}")
@@ -479,13 +540,6 @@ class SessionStore:
 
     def _read_samples_without_report_fallback(self, session_path: Path) -> list[dict[str, Any]]:
         return self._read_jsonl(session_path / "samples.jsonl")
-
-    def _normalize_sample_record(self, sample: dict[str, Any]) -> dict[str, Any]:
-        normalized = dict(sample)
-        normalized["camera_to_board_translation_m"] = normalized.get("camera_to_board_translation_m") or _matrix_translation(normalized.get("camera_to_board_matrix"))
-        normalized["camera_to_board_rotation_rpy_deg"] = normalized.get("camera_to_board_rotation_rpy_deg") or _matrix_rotation_rpy_deg(normalized.get("camera_to_board_matrix"))
-        normalized["board_angle_deg"] = normalized.get("board_angle_deg") if normalized.get("board_angle_deg") is not None else _matrix_board_angle_deg(normalized.get("camera_to_board_matrix"))
-        return normalized
 
 
 def _first_present(primary: dict[str, Any] | None, fallback: dict[str, Any], key: str) -> Any:
@@ -529,4 +583,67 @@ def _to_float(value: Any) -> float | None:
             return None
         return float(value)
     except (TypeError, ValueError):
+        return None
+
+
+def _parse_4x4(matrix: Any) -> np.ndarray | None:
+    if matrix is None:
+        return None
+    try:
+        mat = np.array(matrix, dtype=np.float64)
+        if mat.shape == (4, 4):
+            return mat
+        return None
+    except (ValueError, TypeError):
+        return None
+
+
+def _build_4x4_from_transform(transform: dict[str, Any]) -> np.ndarray | None:
+    """Build a 4x4 homogeneous matrix from translation_m and rotation_rpy_deg using paus_perception conventions."""
+    translation = transform.get("translation_m")
+    rotation_rpy = transform.get("rotation_rpy_deg")
+    if not translation or not rotation_rpy:
+        return None
+    try:
+        t = np.array(translation, dtype=np.float64).reshape(3)
+        rpy_deg = np.array(rotation_rpy, dtype=np.float64)
+        if rpy_deg.shape != (3,):
+            return None
+        R = np.array(rpy_deg_to_rotation_matrix(rpy_deg.tolist()), dtype=np.float64)
+        return np.array(make_transform_matrix(t.tolist(), R.tolist()), dtype=np.float64)
+    except (ValueError, TypeError, IndexError, np.linalg.LinAlgError):
+        return None
+
+
+def _matrix_from_dict(d: dict[str, Any]) -> np.ndarray | None:
+    """Build a 4x4 matrix from {translation_m, rotation_matrix} or {translation_m, rotation_rpy_deg}."""
+    translation = d.get("translation_m")
+    if not translation:
+        return None
+    rotation_matrix = d.get("rotation_matrix")
+    if rotation_matrix is not None:
+        try:
+            R = np.array(rotation_matrix, dtype=np.float64)
+            if R.shape != (3, 3):
+                return None
+        except (ValueError, TypeError):
+            return None
+    else:
+        rotation_rpy = d.get("rotation_rpy_deg")
+        if not rotation_rpy:
+            return None
+        try:
+            rpy_deg = np.array(rotation_rpy, dtype=np.float64)
+            if rpy_deg.shape != (3,):
+                return None
+            R = np.array(rpy_deg_to_rotation_matrix(rpy_deg.tolist()), dtype=np.float64)
+        except (ValueError, TypeError, IndexError):
+            return None
+    try:
+        t = np.array(translation, dtype=np.float64).reshape(3)
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = R
+        T[:3, 3] = t
+        return T
+    except (ValueError, TypeError):
         return None

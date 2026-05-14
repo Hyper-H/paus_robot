@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PAUS Robot UI</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260506" />
   </head>
   <body>
     <div class="app-shell">
@@ -62,22 +62,15 @@
         <section class="dashboard">
           <section class="panel live-panel">
             <div class="panel-header compact">
-              <div class="segmented">
-                <button class="seg-button" data-image-mode="raw" type="button">原图</button>
-                <button class="seg-button active" data-image-mode="overlay" type="button">Overlay</button>
-                <button class="seg-button" data-image-mode="pose" type="button">Pose</button>
+              <div>
+                <h2>实时图像</h2>
+                <p>/camera/image_bridge raw</p>
               </div>
-              <label class="axis-toggle"><input id="axis-toggle" type="checkbox" checked /> 坐标轴</label>
+              <span id="image-chip" class="chip neutral">图像 --</span>
             </div>
             <div class="image-stage">
-              <img id="live-image" src="/api/image/latest.jpg?mode=overlay" alt="latest camera frame" />
+              <img id="live-image" src="/api/image/latest.jpg?mode=raw" alt="latest camera frame" />
               <div id="live-empty" class="stage-empty hidden">等待相机图像</div>
-              <div class="image-tools">
-                <button class="icon-button" type="button" title="截图">▣</button>
-                <button class="icon-button" type="button" title="放大">＋</button>
-                <button class="icon-button" type="button" title="缩小">－</button>
-                <button class="icon-button" type="button" title="全屏">⛶</button>
-              </div>
             </div>
             <div class="metric-row" id="quality-metrics"></div>
           </section>
@@ -132,6 +125,8 @@
                     <th>reprojection_error_px</th>
                     <th>margin (px)</th>
                     <th>T_camera_board z (m)</th>
+                    <th>trans resid (mm)</th>
+                    <th>rot resid (deg)</th>
                     <th>capture</th>
                     <th>reason</th>
                     <th>thumbnail</th>
@@ -150,9 +145,8 @@
                 <p id="preview-subtitle">选择 waypoint 查看图像和质量指标</p>
               </div>
               <div class="segmented">
-                <button class="seg-button" data-preview-mode="raw" type="button">原图</button>
-                <button class="seg-button active" data-preview-mode="overlay" type="button">overlay</button>
-                <button class="seg-button" data-preview-mode="pose" type="button">pose</button>
+                <button class="seg-button active" data-preview-mode="raw" type="button">原图</button>
+                <button class="seg-button" data-preview-mode="details" type="button">详细信息</button>
               </div>
             </div>
             <div class="preview-stage">
@@ -193,6 +187,13 @@
         </section>
       </main>
     </div>
-    <script src="/static/app.js"></script>
+    <div id="complete-modal" class="modal-overlay hidden">
+      <div class="modal-card">
+        <h2 id="modal-title">标定完成</h2>
+        <div id="modal-body" class="modal-body"></div>
+        <button id="modal-close" class="action primary" type="button">关闭</button>
+      </div>
+    </div>
+    <script src="/static/app.js?v=20260506"></script>
   </body>
 </html>
