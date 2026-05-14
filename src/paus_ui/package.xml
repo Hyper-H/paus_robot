@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>paus_ui</name>
+  <version>0.1.0</version>
+  <description>Web UI console for PAUS Robot vision workflows.</description>
+  <maintainer email="local@example.com">Local User</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>ament_index_python</depend>
+  <depend>cv_bridge</depend>
+  <depend>paus_marker_ros2</depend>
+  <depend>paus_perception</depend>
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-fastapi</exec_depend>
+  <exec_depend>python3-uvicorn</exec_depend>
+  <exec_depend>python3-websockets</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

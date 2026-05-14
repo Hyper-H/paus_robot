@@ -24,6 +24,7 @@ setup(
             "image_receiver_node = paus_marker_ros2.image_receiver_node:main",
             "marker_pose_node = paus_marker_ros2.marker_pose_node:main",
             "eye_to_hand_calibration_node = paus_marker_ros2.eye_to_hand_calibration_node:main",
+            "eye_to_hand_semi_auto = paus_marker_ros2.eye_to_hand_semi_auto_cli:main",
             "target_transform_node = paus_marker_ros2.target_transform_node:main",
         ],
     },

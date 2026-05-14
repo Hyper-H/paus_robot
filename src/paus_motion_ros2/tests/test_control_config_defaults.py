@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import os
 from pathlib import Path
 
 import yaml
@@ -15,7 +16,7 @@ MOTION_PACKAGE_ROOT = PROJECT_ROOT / "src" / "paus_motion_ros2"
 if str(MOTION_PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(MOTION_PACKAGE_ROOT))
 
-from paus_perception import load_config
+from paus_perception import load_config, resolve_config_path
 from paus_motion_ros2.fairino_linux_client import FairinoLinuxClient
 
 
@@ -49,8 +50,85 @@ class ConfigControlDefaultsTests(unittest.TestCase):
             self.assertEqual(control["linux_fairino_sdk_root"], "/srv/fairino/linux_sdk")
             self.assertTrue(control["use_mock_pose"])
 
+    def test_default_yaml_paths_resolve_against_project_root(self) -> None:
+        config_path = PROJECT_ROOT / "src" / "paus_bringup" / "configs" / "default.yaml"
+
+        config = load_config(config_path)
+        calibration = config["calibration"]
+
+        self.assertEqual(calibration["output_path"], str(PROJECT_ROOT / "src" / "paus_bringup" / "configs" / "extrinsics.yaml"))
+        self.assertEqual(calibration["trajectory_path"], str(PROJECT_ROOT / "src" / "paus_bringup" / "configs" / "eye_to_hand_trajectory.yaml"))
+        self.assertEqual(calibration["session_root_path"], str(PROJECT_ROOT / "calibration_sessions"))
+
+    def test_resolve_config_path_uses_config_location_for_relative_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "demo_ws"
+            config_dir = project_root / "src" / "paus_bringup" / "configs"
+            perception_dir = project_root / "src" / "paus_perception"
+            perception_dir.mkdir(parents=True, exist_ok=True)
+            config_dir.mkdir(parents=True, exist_ok=True)
+            config_path = config_dir / "default.yaml"
+            config_path.write_text("calibration: {}\n", encoding="utf-8")
+
+            resolved = resolve_config_path("calibration_sessions", config_path)
+
+            self.assertEqual(resolved, str(project_root / "calibration_sessions"))
+
+    def test_default_yaml_paths_are_install_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_root = Path(temp_dir) / "runtime"
+            old_runtime_root = os.environ.get("PAUS_ROBOT_RUNTIME_DIR")
+            os.environ["PAUS_ROBOT_RUNTIME_DIR"] = str(runtime_root)
+            install_config_dir = Path(temp_dir) / "install" / "paus_bringup" / "share" / "paus_bringup" / "configs"
+            install_config_dir.mkdir(parents=True, exist_ok=True)
+            config_path = install_config_dir / "default.yaml"
+            try:
+                config_path.write_text(
+                    yaml.safe_dump(
+                        {
+                            "calibration": {
+                                "output_path": "extrinsics.yaml",
+                                "trajectory_path": "eye_to_hand_trajectory.yaml",
+                                "session_root_path": "calibration_sessions",
+                            }
+                        },
+                        sort_keys=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                config = load_config(config_path)
+                calibration = config["calibration"]
+
+                self.assertEqual(calibration["output_path"], str(runtime_root / "configs" / "extrinsics.yaml"))
+                self.assertEqual(calibration["trajectory_path"], str(runtime_root / "configs" / "eye_to_hand_trajectory.yaml"))
+                self.assertEqual(calibration["session_root_path"], str(runtime_root / "calibration_sessions"))
+            finally:
+                if old_runtime_root is None:
+                    os.environ.pop("PAUS_ROBOT_RUNTIME_DIR", None)
+                else:
+                    os.environ["PAUS_ROBOT_RUNTIME_DIR"] = old_runtime_root
+
 
 class FairinoLinuxClientTests(unittest.TestCase):
+    def test_move_j_forwards_acceleration_when_present(self) -> None:
+        class RobotStub:
+            def __init__(self) -> None:
+                self.kwargs = None
+
+            def MoveJ(self, joint_pos, **kwargs):
+                del joint_pos
+                self.kwargs = kwargs
+                return 0
+
+        client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
+        client.robot = RobotStub()
+
+        error = client.move_j([1, 2, 3, 4, 5, 6], tool_id=0, user_id=0, vel=10.0, acc=7.5)
+
+        self.assertEqual(error, 0)
+        self.assertEqual(client.robot.kwargs["acc"], 7.5)
+
     def test_normalize_pose_result_accepts_sdk_list_shape(self) -> None:
         client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
 
@@ -67,7 +145,14 @@ class FairinoLinuxClientTests(unittest.TestCase):
         self.assertEqual(error, 0)
         self.assertEqual(pose, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 
+    def test_normalize_pose_result_accepts_joint_position_shape(self) -> None:
+        client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
+
+        error, joints = client._normalize_pose_result((0, [10, 20, 30, 40, 50, 60]), "GetActualJointPosDegree")
+
+        self.assertEqual(error, 0)
+        self.assertEqual(joints, [10.0, 20.0, 30.0, 40.0, 50.0, 60.0])
+
 
 if __name__ == "__main__":
     unittest.main()
-

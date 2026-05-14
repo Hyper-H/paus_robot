@@ -1,0 +1,9 @@
+[INFO] [launch]: All log files can be found below /home/chen_lab/.ros/log/2026-04-30-13-58-53-665881-chen-lab-ubuntu-4187323
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [paus_ui_server-1]: process started with pid [4187327]
+[paus_ui_server-1] [32mINFO[0m:     Started server process [[36m4187327[0m]
+[paus_ui_server-1] [32mINFO[0m:     Waiting for application startup.
+[paus_ui_server-1] [32mINFO[0m:     Application startup complete.
+[paus_ui_server-1] [32mINFO[0m:     Uvicorn running on [1mhttp://0.0.0.0:18095[0m (Press CTRL+C to quit)
+[paus_ui_server-1] [32mINFO[0m:     127.0.0.1:52592 - "[1mGET /api/status HTTP/1.1[0m" [32m200 OK[0m
+[paus_ui_server-1] [32mINFO[0m:     127.0.0.1:52600 - "[1mPOST /api/handeye/run HTTP/1.1[0m" [32m200 OK[0m
