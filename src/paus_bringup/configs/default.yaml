@@ -24,7 +24,6 @@ transform:
     translation_m: [0.0, 0.0, 0.0]
     rotation_rpy_deg: [0.0, 0.0, 0.0]
   max_target_distance_mm: 1500.0
-  max_target_jump_mm: 250.0
 
 calibration:
   board_rows: 8
@@ -32,7 +31,17 @@ calibration:
   square_size_m: 0.02
   solver_method: "joint_absolute"
   min_sample_count: 10
-  output_path: "/home/chen_lab/paus_robot/src/paus_bringup/configs/extrinsics.yaml"
+  output_path: "src/paus_bringup/configs/extrinsics.yaml"
+  trajectory_path: "src/paus_bringup/configs/eye_to_hand_trajectory.yaml"
+  session_root_path: "calibration_sessions"
+  save_sample_images: true
+  max_reprojection_error_px: 0.0
+  min_board_margin_px: 10.0
+  stable_position_tolerance_mm: 0.2
+  stable_rotation_tolerance_deg: 0.1
+  stable_window_s: 0.5
+  stable_timeout_s: 10.0
+  dwell_s: 0.5
   tool_to_board:
     translation_m: [0.0, 0.0, 0.0]
     rotation_rpy_deg: [0.0, 0.0, 0.0]
@@ -67,5 +76,8 @@ control:
   workspace_max_mm: [1000.0, 1000.0, 1000.0]
   repeat_distance_threshold_mm: 5.0
   stage_switch_buffer_mm: 10.0
+  max_marker_displacement_before_relatch_mm: 200.0
+  debug_reset_after_success: false
+  min_consecutive_detections: 2
   use_mock_pose: false
   mock_current_tcp_pose_mmdeg: [0.0, 0.0, 300.0, 180.0, 0.0, -180.0]

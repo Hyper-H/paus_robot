@@ -1,6 +1,6 @@
 """PAUS Robot perception core public exports."""
 
-from .config import load_config
+from .config import load_config, resolve_config_path
 from .calibration import CameraCalibration, CalibrationResult, calibrate_camera_from_directory, load_camera_calibration, save_camera_calibration
 from .detection import (
     MarkerDetection,
@@ -20,7 +20,42 @@ from .pipeline import (
     write_summary_csv,
     write_summary_json,
 )
-from .bridge_protocol import pack_frame_packet, recv_frame_packet
+from .bridge_protocol import compress_payload, decompress_payload, pack_frame_packet, recv_frame_packet
+from .camera_info_payload import camera_calibration_to_camera_info_payload, camera_info_payload_summary
+try:
+    from .dkam_depth_alignment import (
+        AlignedDepthFrame,
+        DEFAULT_EXTRINSIC_DIRECTION,
+        DEFAULT_POINT_CHANNEL,
+        DEFAULT_RGB_CAMERA_COUNT,
+        DEFAULT_RGB_CHANNEL,
+        DepthAlignmentConfig,
+        build_factory_extrinsic_matrix,
+        capture_aligned_depth_frame,
+        convert_pointcloud_raw_to_xyz_meters,
+        estimate_pointcloud_capture_buffer_size,
+        project_xyz_to_rgb_grid,
+        scale_xyz_to_meters,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "paus_perception.dkam_depth_alignment":
+        raise
+    _DKAM_DEPTH_EXPORTS: list[str] = []
+else:
+    _DKAM_DEPTH_EXPORTS = [
+        "AlignedDepthFrame",
+        "DepthAlignmentConfig",
+        "DEFAULT_EXTRINSIC_DIRECTION",
+        "DEFAULT_POINT_CHANNEL",
+        "DEFAULT_RGB_CAMERA_COUNT",
+        "DEFAULT_RGB_CHANNEL",
+        "build_factory_extrinsic_matrix",
+        "capture_aligned_depth_frame",
+        "convert_pointcloud_raw_to_xyz_meters",
+        "estimate_pointcloud_capture_buffer_size",
+        "project_xyz_to_rgb_grid",
+        "scale_xyz_to_meters",
+    ]
 from .sdk_camera import (
     DiscoveredCamera,
     capture_rgb_frame,
@@ -45,11 +80,10 @@ from .transforms import (
     make_transform_matrix,
     make_transform_struct,
     quaternion_xyzw_to_rotation_matrix,
-    rotation_matrix_to_quaternion_xyzw,
     rotation_matrix_to_rpy_deg,
+    rotation_matrix_to_quaternion_xyzw,
     rpy_deg_to_rotation_matrix,
     save_eye_to_hand_solution,
-    solve_eye_to_hand_joint_absolute,
     solve_eye_to_hand_opencv_handeye,
     solve_ax_xb_hand_eye_park,
     split_transform_matrix,
@@ -69,10 +103,14 @@ __all__ = [
     "Transform3D",
     "average_transform_matrices",
     "build_ax_xb_motion_pairs",
+    "camera_calibration_to_camera_info_payload",
+    "camera_info_payload_summary",
     "build_approach_plan",
     "build_summary_record",
     "calibrate_camera_from_directory",
     "capture_rgb_frame",
+    "compress_payload",
+    "decompress_payload",
     "detect_marker",
     "discover_cameras",
     "encode_bgr_frame_to_jpeg",
@@ -94,19 +132,19 @@ __all__ = [
     "read_runtime_calibration",
     "recv_frame_packet",
     "resolve_camera_index",
+    "resolve_config_path",
     "render_visualization",
     "result_to_dict",
-    "rotation_matrix_to_quaternion_xyzw",
     "rotation_matrix_to_rpy_deg",
+    "rotation_matrix_to_quaternion_xyzw",
     "rpy_deg_to_rotation_matrix",
     "save_camera_calibration",
     "save_eye_to_hand_solution",
     "save_result_json",
     "save_runtime_calibration_to_yaml",
-    "solve_eye_to_hand_joint_absolute",
     "solve_eye_to_hand_opencv_handeye",
     "solve_ax_xb_hand_eye_park",
     "split_transform_matrix",
     "write_summary_csv",
     "write_summary_json",
-]
+] + _DKAM_DEPTH_EXPORTS

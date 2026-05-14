@@ -39,6 +39,10 @@ class CameraRuntime:
     rgb_width: int
     # 当前 RGB 图像高度。
     rgb_height: int
+    # RGB 所在的 SDK channel。
+    rgb_channel: int = 2
+    # 当前已经打开的 SDK stream channel。
+    stream_channels: tuple[int, ...] = (2,)
 
 
 # 以懒加载方式导入 DkamSDK，避免在 py310 环境中误导入。
@@ -207,7 +211,14 @@ def read_runtime_calibration(runtime: CameraRuntime, camera_count: int = 0) -> C
 
 # 管理相机的创建、连接、开流和关闭流程。
 @contextmanager
-def open_camera_runtime(camera_ip: str | None = None, camera_index: int | None = None) -> CameraRuntime:
+def open_camera_runtime(
+    camera_ip: str | None = None,
+    camera_index: int | None = None,
+    *,
+    stream_channels: tuple[int, ...] = (2,),
+    rgb_channel: int = 2,
+    point_channel: int = 1,
+) -> CameraRuntime:
     DkamSDK = _require_dkam_sdk()
     selected_index = resolve_camera_index(camera_ip=camera_ip, camera_index=camera_index)
     camera_obj = DkamSDK.CreateCamera(selected_index)
@@ -215,23 +226,38 @@ def open_camera_runtime(camera_ip: str | None = None, camera_index: int | None =
     if connect_status != 0:
         DkamSDK.DestroyCamera(camera_obj)
         raise RuntimeError(f"CameraConnect failed with code {connect_status}.")
+    active_stream_channels = tuple(dict.fromkeys(int(channel) for channel in stream_channels))
     try:
         width, height = _read_rgb_dimensions(DkamSDK, camera_obj)
-        trigger_status = int(DkamSDK.SetRGBTriggerMode(camera_obj, 0))
-        if trigger_status != 0:
-            raise RuntimeError(f"SetRGBTriggerMode failed with code {trigger_status}.")
-        stream_status = int(DkamSDK.StreamOn(camera_obj, 2))
-        if stream_status != 0:
-            raise RuntimeError(f"StreamOn failed with code {stream_status}.")
+        if int(rgb_channel) in active_stream_channels:
+            trigger_status = int(DkamSDK.SetRGBTriggerMode(camera_obj, 0))
+            if trigger_status != 0:
+                raise RuntimeError(f"SetRGBTriggerMode failed with code {trigger_status}.")
+        if int(point_channel) in active_stream_channels and hasattr(DkamSDK, "SetTriggerMode"):
+            point_trigger_status = int(DkamSDK.SetTriggerMode(camera_obj, 0))
+            if point_trigger_status != 0:
+                raise RuntimeError(f"SetTriggerMode failed with code {point_trigger_status}.")
+        for channel in active_stream_channels:
+            stream_status = int(DkamSDK.StreamOn(camera_obj, channel))
+            if stream_status != 0:
+                raise RuntimeError(f"StreamOn({channel}) failed with code {stream_status}.")
         acquisition_status = int(DkamSDK.AcquisitionStart(camera_obj))
         if acquisition_status != 0:
             raise RuntimeError(f"AcquisitionStart failed with code {acquisition_status}.")
-        yield CameraRuntime(camera_index=selected_index, camera_obj=camera_obj, rgb_width=width, rgb_height=height)
+        yield CameraRuntime(
+            camera_index=selected_index,
+            camera_obj=camera_obj,
+            rgb_width=width,
+            rgb_height=height,
+            rgb_channel=int(rgb_channel),
+            stream_channels=active_stream_channels,
+        )
     finally:
-        try:
-            DkamSDK.StreamOff(camera_obj, 2)
-        except Exception:
-            pass
+        for channel in reversed(active_stream_channels):
+            try:
+                DkamSDK.StreamOff(camera_obj, channel)
+            except Exception:
+                pass
         try:
             DkamSDK.CameraDisconnect(camera_obj)
         except Exception:
@@ -242,16 +268,23 @@ def open_camera_runtime(camera_ip: str | None = None, camera_index: int | None =
             pass
 
 
+# 在当前连接的相机上抓取一帧 raw 数据。
+def capture_raw_frame(runtime: CameraRuntime, channel: int, buffer_size: int, timeout_us: int = 3_000_000) -> tuple[Any, bytes]:
+    DkamSDK = _require_dkam_sdk()
+    photo_info = DkamSDK.PhotoInfoCSharp()
+    raw_buffer = bytes(int(buffer_size))
+    DkamSDK.FlushBuffer(runtime.camera_obj, int(channel))
+    capture_status = int(DkamSDK.TimeoutCaptureCSharp(runtime.camera_obj, int(channel), photo_info, raw_buffer, int(buffer_size), timeout_us))
+    if capture_status != 0:
+        raise RuntimeError(f"TimeoutCaptureCSharp(channel={channel}) failed with code {capture_status}.")
+    return photo_info, raw_buffer
+
+
 # 在当前连接的相机上抓取一帧 RGB 图像。
 def capture_rgb_frame(runtime: CameraRuntime, timeout_us: int = 3_000_000) -> np.ndarray:
     DkamSDK = _require_dkam_sdk()
-    photo_info = DkamSDK.PhotoInfoCSharp()
     pixel_count = runtime.rgb_width * runtime.rgb_height * 3
-    rgb_buffer = bytes(pixel_count)
-    DkamSDK.FlushBuffer(runtime.camera_obj, 2)
-    capture_status = int(DkamSDK.TimeoutCaptureCSharp(runtime.camera_obj, 2, photo_info, rgb_buffer, pixel_count, timeout_us))
-    if capture_status != 0:
-        raise RuntimeError(f"TimeoutCaptureCSharp failed with code {capture_status}.")
+    photo_info, rgb_buffer = capture_raw_frame(runtime, runtime.rgb_channel, pixel_count, timeout_us=timeout_us)
     if hasattr(DkamSDK, "RawdataToRgb888CSharp"):
         DkamSDK.RawdataToRgb888CSharp(runtime.camera_obj, photo_info, rgb_buffer, pixel_count)
     rgb_array = np.frombuffer(rgb_buffer, dtype=np.uint8).reshape((runtime.rgb_height, runtime.rgb_width, 3))

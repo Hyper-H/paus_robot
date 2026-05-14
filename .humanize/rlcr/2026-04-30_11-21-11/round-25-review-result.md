@@ -1,0 +1,16 @@
+- [P2] Resolve `--trajectory-path` with the artifact-path helper — /home/chen_lab/worktrees/paus_robot_handeye_rlcr/src/paus_marker_ros2/paus_marker_ros2/eye_to_hand_semi_auto_cli.py:157-158
+  In an installed workspace, relative trajectory files are resolved by the node under the runtime config area (for example `$PAUS_ROBOT_RUNTIME_DIR/configs/...`), but this branch resolves `--trajectory-path` with `resolve_config_path()`, which points the same input at the workspace root instead. As soon as an operator passes a relative path such as `--trajectory-path eye_to_hand_trajectory.yaml`, the later backend-path check will report a mismatch and exit even though the backend is using the expected default trajectory.
+
+- [P2] Subscribe to the configured status topic in the semi-auto CLI — /home/chen_lab/worktrees/paus_robot_handeye_rlcr/src/paus_marker_ros2/paus_marker_ros2/eye_to_hand_semi_auto_cli.py:109-109
+  The calibration node already exposes `status_topic` as a launch/runtime setting, but the CLI subscribes to a hardcoded `/eye_to_hand/status`. In any deployment that overrides that topic, `_wait_for_backend_status()` never receives a message, so `--trajectory-path` verification fails spuriously and the run no longer prints live status updates. This helper needs to use the same topic configuration as the node it is driving.
+2026-04-30T19:12:08.044394Z ERROR codex_core::session: failed to record rollout items: thread 019ddfc7-aa23-7cc0-bbe0-29389a7ad10d not found
+2026-04-30T19:12:08.054450Z ERROR codex_core::session: failed to record rollout items: thread 019ddfc7-aa02-7921-9b8b-bb61db60bcb5 not found
+The new semi-auto CLI has two functional integration issues: relative `--trajectory-path` values are resolved differently from the backend in installed deployments, and status subscriptions ignore `status_topic` overrides. Both can make the helper reject or mis-handle otherwise valid calibration runs.
+
+Full review comments:
+
+- [P2] Resolve `--trajectory-path` with the artifact-path helper — /home/chen_lab/worktrees/paus_robot_handeye_rlcr/src/paus_marker_ros2/paus_marker_ros2/eye_to_hand_semi_auto_cli.py:157-158
+  In an installed workspace, relative trajectory files are resolved by the node under the runtime config area (for example `$PAUS_ROBOT_RUNTIME_DIR/configs/...`), but this branch resolves `--trajectory-path` with `resolve_config_path()`, which points the same input at the workspace root instead. As soon as an operator passes a relative path such as `--trajectory-path eye_to_hand_trajectory.yaml`, the later backend-path check will report a mismatch and exit even though the backend is using the expected default trajectory.
+
+- [P2] Subscribe to the configured status topic in the semi-auto CLI — /home/chen_lab/worktrees/paus_robot_handeye_rlcr/src/paus_marker_ros2/paus_marker_ros2/eye_to_hand_semi_auto_cli.py:109-109
+  The calibration node already exposes `status_topic` as a launch/runtime setting, but the CLI subscribes to a hardcoded `/eye_to_hand/status`. In any deployment that overrides that topic, `_wait_for_backend_status()` never receives a message, so `--trajectory-path` verification fails spuriously and the run no longer prints live status updates. This helper needs to use the same topic configuration as the node it is driving.

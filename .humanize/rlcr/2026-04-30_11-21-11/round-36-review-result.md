@@ -1,0 +1,16 @@
+- [P2] Ignore stale backend status when only services are still reachable — /home/chen_lab/worktrees/paus_robot_handeye_rlcr/src/paus_ui/paus_ui/ros_bridge.py:188-191
+  If `/eye_to_hand/status` stops updating but the service graph still reports the calibration node as reachable, this branch still reuses `last_status` because it only checks `backend_connected`. That means the 10s freshness cutoff is effectively ignored for `execute_motion`, `trajectory_path`, `session_root_path`, etc., so the UI can show stale run state and even stop requiring confirmation based on an old `execute_motion=false` payload. Please gate the payload and `motion_state_known` on `status_recent`, not just service availability.
+
+- [P3] Treat non-mapping report YAML as invalid instead of empty — /home/chen_lab/worktrees/paus_robot_handeye_rlcr/src/paus_ui/paus_ui/session_store.py:400-408
+  When an archived `report.yaml` parses successfully but produces a scalar or list, `_read_yaml()` silently returns `{}` here. In that case the session is shown as a normal unsolved report (`has_report=true`, `is_invalid=false`) instead of being flagged as a corrupt archive, and `latest_valid_session_id()` can even prefer it when there is no solved report. Returning an error for non-dict payloads would keep report validation consistent with the new malformed-archive handling elsewhere in this patch.
+2026-05-01T05:57:20.657103Z ERROR codex_core::session: failed to record rollout items: thread 019de211-7964-7683-9e60-afbef9e87684 not found
+2026-05-01T05:57:20.667286Z ERROR codex_core::session: failed to record rollout items: thread 019de211-7950-7ed1-aa1a-a54041c0bfec not found
+The new UI/session handling has at least one behavioral regression around stale backend status, and archive validation misses some malformed-but-parseable report files. These issues can lead to misleading UI state and incorrect session classification.
+
+Full review comments:
+
+- [P2] Ignore stale backend status when only services are still reachable — /home/chen_lab/worktrees/paus_robot_handeye_rlcr/src/paus_ui/paus_ui/ros_bridge.py:188-191
+  If `/eye_to_hand/status` stops updating but the service graph still reports the calibration node as reachable, this branch still reuses `last_status` because it only checks `backend_connected`. That means the 10s freshness cutoff is effectively ignored for `execute_motion`, `trajectory_path`, `session_root_path`, etc., so the UI can show stale run state and even stop requiring confirmation based on an old `execute_motion=false` payload. Please gate the payload and `motion_state_known` on `status_recent`, not just service availability.
+
+- [P3] Treat non-mapping report YAML as invalid instead of empty — /home/chen_lab/worktrees/paus_robot_handeye_rlcr/src/paus_ui/paus_ui/session_store.py:400-408
+  When an archived `report.yaml` parses successfully but produces a scalar or list, `_read_yaml()` silently returns `{}` here. In that case the session is shown as a normal unsolved report (`has_report=true`, `is_invalid=false`) instead of being flagged as a corrupt archive, and `latest_valid_session_id()` can even prefer it when there is no solved report. Returning an error for non-dict payloads would keep report validation consistent with the new malformed-archive handling elsewhere in this patch.

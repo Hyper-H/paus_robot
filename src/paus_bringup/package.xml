@@ -13,6 +13,8 @@
   <depend>launch_ros</depend>
   <depend>paus_marker_ros2</depend>
   <depend>paus_motion_ros2</depend>
+  <depend>paus_perception</depend>
+  <depend>paus_ui</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

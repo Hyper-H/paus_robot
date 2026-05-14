@@ -109,6 +109,9 @@ class FairinoControlNode(Node):
         self.workspace_max_mm = [float(value) for value in control_cfg["workspace_max_mm"]]
         self.repeat_distance_threshold_mm = float(control_cfg["repeat_distance_threshold_mm"])
         self.stage_switch_buffer_mm = float(control_cfg.get("stage_switch_buffer_mm", self.repeat_distance_threshold_mm))
+        self.max_marker_displacement_before_relatch_mm = float(control_cfg.get("max_marker_displacement_before_relatch_mm", 200.0))
+        self.debug_reset_after_success = bool(control_cfg.get("debug_reset_after_success", False))
+        self.min_consecutive_detections = int(control_cfg.get("min_consecutive_detections", 2))
         self.use_mock_pose = bool(control_cfg["use_mock_pose"])
         self.mock_current_tcp_pose_mmdeg = [float(value) for value in control_cfg["mock_current_tcp_pose_mmdeg"]]
 
@@ -134,11 +137,17 @@ class FairinoControlNode(Node):
         self.last_valid_surface_normal_base: list[float] | None = None
         self.last_valid_target_point_base_m: list[float] | None = None
         self.last_valid_target_time = None
+        self._consecutive_valid_count: int = 0
+        self._last_cold_start_target_m: list[float] | None = None
         self.last_detection_status: dict[str, Any] | None = None
         self.last_transform_status: dict[str, Any] | None = None
         self.last_tracking_state = TRACKING_IDLE
         self.last_completion_reason = REASON_NO_VALID_TARGET
         self.last_timer_publish_signature: tuple[Any, ...] | None = None
+        self.tracking_episode_completed = False
+        self.completed_tracking_state: str | None = None
+        self.completed_target_point_base_m: list[float] | None = None
+        self.completed_final_hover_pose_mmdeg: list[float] | None = None
         self.last_status_fields: dict[str, Any] = {
             "target_point_base_m": None,
             "target_point_base_mm": None,
@@ -212,6 +221,8 @@ class FairinoControlNode(Node):
         normal_alignment_error_deg: float | None = None,
         marker_visibility_status: str | None = None,
         transform_validity_status: str | None = None,
+        target_displacement_from_completed_mm: float | None = None,
+        completed_tracking_state: str | None = None,
     ) -> None:
         full_payload = {
             "event": event,
@@ -226,6 +237,7 @@ class FairinoControlNode(Node):
             "safe_lift_step_mm": self.safe_lift_step_mm,
             "safe_lift_above_marker_mm": self.safe_lift_above_marker_mm,
             "safe_lift_max_z_mm": self.safe_lift_max_z_mm,
+            "debug_reset_after_success": self.debug_reset_after_success,
             "max_execution_stage": self.max_execution_stage,
             "target_point_base_m": target_point_base_m,
             "target_point_base_mm": target_point_base_mm,
@@ -250,6 +262,8 @@ class FairinoControlNode(Node):
             "normal_alignment_error_deg": normal_alignment_error_deg,
             "marker_visibility_status": marker_visibility_status,
             "transform_validity_status": transform_validity_status,
+            "target_displacement_from_completed_mm": target_displacement_from_completed_mm,
+            "completed_tracking_state": completed_tracking_state,
             "control_backend": self.control_backend,
         }
         summary_payload = {
@@ -262,6 +276,8 @@ class FairinoControlNode(Node):
             "executed": executed,
             "marker_visibility_status": marker_visibility_status,
             "transform_validity_status": transform_validity_status,
+            "target_displacement_from_completed_mm": target_displacement_from_completed_mm,
+            "completed_tracking_state": completed_tracking_state,
             "target_age_ms": target_age_ms,
             "position_error_to_last_valid_final_hover_mm": position_error_to_last_valid_final_hover_mm,
             "normal_alignment_error_deg": normal_alignment_error_deg,
@@ -278,7 +294,8 @@ class FairinoControlNode(Node):
         self.get_logger().info(debug_message.data)
         if tracking_state is not None:
             self.last_tracking_state = tracking_state
-        self.last_completion_reason = completion_reason
+        if completion_reason is not None or tracking_state not in {TRACKING_ACTIVE, TRACKING_WAITING_NEXT_FRAME}:
+            self.last_completion_reason = completion_reason
 
     def _parse_status_message(self, message: String, *, source_name: str) -> dict[str, Any] | None:
         try:
@@ -484,6 +501,47 @@ class FairinoControlNode(Node):
             }
         )
 
+    def _mark_tracking_episode_completed(self, tracking_state: str) -> None:
+        self.tracking_episode_completed = True
+        self.completed_tracking_state = tracking_state
+        self.completed_target_point_base_m = (
+            list(self.last_valid_target_point_base_m)
+            if self.last_valid_target_point_base_m is not None
+            else None
+        )
+        self.completed_final_hover_pose_mmdeg = (
+            list(self.last_valid_final_hover_pose_mmdeg)
+            if self.last_valid_final_hover_pose_mmdeg is not None
+            else None
+        )
+
+    def _reset_tracking_episode_for_new_target(self) -> None:
+        self.tracking_episode_completed = False
+        self.completed_tracking_state = None
+        self.completed_target_point_base_m = None
+        self.completed_final_hover_pose_mmdeg = None
+        self.stage_latch = None
+        self.last_executed_candidate_pose_mmdeg = None
+        self.last_executed_stage = None
+        self.last_valid_target_pose_base_mmdeg = None
+        self.last_valid_final_hover_pose_mmdeg = None
+        self.last_valid_surface_normal_base = None
+        self.last_valid_target_point_base_m = None
+        self.last_valid_target_time = None
+        self._consecutive_valid_count = 0
+        self._last_cold_start_target_m = None
+        self.last_timer_publish_signature = None
+
+    def _target_displacement_from_completed_mm(self, target_point_base_m: list[float]) -> float | None:
+        if self.completed_target_point_base_m is None:
+            return None
+        return float(
+            np.linalg.norm(
+                np.asarray(target_point_base_m, dtype=np.float64)
+                - np.asarray(self.completed_target_point_base_m, dtype=np.float64)
+            )
+        ) * 1000.0
+
     def _update_stage_latch(self, candidate_stage: str | None) -> None:
         if candidate_stage == SAFE_LIFT_STAGE:
             self.stage_latch = None
@@ -512,6 +570,37 @@ class FairinoControlNode(Node):
         now = self.get_clock().now()
         marker_visibility_status = self._marker_visibility_status()
         transform_validity_status = self._transform_validity_status()
+
+        if self.tracking_episode_completed:
+            tracking_state = self.completed_tracking_state or self.last_tracking_state
+            completion_reason = self.last_completion_reason
+            signature = (
+                tracking_state,
+                completion_reason,
+                marker_visibility_status,
+                transform_validity_status,
+                "completed_hold",
+            )
+            if signature == self.last_timer_publish_signature:
+                return
+            self.last_timer_publish_signature = signature
+            tracking_fields = self._tracking_fields(
+                tracking_state=tracking_state,
+                completion_reason=completion_reason,
+                current_tcp_pose_mmdeg=self.last_status_fields.get("current_tcp_pose_mmdeg"),
+                marker_visibility_status=marker_visibility_status,
+                transform_validity_status=transform_validity_status,
+                now=now,
+            )
+            self._publish_status(
+                event="tracking_completed_hold",
+                error_message="Tracking episode already completed; holding final target.",
+                check_passed=True,
+                **dict(self.last_status_fields),
+                **tracking_fields,
+                completed_tracking_state=self.completed_tracking_state,
+            )
+            return
 
         if self.last_valid_target_time is None:
             tracking_state = TRACKING_IDLE
@@ -554,6 +643,8 @@ class FairinoControlNode(Node):
         if signature == self.last_timer_publish_signature:
             return
         self.last_timer_publish_signature = signature
+        if tracking_state in {TRACKING_SUCCEEDED_VISIBLE, TRACKING_SUCCEEDED_AFTER_OCCLUSION}:
+            self._mark_tracking_episode_completed(tracking_state)
 
         tracking_fields = self._tracking_fields(
             tracking_state=tracking_state,
@@ -602,8 +693,63 @@ class FairinoControlNode(Node):
             )
             return
 
+        if self.tracking_episode_completed:
+            target_displacement_mm = self._target_displacement_from_completed_mm(target_point_base_m)
+            should_reset_for_debug = (
+                self.debug_reset_after_success
+                and target_displacement_mm is not None
+                and target_displacement_mm > self.max_marker_displacement_before_relatch_mm
+            )
+            if should_reset_for_debug:
+                self.get_logger().info(
+                    json.dumps(
+                        {
+                            "event": "tracking_episode_reset_after_success",
+                            "target_displacement_from_completed_mm": target_displacement_mm,
+                            "reset_threshold_mm": self.max_marker_displacement_before_relatch_mm,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                self._reset_tracking_episode_for_new_target()
+            else:
+                tracking_state = self.completed_tracking_state or self.last_tracking_state
+                completion_reason = self.last_completion_reason
+                tracking_fields = self._tracking_fields(
+                    tracking_state=tracking_state,
+                    completion_reason=completion_reason,
+                    current_tcp_pose_mmdeg=self.last_status_fields.get("current_tcp_pose_mmdeg"),
+                    marker_visibility_status=marker_visibility_status,
+                    transform_validity_status=transform_validity_status,
+                    now=now,
+                )
+                self._publish_status(
+                    event="control_hold_after_success",
+                    error_message="Tracking episode already completed; holding final target.",
+                    check_passed=True,
+                    **dict(self.last_status_fields),
+                    **tracking_fields,
+                    target_displacement_from_completed_mm=target_displacement_mm,
+                    completed_tracking_state=self.completed_tracking_state,
+                )
+                return
+
         try:
             current_tcp_pose_mmdeg = self._get_current_tcp_pose_mmdeg()
+
+            if (
+                self.stage_latch is not None
+                and self.last_valid_target_point_base_m is not None
+            ):
+                displacement_m = float(
+                    np.linalg.norm(
+                        np.asarray(target_point_base_m, dtype=np.float64)
+                        - np.asarray(self.last_valid_target_point_base_m, dtype=np.float64)
+                    )
+                )
+                if displacement_m * 1000.0 > self.max_marker_displacement_before_relatch_mm:
+                    self.stage_latch = None
+
             decision = build_approach_decision(
                 target_position_base_m=target_point_base_m,
                 raw_target_orientation_rpy_deg=raw_target_pose_base_mmdeg[3:6],
@@ -684,6 +830,47 @@ class FairinoControlNode(Node):
             )
             return
 
+        if self._consecutive_valid_count < self.min_consecutive_detections:
+            was_cold_start = self.last_valid_target_time is None
+            target_point_mm = decision.target_point_base_mm[:3]
+            if self._last_cold_start_target_m is not None:
+                jump_mm = float(
+                    np.linalg.norm(
+                        np.asarray(target_point_mm, dtype=np.float64)
+                        - np.asarray(self._last_cold_start_target_m, dtype=np.float64)
+                    )
+                )
+                if jump_mm <= self.repeat_distance_threshold_mm * 2.0:
+                    self._consecutive_valid_count += 1
+                else:
+                    self._consecutive_valid_count = 1
+                    self._last_cold_start_target_m = list(target_point_mm)
+            else:
+                self._consecutive_valid_count = 1
+                self._last_cold_start_target_m = list(target_point_mm)
+
+            if was_cold_start and self._consecutive_valid_count < self.min_consecutive_detections:
+                tracking_fields = self._tracking_fields(
+                    tracking_state=TRACKING_ACTIVE,
+                    completion_reason=None,
+                    current_tcp_pose_mmdeg=current_tcp_for_status,
+                    marker_visibility_status=marker_visibility_status,
+                    transform_validity_status=transform_validity_status,
+                    now=now,
+                )
+                self._publish_status(
+                    event="control_cold_start_gated",
+                    error_message=(
+                        f"Cold start gate ({self._consecutive_valid_count}/"
+                        f"{self.min_consecutive_detections}) - waiting for "
+                        f"consecutive consistent detections."
+                    ),
+                    check_passed=True,
+                    **common_status,
+                    **tracking_fields,
+                )
+                return
+
         if self.last_executed_candidate_pose_mmdeg is not None and self.last_executed_stage == decision.candidate_stage:
             translation_delta = np.linalg.norm(
                 np.asarray(decision.candidate_pose_mmdeg[:3], dtype=np.float64)
@@ -713,6 +900,8 @@ class FairinoControlNode(Node):
                     transform_validity_status=transform_validity_status,
                     now=now,
                 )
+                if tracking_state == TRACKING_SUCCEEDED_VISIBLE:
+                    self._mark_tracking_episode_completed(tracking_state)
                 self._publish_status(
                     event="control_skipped_repeat",
                     error_message="Target change is smaller than repeat threshold.",
@@ -738,6 +927,8 @@ class FairinoControlNode(Node):
                 transform_validity_status=transform_validity_status,
                 now=now,
             )
+            if tracking_state == TRACKING_SUCCEEDED_VISIBLE:
+                self._mark_tracking_episode_completed(tracking_state)
             self._publish_status(
                 event="control_dry_run",
                 error_message="",
@@ -792,6 +983,8 @@ class FairinoControlNode(Node):
                 transform_validity_status=transform_validity_status,
                 now=self.get_clock().now(),
             )
+            if tracking_state == TRACKING_SUCCEEDED_VISIBLE:
+                self._mark_tracking_episode_completed(tracking_state)
             self._publish_status(
                 event="control_executed",
                 error_message="",
