@@ -66,5 +66,6 @@ control:
   workspace_min_mm: [-1000.0, -1000.0, 0.0]
   workspace_max_mm: [1000.0, 1000.0, 1000.0]
   repeat_distance_threshold_mm: 5.0
+  stage_switch_buffer_mm: 10.0
   use_mock_pose: false
   mock_current_tcp_pose_mmdeg: [0.0, 0.0, 300.0, 180.0, 0.0, -180.0]

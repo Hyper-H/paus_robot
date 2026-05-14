@@ -108,6 +108,7 @@ class FairinoControlNode(Node):
         self.workspace_min_mm = [float(value) for value in control_cfg["workspace_min_mm"]]
         self.workspace_max_mm = [float(value) for value in control_cfg["workspace_max_mm"]]
         self.repeat_distance_threshold_mm = float(control_cfg["repeat_distance_threshold_mm"])
+        self.stage_switch_buffer_mm = float(control_cfg.get("stage_switch_buffer_mm", self.repeat_distance_threshold_mm))
         self.use_mock_pose = bool(control_cfg["use_mock_pose"])
         self.mock_current_tcp_pose_mmdeg = [float(value) for value in control_cfg["mock_current_tcp_pose_mmdeg"]]
 
@@ -123,6 +124,7 @@ class FairinoControlNode(Node):
 
         self.last_executed_candidate_pose_mmdeg: list[float] | None = None
         self.last_executed_stage: str | None = None
+        self.stage_latch: str | None = None
         self.motion_in_progress = False
         self.control_backend = "mock_pose"
         self.linux_client: FairinoLinuxClient | None = None
@@ -482,6 +484,15 @@ class FairinoControlNode(Node):
             }
         )
 
+    def _update_stage_latch(self, candidate_stage: str | None) -> None:
+        if candidate_stage == SAFE_LIFT_STAGE:
+            self.stage_latch = None
+        elif candidate_stage in (REORIENT_STAGE, FINAL_HOVER_STAGE):
+            new_order = STAGE_ORDER.get(candidate_stage, 0)
+            current_order = STAGE_ORDER.get(self.stage_latch, 0)
+            if new_order > current_order:
+                self.stage_latch = candidate_stage
+
     def _status_timer_event_for_state(self, tracking_state: str) -> str:
         return {
             TRACKING_IDLE: "tracking_idle",
@@ -607,7 +618,8 @@ class FairinoControlNode(Node):
                 min_plane_clearance_mm=self.min_plane_clearance_mm,
                 workspace_min_mm=self.workspace_min_mm,
                 workspace_max_mm=self.workspace_max_mm,
-                stage_switch_buffer_mm=self.repeat_distance_threshold_mm,
+                stage_switch_buffer_mm=self.stage_switch_buffer_mm,
+                stage_latch=self.stage_latch,
                 prefer_positive_z_surface_normal=self.prefer_positive_z_surface_normal,
                 enable_safe_lift_on_low_clearance=self.enable_safe_lift_on_low_clearance,
                 safe_lift_step_mm=self.safe_lift_step_mm,
@@ -759,6 +771,7 @@ class FairinoControlNode(Node):
             self._execute_move(decision.candidate_pose_mmdeg, decision.candidate_stage)
             self.last_executed_candidate_pose_mmdeg = list(decision.candidate_pose_mmdeg)
             self.last_executed_stage = decision.candidate_stage
+            self._update_stage_latch(decision.candidate_stage)
 
             post_move_tcp_pose_mmdeg = self._safe_get_current_tcp_pose_mmdeg() or current_tcp_for_status
             common_status["current_tcp_pose_mmdeg"] = post_move_tcp_pose_mmdeg
