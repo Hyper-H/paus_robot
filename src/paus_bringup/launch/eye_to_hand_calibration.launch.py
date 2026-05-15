@@ -29,6 +29,13 @@ def _resolve_default_config_path(bringup_share: Path) -> Path:
     return source_config if source_config.exists() else bringup_share / "configs" / "default.yaml"
 
 
+def _resolve_workspace_path(path_value: object, workspace_root: Path) -> str:
+    path = Path(str(path_value)).expanduser()
+    if not path.is_absolute():
+        path = workspace_root / path
+    return str(path)
+
+
 # 真正组装标定链启动动作。
 def _launch_setup(context, *args, **kwargs):
     # 当前函数不使用额外参数，显式丢弃即可。
@@ -37,6 +44,7 @@ def _launch_setup(context, *args, **kwargs):
     # 找到 bringup 包和 marker 包的安装目录。
     bringup_share = Path(get_package_share_directory("paus_bringup"))
     marker_share = Path(get_package_share_directory("paus_marker_ros2"))
+    workspace_root = bringup_share.parents[3]
     # 优先使用系统里的 python3。
     python_exec = shutil.which("python3") or "/usr/bin/python3"
     # `camera_bridge.py` 是普通 Python 脚本，不是 ROS2 node。
@@ -66,9 +74,9 @@ def _launch_setup(context, *args, **kwargs):
     max_board_model_fit_max_mm = float(LaunchConfiguration("max_board_model_fit_max_mm").perform(context))
     min_board_center_z_m = float(LaunchConfiguration("min_board_center_z_m").perform(context))
     max_board_center_z_m = float(LaunchConfiguration("max_board_center_z_m").perform(context))
-    output_path = LaunchConfiguration("output_path").perform(context)
-    trajectory_path = LaunchConfiguration("trajectory_path").perform(context)
-    session_root_path = LaunchConfiguration("session_root_path").perform(context)
+    output_path = _resolve_workspace_path(LaunchConfiguration("output_path").perform(context), workspace_root)
+    trajectory_path = _resolve_workspace_path(LaunchConfiguration("trajectory_path").perform(context), workspace_root)
+    session_root_path = _resolve_workspace_path(LaunchConfiguration("session_root_path").perform(context), workspace_root)
     save_sample_images = LaunchConfiguration("save_sample_images").perform(context).strip().lower() in ("1", "true", "yes", "on")
     max_reprojection_error_px = float(LaunchConfiguration("max_reprojection_error_px").perform(context))
     min_board_margin_px = float(LaunchConfiguration("min_board_margin_px").perform(context))
@@ -197,7 +205,7 @@ def generate_launch_description() -> LaunchDescription:
         config_payload = yaml.safe_load(handle) or {}
     calibration_cfg = config_payload.get("calibration", {})
     tool_to_board_cfg = calibration_cfg.get("tool_to_board", {})
-    default_extrinsics_path = str(calibration_cfg.get("output_path", bringup_share / "configs" / "extrinsics.yaml"))
+    default_extrinsics_path = str(calibration_cfg.get("output_path", "src/paus_bringup/configs/extrinsics.yaml"))
     default_observation_mode = str(calibration_cfg.get("observation_mode", "rgb_pnp"))
     default_depth_topic = str(calibration_cfg.get("depth_topic", "/camera/depth_aligned"))
     default_max_rgb_depth_delta_ms = str(calibration_cfg.get("max_rgb_depth_delta_ms", 100.0))
@@ -206,8 +214,8 @@ def generate_launch_description() -> LaunchDescription:
     default_square_size_m = str(calibration_cfg.get("square_size_m", 0.01))
     default_solver_method = str(calibration_cfg.get("solver_method", "ax_xb_park"))
     default_min_sample_count = str(calibration_cfg.get("min_sample_count", 10))
-    default_trajectory_path = str(calibration_cfg.get("trajectory_path", default_config_file.parent / "eye_to_hand_trajectory.yaml"))
-    default_session_root_path = str(calibration_cfg.get("session_root_path", "/home/chen_lab/paus_robot/calibration_sessions"))
+    default_trajectory_path = str(calibration_cfg.get("trajectory_path", "src/paus_bringup/configs/eye_to_hand_trajectory.yaml"))
+    default_session_root_path = str(calibration_cfg.get("session_root_path", "calibration_sessions"))
     default_save_sample_images = str(calibration_cfg.get("save_sample_images", True)).lower()
     default_max_reprojection_error_px = str(calibration_cfg.get("max_reprojection_error_px", 2.5))
     default_min_board_margin_px = str(calibration_cfg.get("min_board_margin_px", 10.0))

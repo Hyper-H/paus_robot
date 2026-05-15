@@ -35,9 +35,9 @@ calibration:
   square_size_m: 0.02
   solver_method: "joint_absolute"
   min_sample_count: 10
-  output_path: "/home/chen_lab/worktrees/paus_robot_dkam_depth_align/src/paus_bringup/configs/extrinsics.yaml"
-  trajectory_path: "/home/chen_lab/worktrees/paus_robot_dkam_depth_align/src/paus_bringup/configs/eye_to_hand_trajectory.yaml"
-  session_root_path: "/home/chen_lab/paus_robot/calibration_sessions"
+  output_path: "src/paus_bringup/configs/extrinsics.yaml"
+  trajectory_path: "src/paus_bringup/configs/eye_to_hand_trajectory.yaml"
+  session_root_path: "calibration_sessions"
   save_sample_images: true
   max_reprojection_error_px: 2.5
   min_board_margin_px: 10.0
