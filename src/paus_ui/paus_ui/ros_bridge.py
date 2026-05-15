@@ -134,6 +134,11 @@ class UiRosBridge(Node):
         self._run_lock = threading.Lock()
         self._run_thread: threading.Thread | None = None
         self._last_command_result: dict[str, Any] | None = None
+        self._raw_jpeg_cache_lock = threading.Lock()
+        self._raw_jpeg_cache_sequence: int | None = None
+        self._raw_jpeg_cache_bytes: bytes | None = None
+        self._overlay_cache: dict[tuple[int, str, bool], bytes] = {}
+        self._overlay_cache_lock = threading.Lock()
 
         self.create_subscription(Image, self.image_topic, self._image_callback, 10)
         self.create_subscription(String, self.status_topic, self._status_callback, STATUS_QOS)
@@ -309,22 +314,26 @@ class UiRosBridge(Node):
         }
 
     def get_status(self) -> dict[str, Any]:
-        with self._image_lock:
-            latest_image = self._latest_image
+        latest_meta = self._latest_image_meta()
         with self._last_status_lock:
             last_status = dict(self._last_status) if self._last_status else None
             last_status_age_s = (time.monotonic() - self._last_status_time_s) if self._last_status_time_s else None
-        camera_age_s = self._image_age_s(latest_image)
+        camera_age_s = self._image_age_s_from_meta(latest_meta)
         backend_state = self._sync_backend_state(last_status, last_status_age_s)
         live_status = last_status if (backend_state.get("status_recent") or backend_state.get("run_active")) and last_status is not None else None
         shaped_status = self._shape_status_payload(live_status)
         current_waypoint = dict(shaped_status["current_waypoint"])
         status_payload = live_status or {}
+        reprojection = _to_float(status_payload.get("reprojection_error_px"))
+        board_margin = _to_float(status_payload.get("board_margin_px"))
         current_waypoint.update(
             {
                 "camera_to_board_translation_m": status_payload.get("camera_to_board_translation_m"),
                 "camera_to_board_rotation_rpy_deg": status_payload.get("camera_to_board_rotation_rpy_deg"),
                 "board_angle_deg": status_payload.get("board_angle_deg"),
+                "reprojection_error_px": reprojection,
+                "board_margin_px": board_margin,
+                "thresholds": self._quality_flags(reprojection, board_margin),
                 "quality_detected": status_payload.get("quality_detected", status_payload.get("detected")),
                 "quality_reason_code": status_payload.get("quality_reason_code", status_payload.get("reason_code")),
                 "empty_reason": status_payload.get("empty_reason"),
@@ -341,7 +350,7 @@ class UiRosBridge(Node):
             },
             "camera": {
                 "connected": camera_age_s is not None and camera_age_s < CAMERA_FRESHNESS_S,
-                "image_sequence": latest_image.sequence if latest_image else 0,
+                "image_sequence": latest_meta[0] if latest_meta else 0,
                 "age_s": camera_age_s,
                 "topic": self.image_topic,
                 "camera_config_path": str(self.camera_config_path),
@@ -416,16 +425,35 @@ class UiRosBridge(Node):
         payload["thresholds"] = self._quality_flags(result.reprojection_error_px, result.board_margin_px)
         return payload
 
-    def get_latest_jpeg(self, *, mode: str = "overlay", show_axes: bool = True) -> bytes:
+    def get_latest_jpeg(self, *, mode: str = "raw", show_axes: bool = True) -> bytes:
         self._sync_backend_state()
-        latest_image = self._latest_image_copy()
-        if latest_image is None:
+        latest_meta = self._latest_image_meta()
+        if latest_meta is None:
             return encode_jpeg(make_placeholder_image("Waiting for /camera/image_bridge"))
-        image_age_s = self._image_age_s(latest_image)
+        sequence, _, received_time_s = latest_meta
+        image_age_s = time.monotonic() - received_time_s
         if image_age_s is None or image_age_s >= CAMERA_FRESHNESS_S:
             return encode_jpeg(make_placeholder_image("Camera stream is stale"))
         if mode == "raw":
-            return encode_jpeg(latest_image.image_bgr)
+            with self._raw_jpeg_cache_lock:
+                if self._raw_jpeg_cache_sequence == sequence and self._raw_jpeg_cache_bytes is not None:
+                    return self._raw_jpeg_cache_bytes
+            latest_image = self._latest_image_copy()
+            if latest_image is None:
+                return encode_jpeg(make_placeholder_image("Waiting for /camera/image_bridge"))
+            jpeg_bytes = encode_jpeg(latest_image.image_bgr)
+            with self._raw_jpeg_cache_lock:
+                self._raw_jpeg_cache_sequence = sequence
+                self._raw_jpeg_cache_bytes = jpeg_bytes
+            return jpeg_bytes
+        latest_image = self._latest_image_copy()
+        if latest_image is None:
+            return encode_jpeg(make_placeholder_image("Waiting for /camera/image_bridge"))
+        cache_key = (latest_image.sequence, mode, show_axes)
+        with self._overlay_cache_lock:
+            cached = self._overlay_cache.get(cache_key)
+            if cached is not None:
+                return cached
         detector = self._get_detector()
         if detector is None:
             image = latest_image.image_bgr.copy()
@@ -441,7 +469,11 @@ class UiRosBridge(Node):
             )
             return encode_jpeg(image)
         rendered, _ = detector.render(latest_image.image_bgr, mode=mode, image_sequence=latest_image.sequence, show_axes=show_axes)
-        return encode_jpeg(rendered)
+        jpeg_bytes = encode_jpeg(rendered)
+        with self._overlay_cache_lock:
+            self._overlay_cache = {k: v for k, v in self._overlay_cache.items() if k[0] == latest_image.sequence}
+            self._overlay_cache[cache_key] = jpeg_bytes
+        return jpeg_bytes
 
     def get_sample_jpeg(self, *, session_id: str, row_index: int, mode: str = "overlay", show_axes: bool = True) -> bytes:
         self._sync_backend_state()
@@ -477,14 +509,46 @@ class UiRosBridge(Node):
         if isinstance(recorded_trajectory, dict):
             trajectory_dirty = bool(last_status.get("trajectory_dirty")) if isinstance(last_status, dict) else False
             if backend_state.get("status_recent") or backend_state.get("run_active") or trajectory_dirty:
+                waypoints = recorded_trajectory.get("waypoints", [])
+                shaped_waypoints = [self._shape_recorded_waypoint(w) for w in (waypoints if isinstance(waypoints, list) else [])]
                 return {
-                    **recorded_trajectory,
+                    "waypoints": shaped_waypoints,
+                    "defaults": recorded_trajectory.get("defaults", {}),
                     "trajectory_path": str(backend_state["trajectory_path"]),
                     "error": None,
                     "source": "recorded_trajectory",
                     "dirty": trajectory_dirty,
                 }
         return self.session_store.read_waypoints()
+
+    def _shape_recorded_waypoint(self, waypoint: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(waypoint, dict):
+            return {"name": str(waypoint), "status": "pending", "result": "-"}
+        record_quality = waypoint.get("record_quality") if isinstance(waypoint.get("record_quality"), dict) else {}
+        reprojection = _to_float(record_quality.get("reprojection_error_px"))
+        board_margin = _to_float(record_quality.get("board_margin_px"))
+        flags = self._quality_flags(reprojection, board_margin)
+        detected = bool(record_quality.get("detected", False))
+        was_sampled = detected and flags.get("quality_ok", False)
+        return {
+            "waypoint": waypoint,
+            "index": None,
+            "name": str(waypoint.get("name", "")),
+            "status": "accepted" if was_sampled else ("skipped" if record_quality.get("filtered") else "pending"),
+            "result": "OK" if was_sampled else ("FAIL" if record_quality.get("filtered") else "-"),
+            "capture": waypoint.get("capture", True),
+            "reason": record_quality.get("reason", ""),
+            "reason_display": record_quality.get("reason", ""),
+            "reprojection_error_px": reprojection,
+            "board_margin_px": board_margin,
+            "thresholds": flags,
+            "camera_to_board_translation_m": record_quality.get("camera_to_board_translation_m"),
+            "camera_to_board_rotation_rpy_deg": record_quality.get("camera_to_board_rotation_rpy_deg"),
+            "board_angle_deg": _to_float(record_quality.get("board_angle_deg")),
+            "has_image": False,
+            "sample_row_index": None,
+            "thumbnail_url": None,
+        }
 
     def list_sessions(self) -> list[dict[str, Any]]:
         self._sync_backend_state()
@@ -505,6 +569,10 @@ class UiRosBridge(Node):
     def read_session_waypoints(self, session_id: str) -> list[dict[str, Any]]:
         self._sync_backend_state()
         return self.session_store.read_session_waypoints(session_id)
+
+    def per_sample_residuals(self, session_id: str) -> list[dict[str, Any]]:
+        self._sync_backend_state()
+        return self.session_store.per_sample_residuals(session_id)
 
     def start_semi_auto_run(self, *, confirmed: bool = False) -> dict[str, Any]:
         backend_state = self._sync_backend_state()
@@ -537,7 +605,7 @@ class UiRosBridge(Node):
             self._run_thread.start()
         result = self._shape_command_result(
             "run_semi_auto",
-            True,
+            False,
             "Semi-auto calibration request queued.",
             extra={"accepted": True, "queued": True, "confirmation": confirmation},
         )
@@ -598,6 +666,16 @@ class UiRosBridge(Node):
                 header_time_s=latest.header_time_s,
                 received_time_s=latest.received_time_s,
             )
+
+    def _latest_image_meta(self) -> tuple[int, float | None, float] | None:
+        with self._image_lock:
+            if self._latest_image is None:
+                return None
+            latest = self._latest_image
+            return latest.sequence, latest.header_time_s, latest.received_time_s
+
+    def _image_age_s_from_meta(self, meta: tuple[int, float | None, float] | None) -> float | None:
+        return (time.monotonic() - meta[2]) if meta is not None else None
 
     def _image_age_s(self, image: CachedImage | None) -> float | None:
         return (time.monotonic() - image.received_time_s) if image is not None else None
@@ -698,8 +776,6 @@ class UiRosBridge(Node):
             "waypoint_capture_disabled": ("skipped", "无需采样"),
             "waypoint_capture_skipped": ("skipped", "该点已跳过"),
             "waypoint_sample_captured": ("accepted", "样本已接受"),
-            "sample_captured": ("accepted", "样本已接受"),
-            "capture_failed": ("error", "采集失败"),
             "semi_auto_insufficient_samples": ("error", "有效样本不足"),
             "solving": ("solve", "正在求解手眼标定"),
             "solved": ("solve", "标定已求解"),

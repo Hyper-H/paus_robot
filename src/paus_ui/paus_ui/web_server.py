@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 import threading
 from typing import TYPE_CHECKING, Any
@@ -28,6 +29,9 @@ def create_app(bridge: "UiRosBridge"):
     except ImportError as exc:
         raise RuntimeError("paus_ui requires FastAPI and uvicorn. Install them in the paus_robot conda environment.") from exc
 
+    globals()["WebSocket"] = WebSocket
+    globals()["WebSocketDisconnect"] = WebSocketDisconnect
+
     app = FastAPI(title="PAUS Robot UI")
     static_root = Path(__file__).resolve().parent / "static"
     app.mount("/static", StaticFiles(directory=str(static_root)), name="static")
@@ -45,9 +49,56 @@ def create_app(bridge: "UiRosBridge"):
         rows, last_id = bridge.get_events_since(since)
         return {"events": rows, "last_id": last_id}
 
+    @app.get("/api/debug/frontend")
+    async def frontend_debug() -> dict[str, Any]:
+        app_js_path = static_root / "app.js"
+        index_path = static_root / "index.html"
+        try:
+            app_js = app_js_path.read_text(encoding="utf-8")
+        except OSError:
+            app_js = ""
+        try:
+            index_html = index_path.read_text(encoding="utf-8")
+        except OSError:
+            index_html = ""
+        return {
+            "web_server_path": str(Path(__file__).resolve()),
+            "static_root": str(static_root),
+            "app_js_path": str(app_js_path),
+            "index_path": str(index_path),
+            "app_js_exists": app_js_path.exists(),
+            "index_exists": index_path.exists(),
+            "app_js_has_ws_image": "ws/image" in app_js,
+            "app_js_has_old_live_axes_true": "/api/image/latest.jpg?mode=raw&axes=true" in app_js,
+            "index_cache_busts_app_js": "/static/app.js?v=" in index_html,
+        }
+
     @app.get("/api/image/latest.jpg")
-    async def latest_image(mode: str = "overlay", axes: bool = True) -> Response:
+    async def latest_image(mode: str = "raw", axes: bool = True) -> Response:
         return Response(content=await asyncio.to_thread(bridge.get_latest_jpeg, mode=mode, show_axes=axes), media_type="image/jpeg")
+
+    @app.websocket("/ws/image")
+    async def websocket_image(websocket: WebSocket) -> None:
+        await websocket.accept()
+        last_sequence = -1
+        try:
+            while True:
+                latest_meta = await asyncio.to_thread(bridge._latest_image_meta)
+                if latest_meta is None:
+                    last_sequence = -1
+                    await asyncio.sleep(0.2)
+                    continue
+                sequence, _, received_time_s = latest_meta
+                image_age_s = time.monotonic() - received_time_s
+                if image_age_s >= 3.0:
+                    await asyncio.sleep(0.2)
+                    continue
+                if sequence != last_sequence:
+                    await websocket.send_bytes(await asyncio.to_thread(bridge.get_latest_jpeg, mode="raw", show_axes=False))
+                    last_sequence = sequence
+                await asyncio.sleep(0.1)
+        except WebSocketDisconnect:
+            return
 
     @app.get("/api/handeye/quality")
     async def quality() -> dict[str, Any]:
@@ -107,6 +158,13 @@ def create_app(bridge: "UiRosBridge"):
     async def session_waypoints(session_id: str) -> list[dict[str, Any]]:
         try:
             return await asyncio.to_thread(bridge.read_session_waypoints, session_id)
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/sessions/{session_id}/per-sample-residuals")
+    async def per_sample_residuals(session_id: str) -> list[dict[str, Any]]:
+        try:
+            return await asyncio.to_thread(bridge.per_sample_residuals, session_id)
         except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
