@@ -35,13 +35,23 @@ calibration:
   trajectory_path: "src/paus_bringup/configs/eye_to_hand_trajectory.yaml"
   session_root_path: "calibration_sessions"
   save_sample_images: true
-  max_reprojection_error_px: 0.0
+  max_reprojection_error_px: 2.5
   min_board_margin_px: 10.0
   stable_position_tolerance_mm: 0.2
   stable_rotation_tolerance_deg: 0.1
   stable_window_s: 0.5
   stable_timeout_s: 10.0
   dwell_s: 0.5
+  corner_patch_size_px: 5
+  corner_min_points: 8
+  min_valid_corner_patch_ratio: 0.80
+  max_local_plane_residual_median_mm: 1.0
+  max_local_plane_residual_p95_mm: 2.0
+  min_global_plane_selected_ratio: 0.70
+  max_board_model_fit_rmse_mm: 2.0
+  max_board_model_fit_max_mm: 5.0
+  min_board_center_z_m: 0.20
+  max_board_center_z_m: 0.80
   tool_to_board:
     translation_m: [0.0, 0.0, 0.0]
     rotation_rpy_deg: [0.0, 0.0, 0.0]

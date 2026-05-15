@@ -1,7 +1,5 @@
 const state = {
-  imageMode: "overlay",
-  previewMode: "overlay",
-  showAxes: true,
+  previewMode: "raw",
   selectedSession: "",
   selectedWaypointName: "",
   selectedSampleRow: null,
@@ -16,6 +14,17 @@ const state = {
   autoSelectedSession: false,
   lastEventId: 0,
   wsConnected: false,
+  imageWsConnected: false,
+  liveImageObjectUrl: "",
+  liveImageFallbackTimer: null,
+  liveImageWatchdogTimer: null,
+  liveImageReconnectTimer: null,
+  liveImageReconnectDelay: 1500,
+  liveImageFrameCount: 0,
+  liveImageLastFrameAt: 0,
+  thumbObserver: null,
+  eventReconnectTimer: null,
+  eventReconnectDelay: 5000,
   eventDedupe: new Map(),
 };
 
@@ -27,6 +36,7 @@ const els = {
   nodeChip: document.getElementById("node-chip"),
   extrinsicsChip: document.getElementById("extrinsics-chip"),
   motionChip: document.getElementById("motion-chip"),
+  imageChip: document.getElementById("image-chip"),
   currentWaypoint: document.getElementById("current-waypoint"),
   workflowFlow: document.getElementById("workflow-flow"),
   tcpPoseGrid: document.getElementById("tcp-pose-grid"),
@@ -118,8 +128,137 @@ async function postJson(url, body = {}) {
   return response.json();
 }
 
-function refreshImage() {
-  els.liveImage.src = `/api/image/latest.jpg?mode=${state.imageMode}&axes=${state.showAxes ? "true" : "false"}&t=${Date.now()}`;
+function setLiveImageStatus(label, tone = "neutral") {
+  if (els.imageChip) {
+    setChip(els.imageChip, label, tone);
+  }
+}
+
+function clearLiveImageObjectUrl() {
+  if (state.liveImageObjectUrl) {
+    URL.revokeObjectURL(state.liveImageObjectUrl);
+    state.liveImageObjectUrl = "";
+  }
+}
+
+function showLivePlaceholder(message) {
+  els.liveEmpty.textContent = message || "等待相机图像";
+  els.liveEmpty.classList.remove("hidden");
+}
+
+function hideLivePlaceholder() {
+  els.liveEmpty.classList.add("hidden");
+}
+
+function markLiveImageFrameReceived() {
+  state.liveImageLastFrameAt = Date.now();
+  state.liveImageFrameCount += 1;
+  hideLivePlaceholder();
+}
+
+function refreshLiveImageHttp(force = false) {
+  if (state.imageWsConnected && !force) return;
+  els.liveImage.src = `/api/image/latest.jpg?mode=raw&axes=false&t=${Date.now()}`;
+}
+
+function startLiveImageFallback() {
+  if (state.liveImageFallbackTimer) return;
+  refreshLiveImageHttp();
+  state.liveImageFallbackTimer = window.setInterval(refreshLiveImageHttp, 1800);
+  setLiveImageStatus("图像 HTTP fallback", "warn");
+}
+
+function stopLiveImageFallback() {
+  if (state.liveImageFallbackTimer) {
+    window.clearInterval(state.liveImageFallbackTimer);
+    state.liveImageFallbackTimer = null;
+  }
+}
+
+function startLiveImageWatchdog() {
+  if (state.liveImageWatchdogTimer) return;
+  state.liveImageLastFrameAt = Date.now();
+  state.liveImageWatchdogTimer = window.setInterval(() => {
+    if (!state.imageWsConnected) return;
+    if (!state.liveImageLastFrameAt) return;
+    const staleForMs = Date.now() - state.liveImageLastFrameAt;
+    if (staleForMs >= 2500) {
+      setLiveImageStatus("图像 WS stale", "warn");
+    }
+  }, 1000);
+}
+
+function stopLiveImageWatchdog() {
+  if (state.liveImageWatchdogTimer) {
+    window.clearInterval(state.liveImageWatchdogTimer);
+    state.liveImageWatchdogTimer = null;
+  }
+}
+
+function scheduleLiveImageReconnect() {
+  if (state.liveImageReconnectTimer) return;
+  const delay = state.liveImageReconnectDelay;
+  state.liveImageReconnectTimer = window.setTimeout(() => {
+    state.liveImageReconnectTimer = null;
+    connectLiveImageStream();
+  }, delay);
+  state.liveImageReconnectDelay = Math.min(delay * 2, 30000);
+}
+
+function scheduleEventReconnect() {
+  if (state.eventReconnectTimer) return;
+  const delay = state.eventReconnectDelay;
+  state.eventReconnectTimer = window.setTimeout(() => {
+    state.eventReconnectTimer = null;
+    connectEvents();
+  }, delay);
+  state.eventReconnectDelay = Math.min(delay * 2, 60000);
+}
+
+function connectLiveImageStream() {
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const wsUrl = `${proto}//${window.location.host}/ws/image`;
+  let socket;
+  try {
+    socket = new WebSocket(wsUrl);
+  } catch (error) {
+    state.imageWsConnected = false;
+    setLiveImageStatus("图像 HTTP fallback", "warn");
+    startLiveImageFallback();
+    scheduleLiveImageReconnect();
+    return;
+  }
+  socket.binaryType = "arraybuffer";
+  socket.addEventListener("open", () => {
+    state.imageWsConnected = true;
+    state.liveImageReconnectDelay = 1500;
+    stopLiveImageFallback();
+    startLiveImageWatchdog();
+    setLiveImageStatus("图像 WebSocket", "good");
+  });
+  socket.addEventListener("message", (event) => {
+    const payload = event.data;
+    if (!(payload instanceof ArrayBuffer)) return;
+    const blob = new Blob([payload], { type: "image/jpeg" });
+    const nextUrl = URL.createObjectURL(blob);
+    const previousUrl = state.liveImageObjectUrl;
+    state.liveImageObjectUrl = nextUrl;
+    els.liveImage.src = nextUrl;
+    markLiveImageFrameReceived();
+    if (previousUrl) {
+      window.setTimeout(() => URL.revokeObjectURL(previousUrl), 0);
+    }
+  });
+  socket.addEventListener("error", () => {
+    // error is followed by close; handled there.
+  });
+  socket.addEventListener("close", () => {
+    state.imageWsConnected = false;
+    stopLiveImageFallback();
+    stopLiveImageWatchdog();
+    startLiveImageFallback();
+    scheduleLiveImageReconnect();
+  });
 }
 
 async function refreshStatus() {
@@ -138,7 +277,23 @@ async function refreshStatus() {
   setChip(els.cameraChip, camera.connected ? `相机已连接 ${camera.image_sequence || 0}` : "相机等待中", camera.connected ? "good" : "warn");
   setChip(els.nodeChip, handeye.calibration_node_connected ? "机器人已连接" : "节点等待中", handeye.calibration_node_connected ? "good" : "warn");
   setChip(els.extrinsicsChip, session.session_id ? `session ${session.session_id}` : "外参 --", session.session_id ? "good" : "neutral");
-  setChip(els.motionChip, `execute_motion: ${handeye.execute_motion ? "true" : "false"}`, handeye.execute_motion ? "bad" : "good");
+  const motionLabel = handeye.execute_motion ? "真机模式 (execute_motion=true)" : "Dry-run (execute_motion=false)";
+  const motionTone = handeye.execute_motion ? "bad" : "good";
+  setChip(els.motionChip, motionLabel, motionTone);
+  const runBtn = document.getElementById("run-btn");
+  const dryRunBtn = document.getElementById("dry-run-btn");
+  if (handeye.execute_motion) {
+    runBtn.textContent = "▶ 开始标定（真机）";
+    runBtn.title = "机械臂将真实运动！确认工作空间安全后操作。";
+    dryRunBtn.style.display = "none";
+  } else {
+    runBtn.textContent = "▶ 开始标定";
+    runBtn.title = "当前为 dry-run 模式，机械臂不会真实运动。";
+    dryRunBtn.style.display = "";
+  }
+  if (!handeye.motion_state_known && handeye.calibration_node_connected) {
+    setChip(els.motionChip, "运动状态未知 — 请确认", "warn");
+  }
   els.currentWaypoint.textContent = current.name || "--";
   renderFlow(workflow.stage);
   const tcp = current.stable_tcp_pose_mmdeg || current.tcp_pose_mmdeg || [];
@@ -162,6 +317,7 @@ async function refreshStatus() {
   } else {
     els.boardAngle.textContent = "--";
   }
+  renderQualityMetrics(current);
   if (session.session_id && handeye.run_active && !state.userSelectedSession && state.selectedSession !== session.session_id) {
     state.selectedSession = session.session_id;
     state.autoSelectedSession = true;
@@ -176,22 +332,36 @@ async function refreshStatus() {
   if (motion.trajectory_path && (!state.selectedSession || state.selectedSession === session.session_id || state.currentTrajectorySelected)) {
     els.trajectoryPath.textContent = motion.trajectory_path;
   }
+  const currentStage = workflow.stage || "";
+  if ((currentStage === "finished" || currentStage === "error") && !completionShown) {
+    const sessionId = session.session_id || state.selectedSession;
+    refreshReport().then(() => {
+      if (!sessionId) {
+        showCompletionDialog(handeye, null);
+        return;
+      }
+      getJson(`/api/sessions/${encodeURIComponent(sessionId)}/report`, {}).then((report) => {
+        showCompletionDialog(handeye, report);
+      });
+    });
+  }
+  if (currentStage === "movej" || currentStage === "dry_run") {
+    completionShown = false;
+  }
 }
 
-async function refreshQuality() {
-  const quality = await getJson("/api/handeye/quality", {});
-  state.quality = quality;
+function renderQualityMetrics(quality = {}) {
   const t = quality.camera_to_board_translation_m || [];
   const thresholds = quality.thresholds || {};
+  const detected = quality.quality_detected ?? quality.detected;
   const metrics = [
-    { label: "检测", value: quality.detected ? "ok" : "no", tone: quality.detected ? "" : "warn" },
+    { label: "检测", value: detected === true ? "ok" : (detected === false ? "no" : "--"), tone: detected === false ? "warn" : "" },
     { label: "重投影 px", value: fmt(quality.reprojection_error_px, 3), tone: thresholds.reprojection_ok === false ? "bad" : "" },
     { label: "边距 px", value: fmt(quality.board_margin_px, 1), tone: thresholds.margin_ok === false ? "bad" : "" },
     { label: "Z m", value: fmt(t[2], 3), tone: "" },
     { label: "棋盘角度", value: fmt(quality.board_angle_deg, 2, " deg"), tone: "" },
   ];
   els.qualityMetrics.innerHTML = metrics.map((item) => `<div class="metric ${item.tone}"><span>${item.label}</span><strong>${item.value}</strong></div>`).join("");
-  els.liveEmpty.classList.toggle("hidden", Boolean(quality.image_sequence));
 }
 
 async function refreshSessions() {
@@ -273,7 +443,7 @@ function renderWaypointLoadError(message) {
   const error = message || "当前示教轨迹加载失败。";
   els.waypointStats.textContent = "轨迹加载失败";
   els.tableFooter.textContent = error;
-  els.waypointBody.innerHTML = `<tr class="empty-row"><td colspan="10">${escapeHtml(error)}</td></tr>`;
+  els.waypointBody.innerHTML = `<tr class="empty-row"><td colspan="12">${escapeHtml(error)}</td></tr>`;
   state.selectedWaypointName = "";
   state.selectedSampleRow = null;
   renderPreview(null);
@@ -300,10 +470,20 @@ async function refreshWaypoints() {
         waypoint,
         index: index + 1,
         name: waypoint.name,
-        status: "pending",
-        result: "-",
+        status: waypoint.status || "pending",
+        result: waypoint.result || "-",
         capture: waypoint.capture,
-        thresholds: {},
+        thresholds: waypoint.thresholds || {},
+        reprojection_error_px: waypoint.reprojection_error_px,
+        board_margin_px: waypoint.board_margin_px,
+        camera_to_board_translation_m: waypoint.camera_to_board_translation_m,
+        camera_to_board_rotation_rpy_deg: waypoint.camera_to_board_rotation_rpy_deg,
+        board_angle_deg: waypoint.board_angle_deg,
+        reason: waypoint.reason,
+        reason_display: waypoint.reason_display,
+        has_image: waypoint.has_image || false,
+        sample_row_index: waypoint.sample_row_index || null,
+        thumbnail_url: waypoint.thumbnail_url || null,
       }));
       if (trajectory.trajectory_path) els.trajectoryPath.textContent = trajectory.trajectory_path;
     }
@@ -319,6 +499,7 @@ async function refreshWaypoints() {
   els.waypointStats.textContent = `共 ${state.waypoints.length} 个点`;
   els.tableFooter.textContent = `已接受 ${accepted}　跳过 ${skipped}　待采集 ${pending}`;
   els.waypointBody.innerHTML = state.waypoints.map(renderWaypointRow).join("");
+  hydrateWaypointThumbnails();
   if (!state.waypoints.length) {
     state.selectedWaypointName = "";
     state.selectedSampleRow = null;
@@ -338,8 +519,12 @@ function renderWaypointRow(item, index) {
   const displayIndex = item.index ?? item.display_index ?? index + 1;
   const reprojClass = thresholds.reprojection_ok === false ? "quality-bad" : "";
   const marginClass = thresholds.margin_ok === false ? "quality-bad" : "";
+  const transResid = item.translation_residual_mm;
+  const rotResid = item.rotation_residual_deg;
+  const transResidClass = transResid !== null && transResid !== undefined && transResid > 10 ? "quality-bad" : (transResid !== null && transResid !== undefined && transResid > 5 ? "quality-warn" : "");
+  const rotResidClass = rotResid !== null && rotResid !== undefined && rotResid > 2 ? "quality-bad" : (rotResid !== null && rotResid !== undefined && rotResid > 1 ? "quality-warn" : "");
   const thumb = item.has_image && item.sample_row_index
-    ? `<button class="thumb-button" type="button" data-row="${item.sample_row_index}"><img src="/api/sessions/${encodeURIComponent(state.selectedSession)}/sample-image/${item.sample_row_index}.jpg?mode=overlay&axes=true&t=${Date.now()}" alt="sample ${item.sample_row_index}" /></button>`
+    ? `<button class="thumb-button" type="button" data-row="${item.sample_row_index}"><img class="thumb-image" data-src="/api/sessions/${encodeURIComponent(state.selectedSession)}/sample-image/${item.sample_row_index}.jpg?mode=raw&axes=false" alt="sample ${item.sample_row_index}" loading="lazy" decoding="async" /></button>`
     : "-";
   return `
     <tr data-name="${escapeHtml(item.name || waypoint.name || "")}" data-row="${item.sample_row_index || ""}">
@@ -350,10 +535,49 @@ function renderWaypointRow(item, index) {
       <td class="${reprojClass}">${fmt(item.reprojection_error_px, 3)}</td>
       <td class="${marginClass}">${fmt(item.board_margin_px, 1)}</td>
       <td>${fmt(t[2], 3)}</td>
+      <td class="${transResidClass}">${fmt(transResid, 3)}</td>
+      <td class="${rotResidClass}">${fmt(rotResid, 4)}</td>
       <td>${item.capture === false ? "no" : "OK"}</td>
       <td title="${escapeHtml(item.reason_display || item.reason || "")}">${escapeHtml(item.reason_display || item.reason || "-")}</td>
       <td>${thumb}</td>
     </tr>`;
+}
+
+function clearThumbnailObserver() {
+  if (state.thumbObserver) {
+    state.thumbObserver.disconnect();
+    state.thumbObserver = null;
+  }
+}
+
+function hydrateWaypointThumbnails() {
+  clearThumbnailObserver();
+  const images = [...els.waypointBody.querySelectorAll("img.thumb-image[data-src]")];
+  if (!images.length) return;
+  const loadThumb = (img) => {
+    const src = img.dataset.src;
+    if (!src || img.dataset.loaded === "true") return;
+    img.src = src;
+    img.dataset.loaded = "true";
+    delete img.dataset.src;
+  };
+  if ("IntersectionObserver" in window) {
+    const tableWrap = els.waypointBody.closest(".table-wrap");
+    state.thumbObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        loadThumb(entry.target);
+        state.thumbObserver?.unobserve(entry.target);
+      });
+    }, {
+      root: tableWrap,
+      rootMargin: "180px 0px",
+      threshold: 0.01,
+    });
+    images.forEach((img) => state.thumbObserver.observe(img));
+    return;
+  }
+  images.slice(0, 8).forEach(loadThumb);
 }
 
 function selectWaypoint(item) {
@@ -384,19 +608,26 @@ function renderPreview(item) {
   const name = item.name || item.waypoint?.name || "样本预览";
   els.previewTitle.textContent = `${name} 预览`;
   const rowIndex = item.sample_row_index;
-  if (state.selectedSession && rowIndex && item.has_image) {
-    els.previewEmpty.classList.add("hidden");
-    els.samplePreview.style.display = "block";
-    els.samplePreview.src = `/api/sessions/${encodeURIComponent(state.selectedSession)}/sample-image/${rowIndex}.jpg?mode=${state.previewMode}&axes=${state.showAxes ? "true" : "false"}&t=${Date.now()}`;
-  } else {
-    els.samplePreview.removeAttribute("src");
-    els.samplePreview.style.display = "none";
-    els.previewEmpty.classList.remove("hidden");
-    els.previewEmpty.textContent = item.reason_display || "该 waypoint 暂无样本图像";
-  }
   els.previewSubtitle.textContent = item.status ? `${item.status} / ${item.result || "-"}` : "选择 waypoint 查看图像和质量指标";
   const t = item.camera_to_board_translation_m || [];
   const r = item.camera_to_board_rotation_rpy_deg || [];
+  if (state.previewMode === "raw") {
+    els.previewDetails.innerHTML = "";
+    if (state.selectedSession && rowIndex && item.has_image) {
+      els.previewEmpty.classList.add("hidden");
+      els.samplePreview.style.display = "block";
+      els.samplePreview.src = `/api/sessions/${encodeURIComponent(state.selectedSession)}/sample-image/${rowIndex}.jpg?mode=raw&axes=false`;
+    } else {
+      els.samplePreview.removeAttribute("src");
+      els.samplePreview.style.display = "none";
+      els.previewEmpty.classList.remove("hidden");
+      els.previewEmpty.textContent = item.reason_display || "该 waypoint 暂无样本图像";
+    }
+    return;
+  }
+  els.samplePreview.removeAttribute("src");
+  els.samplePreview.style.display = "none";
+  els.previewEmpty.classList.add("hidden");
   els.previewDetails.innerHTML = [
     ["reprojection_error_px", fmt(item.reprojection_error_px, 3)],
     ["board_margin_px", fmt(item.board_margin_px, 1)],
@@ -409,7 +640,18 @@ function renderPreview(item) {
     ["board rz", fmt(r[2], 2, " deg")],
     ["image_sequence", text(item.image_sequence)],
     ["capture_time", text(item.capture_time_s)],
+    ["translation_residual_mm", fmt(item.translation_residual_mm, 3, " mm")],
+    ["rotation_residual_deg", fmt(item.rotation_residual_deg, 4, " deg")],
   ].map(([label, value]) => `<div class="kv"><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+}
+
+function initPreviewErrorHandler() {
+  els.samplePreview.addEventListener("error", () => {
+    els.samplePreview.removeAttribute("src");
+    els.samplePreview.style.display = "none";
+    els.previewEmpty.classList.remove("hidden");
+    els.previewEmpty.textContent = "样本图像加载失败，文件可能不存在。";
+  });
 }
 
 function renderPoseGrid(el, labels, values, units) {
@@ -528,6 +770,38 @@ function addEvent(event) {
   }
 }
 
+let completionShown = false;
+
+function showCompletionDialog(handeye, report) {
+  if (completionShown) return;
+  const workflow = handeye.workflow || {};
+  const stage = workflow.stage || "";
+  if (stage !== "finished" && stage !== "error") return;
+  completionShown = true;
+  const session = handeye.session || {};
+  const reportPath = report?.report_path || session.report_path || "";
+  const sampleCount = report?.sample_count ?? workflow.sample_count ?? "--";
+  const accepted = report?.accepted_count ?? "--";
+  const skipped = report?.skipped_count ?? "--";
+  const isSuccess = stage === "finished";
+  const title = isSuccess ? "标定完成" : "标定异常";
+  const body = [
+    `<div class="kv"><span>状态</span><strong>${escapeHtml(workflow.label || stage)}</strong></div>`,
+    `<div class="kv"><span>采集样本数</span><strong>${sampleCount}</strong></div>`,
+    `<div class="kv"><span>已接受 / 已跳过</span><strong>${accepted} / ${skipped}</strong></div>`,
+    `<div class="kv"><span>报告路径</span><strong>${escapeHtml(reportPath || "暂无")}</strong></div>`,
+    `<div class="kv"><span>extrinsics 写入</span><strong>${report?.has_solution ? "已写入" : "未写入"}</strong></div>`,
+    `<div class="kv"><span>session ID</span><strong>${escapeHtml(session.session_id || "--")}</strong></div>`,
+  ].join("");
+  document.getElementById("modal-title").textContent = title;
+  document.getElementById("modal-body").innerHTML = body;
+  document.getElementById("complete-modal").classList.remove("hidden");
+}
+
+function hideCompletionDialog() {
+  document.getElementById("complete-modal").classList.add("hidden");
+}
+
 async function pollEvents() {
   const payload = await getJson(`/api/events?since=${state.lastEventId}`, { events: [], last_id: state.lastEventId });
   state.lastEventId = payload.last_id || state.lastEventId;
@@ -542,42 +816,49 @@ async function pollEvents() {
 
 function connectEvents() {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const wsUrl = `${proto}//${window.location.host}/ws/events`;
   let socket;
   try {
-    socket = new WebSocket(`${proto}//${window.location.host}/ws/events`);
+    socket = new WebSocket(wsUrl);
   } catch (error) {
     state.wsConnected = false;
     els.eventMode.textContent = "polling fallback";
+    scheduleEventReconnect();
     return;
   }
   socket.addEventListener("open", () => {
     state.wsConnected = true;
+    state.eventReconnectDelay = 5000;
     els.eventMode.textContent = "WebSocket connected";
   });
   socket.addEventListener("message", (event) => {
-    const payload = JSON.parse(event.data);
-    state.lastEventId = Math.max(state.lastEventId, Number(payload.id || 0));
-    addEvent(payload);
-    if (payload.type === "eye_to_hand_status" || payload.type === "ui_command_result") {
-      refreshStatus();
-      refreshWaypoints();
-      refreshReport();
+    try {
+      const payload = JSON.parse(event.data);
+      state.lastEventId = Math.max(state.lastEventId, Number(payload.id || 0));
+      addEvent(payload);
+      if (payload.type === "eye_to_hand_status" || payload.type === "ui_command_result") {
+        refreshStatus();
+        refreshWaypoints();
+        refreshReport();
+      }
+    } catch (parseError) {
+      // ignore malformed messages
     }
   });
-  socket.addEventListener("close", () => {
+  socket.addEventListener("error", () => {
+    // error will be followed by close; no need to change state here
+  });
+  socket.addEventListener("close", (event) => {
     state.wsConnected = false;
-    els.eventMode.textContent = "polling fallback";
-    window.setTimeout(connectEvents, 3000);
+    els.eventMode.textContent = event.code === 1006 ? "ws closed, polling fallback" : "polling fallback";
+    scheduleEventReconnect();
   });
 }
 
 function bindUi() {
-  document.querySelectorAll("[data-image-mode]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.imageMode = button.dataset.imageMode;
-      document.querySelectorAll("[data-image-mode]").forEach((item) => item.classList.toggle("active", item === button));
-      refreshImage();
-    });
+  els.liveImage.addEventListener("load", hideLivePlaceholder);
+  els.liveImage.addEventListener("error", () => {
+    showLivePlaceholder(state.imageWsConnected ? "图像加载失败" : "等待相机图像");
   });
   document.querySelectorAll("[data-preview-mode]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -587,18 +868,16 @@ function bindUi() {
       if (selected) renderPreview(selected);
     });
   });
-  document.getElementById("axis-toggle").addEventListener("change", (event) => {
-    state.showAxes = Boolean(event.target.checked);
-    refreshImage();
-    const selected = state.waypoints.find((item) => item.name === state.selectedWaypointName);
-    if (selected) renderPreview(selected);
-  });
   document.getElementById("record-btn").addEventListener("click", () => runCommand("记录当前点", "/api/handeye/record_waypoint"));
   document.getElementById("delete-btn").addEventListener("click", () => runCommand("删除上一个", "/api/handeye/delete_last_waypoint"));
   document.getElementById("save-trajectory-btn").addEventListener("click", () => runCommand("保存轨迹", "/api/handeye/save_trajectory"));
   document.getElementById("dry-run-btn").addEventListener("click", async () => {
     const handeye = state.status?.handeye || {};
-    if (handeye.execute_motion || handeye.backend_config_source !== "backend_status") {
+    if (handeye.execute_motion) {
+      setNotice("当前为真机模式，无法执行 dry-run。请将 execute_motion 设为 false 后重试。", "bad");
+      return;
+    }
+    if (handeye.backend_config_source !== "backend_status" && handeye.backend_config_source !== "backend_service_ready") {
       setNotice("无法确认后端是 dry-run；请确认标定节点状态已连接且 execute_motion=false。", "bad");
       return;
     }
@@ -609,15 +888,26 @@ function bindUi() {
     const handeye = state.status?.handeye || {};
     const motion = handeye.motion || {};
     if (handeye.requires_motion_confirmation) {
+      const modeWarning = handeye.execute_motion
+        ? "⚠ 真机模式：将真实驱动机械臂执行标定！请确认工作空间安全。"
+        : "当前为 dry-run 模式，机械臂不会运动。";
       const message = [
-        handeye.execute_motion ? "将真实驱动机械臂执行半自动手眼标定。" : "暂未确认标定节点运动状态，继续前需要人工确认。",
+        modeWarning,
         `waypoint 数量：${motion.waypoint_count ?? "--"}`,
         `运动模式：${motion.motion || "movej"}`,
         `速度/加速度：${motion.vel ?? "--"} / ${motion.acc ?? "--"}`,
         `轨迹文件：${motion.trajectory_path || handeye.trajectory_path || "--"}`,
-        "确认标定板、线缆和工作空间安全后继续。",
+        "",
+        handeye.execute_motion ? "输入 'YES' 确认开始真机标定：" : "确认标定板、线缆和工作空间安全后继续。",
       ].join("\n");
-      if (!window.confirm(message)) return;
+      if (handeye.execute_motion) {
+        if (window.prompt(message) !== "YES") {
+          setNotice("真机标定已取消。", "warn");
+          return;
+        }
+      } else {
+        if (!window.confirm(message)) return;
+      }
     }
     if (!await saveTrajectoryIfDirty()) return;
     await runCommand("开始标定", "/api/handeye/run", { confirmed: Boolean(handeye.requires_motion_confirmation) });
@@ -635,6 +925,7 @@ function bindUi() {
     refreshReport();
     refreshWaypoints();
   });
+  document.getElementById("modal-close").addEventListener("click", hideCompletionDialog);
   els.waypointBody.addEventListener("click", (event) => {
     const row = event.target.closest("tr");
     if (!row) return;
@@ -644,21 +935,14 @@ function bindUi() {
 }
 
 bindUi();
+initPreviewErrorHandler();
+showLivePlaceholder("等待相机图像");
+refreshLiveImageHttp();
+connectLiveImageStream();
+startLiveImageWatchdog();
 connectEvents();
-refreshImage();
 refreshAll();
-refreshQuality();
 pollEvents();
-window.setInterval(refreshImage, 1000);
-window.setInterval(refreshStatus, 1500);
-window.setInterval(refreshQuality, 2000);
-window.setInterval(refreshSessions, 5000);
 window.setInterval(() => {
   if (!state.wsConnected) pollEvents();
 }, 2000);
-window.setInterval(() => {
-  if (!state.wsConnected) {
-    refreshWaypoints();
-    refreshReport();
-  }
-}, 5000);

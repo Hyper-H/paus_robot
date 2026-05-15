@@ -249,6 +249,13 @@ p {
   color: var(--red);
   border-color: rgba(208, 68, 55, 0.3);
   background: rgba(208, 68, 55, 0.08);
+  font-weight: 700;
+  font-size: 13px;
+}
+
+#motion-chip {
+  min-width: 160px;
+  text-align: center;
 }
 
 .top-actions {
@@ -435,9 +442,6 @@ p {
   border-right: 0;
 }
 
-.metric span,
-.summary-cell span,
-.kv span,
 .data-title {
   display: block;
   color: var(--muted);
@@ -449,8 +453,17 @@ p {
 .kv strong {
   display: block;
   margin-top: 4px;
-  font-size: 15px;
+  font-size: 17px;
   line-height: 1.15;
+  font-weight: 650;
+}
+
+.metric span,
+.summary-cell span,
+.kv span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .metric.bad strong,
@@ -881,6 +894,47 @@ tbody tr.selected td {
 .table-stats {
   color: var(--muted);
   font-size: 12px;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 21, 23, 0.72);
+}
+
+.modal-overlay.hidden {
+  display: none;
+}
+
+.modal-card {
+  min-width: 360px;
+  max-width: 520px;
+  border-radius: 8px;
+  padding: 24px;
+  background: var(--panel);
+  box-shadow: 0 20px 48px rgba(0,0,0,0.35);
+}
+
+.modal-card h2 {
+  font-size: 20px;
+  margin-bottom: 14px;
+}
+
+.modal-body {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 18px;
+  font-size: 14px;
+}
+
+.modal-body .kv {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 @media (max-width: 1280px) {
