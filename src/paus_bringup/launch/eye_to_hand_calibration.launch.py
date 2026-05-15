@@ -29,6 +29,13 @@ def _resolve_default_config_path(bringup_share: Path) -> Path:
     return source_config if source_config.exists() else bringup_share / "configs" / "default.yaml"
 
 
+def _resolve_workspace_path(path_value: object, workspace_root: Path) -> str:
+    path = Path(str(path_value)).expanduser()
+    if not path.is_absolute():
+        path = workspace_root / path
+    return str(path)
+
+
 # 真正组装标定链启动动作。
 def _launch_setup(context, *args, **kwargs):
     # 当前函数不使用额外参数，显式丢弃即可。
@@ -37,6 +44,7 @@ def _launch_setup(context, *args, **kwargs):
     # 找到 bringup 包和 marker 包的安装目录。
     bringup_share = Path(get_package_share_directory("paus_bringup"))
     marker_share = Path(get_package_share_directory("paus_marker_ros2"))
+    workspace_root = bringup_share.parents[3]
     # 优先使用系统里的 python3。
     python_exec = shutil.which("python3") or "/usr/bin/python3"
     # `camera_bridge.py` 是普通 Python 脚本，不是 ROS2 node。
@@ -66,7 +74,22 @@ def _launch_setup(context, *args, **kwargs):
     max_board_model_fit_max_mm = float(LaunchConfiguration("max_board_model_fit_max_mm").perform(context))
     min_board_center_z_m = float(LaunchConfiguration("min_board_center_z_m").perform(context))
     max_board_center_z_m = float(LaunchConfiguration("max_board_center_z_m").perform(context))
-    output_path = LaunchConfiguration("output_path").perform(context)
+    output_path = _resolve_workspace_path(LaunchConfiguration("output_path").perform(context), workspace_root)
+    trajectory_path = _resolve_workspace_path(LaunchConfiguration("trajectory_path").perform(context), workspace_root)
+    session_root_path = _resolve_workspace_path(LaunchConfiguration("session_root_path").perform(context), workspace_root)
+    save_sample_images = LaunchConfiguration("save_sample_images").perform(context).strip().lower() in ("1", "true", "yes", "on")
+    max_reprojection_error_px = float(LaunchConfiguration("max_reprojection_error_px").perform(context))
+    min_board_margin_px = float(LaunchConfiguration("min_board_margin_px").perform(context))
+    stable_position_tolerance_mm = float(LaunchConfiguration("stable_position_tolerance_mm").perform(context))
+    stable_rotation_tolerance_deg = float(LaunchConfiguration("stable_rotation_tolerance_deg").perform(context))
+    stable_window_s = float(LaunchConfiguration("stable_window_s").perform(context))
+    stable_timeout_s = float(LaunchConfiguration("stable_timeout_s").perform(context))
+    dwell_s = float(LaunchConfiguration("dwell_s").perform(context))
+    execute_motion = LaunchConfiguration("execute_motion").perform(context).strip().lower() in ("1", "true", "yes", "on")
+    tool_id = int(LaunchConfiguration("tool_id").perform(context))
+    user_id = int(LaunchConfiguration("user_id").perform(context))
+    move_vel = float(LaunchConfiguration("move_vel").perform(context))
+    move_acc = float(LaunchConfiguration("move_acc").perform(context))
     tool_to_board_tx = float(LaunchConfiguration("tool_to_board_tx").perform(context))
     tool_to_board_ty = float(LaunchConfiguration("tool_to_board_ty").perform(context))
     tool_to_board_tz = float(LaunchConfiguration("tool_to_board_tz").perform(context))
@@ -149,6 +172,21 @@ def _launch_setup(context, *args, **kwargs):
                     "min_board_center_z_m": min_board_center_z_m,
                     "max_board_center_z_m": max_board_center_z_m,
                     "output_path": output_path,
+                    "trajectory_path": trajectory_path,
+                    "session_root_path": session_root_path,
+                    "save_sample_images": save_sample_images,
+                    "max_reprojection_error_px": max_reprojection_error_px,
+                    "min_board_margin_px": min_board_margin_px,
+                    "stable_position_tolerance_mm": stable_position_tolerance_mm,
+                    "stable_rotation_tolerance_deg": stable_rotation_tolerance_deg,
+                    "stable_window_s": stable_window_s,
+                    "stable_timeout_s": stable_timeout_s,
+                    "dwell_s": dwell_s,
+                    "execute_motion": execute_motion,
+                    "tool_id": tool_id,
+                    "user_id": user_id,
+                    "move_vel": move_vel,
+                    "move_acc": move_acc,
                     "tool_to_board.translation_m": [tool_to_board_tx, tool_to_board_ty, tool_to_board_tz],
                     "tool_to_board.rotation_rpy_deg": [tool_to_board_rx, tool_to_board_ry, tool_to_board_rz],
                 }
@@ -167,7 +205,7 @@ def generate_launch_description() -> LaunchDescription:
         config_payload = yaml.safe_load(handle) or {}
     calibration_cfg = config_payload.get("calibration", {})
     tool_to_board_cfg = calibration_cfg.get("tool_to_board", {})
-    default_extrinsics_path = str(calibration_cfg.get("output_path", bringup_share / "configs" / "extrinsics.yaml"))
+    default_extrinsics_path = str(calibration_cfg.get("output_path", "src/paus_bringup/configs/extrinsics.yaml"))
     default_observation_mode = str(calibration_cfg.get("observation_mode", "rgb_pnp"))
     default_depth_topic = str(calibration_cfg.get("depth_topic", "/camera/depth_aligned"))
     default_max_rgb_depth_delta_ms = str(calibration_cfg.get("max_rgb_depth_delta_ms", 100.0))
@@ -176,6 +214,21 @@ def generate_launch_description() -> LaunchDescription:
     default_square_size_m = str(calibration_cfg.get("square_size_m", 0.01))
     default_solver_method = str(calibration_cfg.get("solver_method", "ax_xb_park"))
     default_min_sample_count = str(calibration_cfg.get("min_sample_count", 10))
+    default_trajectory_path = str(calibration_cfg.get("trajectory_path", "src/paus_bringup/configs/eye_to_hand_trajectory.yaml"))
+    default_session_root_path = str(calibration_cfg.get("session_root_path", "calibration_sessions"))
+    default_save_sample_images = str(calibration_cfg.get("save_sample_images", True)).lower()
+    default_max_reprojection_error_px = str(calibration_cfg.get("max_reprojection_error_px", 2.5))
+    default_min_board_margin_px = str(calibration_cfg.get("min_board_margin_px", 10.0))
+    default_stable_position_tolerance_mm = str(calibration_cfg.get("stable_position_tolerance_mm", 0.2))
+    default_stable_rotation_tolerance_deg = str(calibration_cfg.get("stable_rotation_tolerance_deg", 0.1))
+    default_stable_window_s = str(calibration_cfg.get("stable_window_s", 0.5))
+    default_stable_timeout_s = str(calibration_cfg.get("stable_timeout_s", 10.0))
+    default_dwell_s = str(calibration_cfg.get("dwell_s", 0.5))
+    default_execute_motion = str(config_payload.get("control", {}).get("execute_motion", False)).lower()
+    default_tool_id = str(config_payload.get("control", {}).get("tool_id", 0))
+    default_user_id = str(config_payload.get("control", {}).get("user_id", 0))
+    default_move_vel = str(config_payload.get("control", {}).get("move_vel", 10.0))
+    default_move_acc = str(config_payload.get("control", {}).get("move_acc", 10.0))
     default_corner_patch_size_px = str(calibration_cfg.get("corner_patch_size_px", 5))
     default_corner_min_points = str(calibration_cfg.get("corner_min_points", 8))
     default_min_valid_corner_patch_ratio = str(calibration_cfg.get("min_valid_corner_patch_ratio", 0.80))
@@ -311,6 +364,21 @@ def generate_launch_description() -> LaunchDescription:
                 default_value=default_extrinsics_path,
                 description="Output path for the solved extrinsics YAML.",
             ),
+            DeclareLaunchArgument("trajectory_path", default_value=default_trajectory_path, description="Semi-auto MoveJ trajectory YAML path."),
+            DeclareLaunchArgument("session_root_path", default_value=default_session_root_path, description="Directory where calibration sessions are archived."),
+            DeclareLaunchArgument("save_sample_images", default_value=default_save_sample_images, description="Whether to save accepted sample images in the session directory."),
+            DeclareLaunchArgument("max_reprojection_error_px", default_value=default_max_reprojection_error_px, description="Maximum accepted chessboard reprojection error in pixels."),
+            DeclareLaunchArgument("min_board_margin_px", default_value=default_min_board_margin_px, description="Minimum chessboard corner margin from image border in pixels."),
+            DeclareLaunchArgument("stable_position_tolerance_mm", default_value=default_stable_position_tolerance_mm, description="TCP position delta threshold for stable sampling."),
+            DeclareLaunchArgument("stable_rotation_tolerance_deg", default_value=default_stable_rotation_tolerance_deg, description="TCP rotation delta threshold for stable sampling."),
+            DeclareLaunchArgument("stable_window_s", default_value=default_stable_window_s, description="Required stable TCP window before capture."),
+            DeclareLaunchArgument("stable_timeout_s", default_value=default_stable_timeout_s, description="Timeout for TCP stability wait."),
+            DeclareLaunchArgument("dwell_s", default_value=default_dwell_s, description="Default dwell time after each waypoint stabilizes."),
+            DeclareLaunchArgument("execute_motion", default_value=default_execute_motion, description="When false, semi-auto trajectory execution only dry-runs."),
+            DeclareLaunchArgument("tool_id", default_value=default_tool_id, description="FAIRINO tool ID used by semi-auto recording and motion."),
+            DeclareLaunchArgument("user_id", default_value=default_user_id, description="FAIRINO user ID used by semi-auto recording and motion."),
+            DeclareLaunchArgument("move_vel", default_value=default_move_vel, description="FAIRINO MoveJ velocity used when recording waypoints."),
+            DeclareLaunchArgument("move_acc", default_value=default_move_acc, description="FAIRINO acceleration used when recording waypoints."),
             DeclareLaunchArgument("tool_to_board_tx", default_value=str(default_tool_to_board_translation[0]), description="Tool-to-board X translation in meters."),
             DeclareLaunchArgument("tool_to_board_ty", default_value=str(default_tool_to_board_translation[1]), description="Tool-to-board Y translation in meters."),
             DeclareLaunchArgument("tool_to_board_tz", default_value=str(default_tool_to_board_translation[2]), description="Tool-to-board Z translation in meters."),
