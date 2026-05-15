@@ -1,2 +1,2 @@
-"""Web UI support package for PAUS Robot."""
+"""PAUS UI package."""
 
