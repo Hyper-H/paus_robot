@@ -1,1 +1,0 @@
-{"command":"run_semi_auto","success":false,"message":"Service is unavailable: /eye_to_hand/run_semi_auto_calibration","operator_message":"标定节点服务未连接，请确认 eye_to_hand_calibration_node 已启动。","message_code":"service_unavailable"}
