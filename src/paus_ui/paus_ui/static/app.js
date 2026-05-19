@@ -62,6 +62,7 @@ const els = {
   previewDetails: document.getElementById("preview-details"),
   eventLog: document.getElementById("event-log"),
   eventMode: document.getElementById("event-mode"),
+  deleteBtn: document.getElementById("delete-btn"),
 };
 
 function fmt(value, digits = 2, suffix = "") {
@@ -446,6 +447,7 @@ function renderWaypointLoadError(message) {
   els.waypointBody.innerHTML = `<tr class="empty-row"><td colspan="12">${escapeHtml(error)}</td></tr>`;
   state.selectedWaypointName = "";
   state.selectedSampleRow = null;
+  updateDeleteButtonState();
   renderPreview(null);
   els.previewEmpty.textContent = error;
 }
@@ -504,10 +506,11 @@ async function refreshWaypoints() {
     state.selectedWaypointName = "";
     state.selectedSampleRow = null;
     renderPreview(null);
-  } else if (!state.selectedWaypointName && state.waypoints.length) {
+  } else if (!state.waypoints.some((item) => item.name === state.selectedWaypointName)) {
     selectWaypoint(state.waypoints.find((item) => item.has_image) || state.waypoints[0]);
   } else {
     markSelectedRow();
+    updateDeleteButtonState();
   }
 }
 
@@ -585,6 +588,7 @@ function selectWaypoint(item) {
   state.selectedWaypointName = item.name || item.waypoint?.name || "";
   state.selectedSampleRow = item.sample_row_index || null;
   markSelectedRow();
+  updateDeleteButtonState();
   renderPreview(item);
 }
 
@@ -592,6 +596,16 @@ function markSelectedRow() {
   [...els.waypointBody.querySelectorAll("tr")].forEach((row) => {
     row.classList.toggle("selected", row.dataset.name === state.selectedWaypointName);
   });
+  updateDeleteButtonState();
+}
+
+function updateDeleteButtonState() {
+  if (!els.deleteBtn) return;
+  const selected = state.waypoints.find((item) => item.name === state.selectedWaypointName);
+  const canDelete = Boolean(!state.selectedSession && selected?.name);
+  els.deleteBtn.disabled = !canDelete;
+  els.deleteBtn.textContent = canDelete ? `\u5220\u9664\u9009\u4e2d ${selected.name}` : "\u5220\u9664\u9009\u4e2d";
+  els.deleteBtn.title = state.selectedSession ? "\u5386\u53f2 session \u4e0d\u5141\u8bb8\u5220\u9664 waypoint" : (canDelete ? `\u5220\u9664 ${selected.name}` : "\u5148\u5728\u5f53\u524d\u8f68\u8ff9\u5217\u8868\u4e2d\u9009\u62e9 waypoint");
 }
 
 function renderPreview(item) {
@@ -745,6 +759,19 @@ async function runCommand(label, url, body = {}) {
   }
 }
 
+async function deleteSelectedWaypoint() {
+  const selected = state.waypoints.find((item) => item.name === state.selectedWaypointName);
+  if (state.selectedSession) {
+    setNotice("历史 session 不允许删除 waypoint。", "bad");
+    return;
+  }
+  if (!selected?.name) {
+    setNotice("请先选择要删除的 waypoint。", "bad");
+    return;
+  }
+  await runCommand("删除选中", "/api/handeye/delete_waypoint", { waypoint_name: selected.name });
+}
+
 async function saveTrajectoryIfDirty() {
   const dirty = Boolean(state.waypointsDirty || state.status?.handeye?.trajectory_dirty);
   if (!dirty) return true;
@@ -869,7 +896,8 @@ function bindUi() {
     });
   });
   document.getElementById("record-btn").addEventListener("click", () => runCommand("记录当前点", "/api/handeye/record_waypoint"));
-  document.getElementById("delete-btn").addEventListener("click", () => runCommand("删除上一个", "/api/handeye/delete_last_waypoint"));
+  els.deleteBtn.addEventListener("click", deleteSelectedWaypoint);
+  updateDeleteButtonState();
   document.getElementById("save-trajectory-btn").addEventListener("click", () => runCommand("保存轨迹", "/api/handeye/save_trajectory"));
   document.getElementById("dry-run-btn").addEventListener("click", async () => {
     const handeye = state.status?.handeye || {};
@@ -922,6 +950,7 @@ function bindUi() {
     state.selectedSession = selectedSession;
     state.selectedWaypointName = "";
     state.selectedSampleRow = null;
+    updateDeleteButtonState();
     refreshReport();
     refreshWaypoints();
   });

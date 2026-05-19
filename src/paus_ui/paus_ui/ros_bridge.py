@@ -13,6 +13,8 @@ from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 import numpy as np
 import rclpy
+from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
+from rcl_interfaces.srv import SetParameters
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
@@ -142,9 +144,13 @@ class UiRosBridge(Node):
 
         self.create_subscription(Image, self.image_topic, self._image_callback, 10)
         self.create_subscription(String, self.status_topic, self._status_callback, STATUS_QOS)
+        self._parameter_clients = {
+            "eye_to_hand": self.create_client(SetParameters, "/eye_to_hand_calibration_node/set_parameters"),
+        }
         self._service_clients = {
             "record_waypoint": self.create_client(Trigger, "/eye_to_hand/record_waypoint"),
             "delete_last_waypoint": self.create_client(Trigger, "/eye_to_hand/delete_last_waypoint"),
+            "delete_selected_waypoint": self.create_client(Trigger, "/eye_to_hand/delete_selected_waypoint"),
             "save_trajectory": self.create_client(Trigger, "/eye_to_hand/save_trajectory"),
             "run_semi_auto": self.create_client(Trigger, "/eye_to_hand/run_semi_auto_calibration"),
         }
@@ -498,6 +504,19 @@ class UiRosBridge(Node):
     def delete_last_waypoint(self) -> dict[str, Any]:
         return self._call_trigger("delete_last_waypoint", timeout_s=5.0)
 
+    def delete_selected_waypoint(self, waypoint_name: str) -> dict[str, Any]:
+        name = str(waypoint_name or "").strip()
+        if not name:
+            result = self._shape_command_result("delete_selected_waypoint", False, "No waypoint selected.")
+            self._last_command_result = result
+            return result
+        parameter_result = self._set_eye_to_hand_string_parameter("selected_waypoint_name", name, timeout_s=5.0)
+        if not parameter_result["success"]:
+            result = self._shape_command_result("delete_selected_waypoint", False, str(parameter_result["message"]))
+            self._last_command_result = result
+            return result
+        return self._call_trigger("delete_selected_waypoint", timeout_s=5.0)
+
     def save_trajectory(self) -> dict[str, Any]:
         return self._call_trigger("save_trajectory", timeout_s=5.0)
 
@@ -525,20 +544,34 @@ class UiRosBridge(Node):
         if not isinstance(waypoint, dict):
             return {"name": str(waypoint), "status": "pending", "result": "-"}
         record_quality = waypoint.get("record_quality") if isinstance(waypoint.get("record_quality"), dict) else {}
-        reprojection = _to_float(record_quality.get("reprojection_error_px"))
+        reprojection = _to_float(record_quality.get("reprojection_error_px", record_quality.get("reprojection_rms_px")))
         board_margin = _to_float(record_quality.get("board_margin_px"))
         flags = self._quality_flags(reprojection, board_margin)
-        detected = bool(record_quality.get("detected", False))
-        was_sampled = detected and flags.get("quality_ok", False)
+        accepted = record_quality.get("accepted")
+        quality_status = str(record_quality.get("status", "")).strip().lower()
+        reject_reason = str(record_quality.get("reject_reason", record_quality.get("reason", "")) or "")
+        if accepted is True or quality_status == "accepted":
+            status = "accepted"
+            result = "OK"
+            reason = ""
+        elif accepted is False or quality_status == "rejected" or reject_reason:
+            status = "skipped"
+            result = "FAIL"
+            reason = reject_reason or quality_status or "sample_quality_rejected"
+        else:
+            status = "pending"
+            result = "-"
+            reason = str(record_quality.get("reason", "") or "")
+        reason_info = classify_operator_message(reason) if reason else {"message": ""}
         return {
             "waypoint": waypoint,
             "index": None,
             "name": str(waypoint.get("name", "")),
-            "status": "accepted" if was_sampled else ("skipped" if record_quality.get("filtered") else "pending"),
-            "result": "OK" if was_sampled else ("FAIL" if record_quality.get("filtered") else "-"),
+            "status": status,
+            "result": result,
             "capture": waypoint.get("capture", True),
-            "reason": record_quality.get("reason", ""),
-            "reason_display": record_quality.get("reason", ""),
+            "reason": reason,
+            "reason_display": reason_info.get("message") or reason,
             "reprojection_error_px": reprojection,
             "board_margin_px": board_margin,
             "thresholds": flags,
@@ -629,6 +662,31 @@ class UiRosBridge(Node):
     def _run_semi_auto_worker(self) -> None:
         self.events.push({"type": "ui_command", "command": "run_semi_auto", "message": "Semi-auto service call started.", "operator_message": "半自动标定请求已发送。"})
         self._call_trigger("run_semi_auto", timeout_s=3600.0)
+
+    def _set_eye_to_hand_string_parameter(self, name: str, value: str, *, timeout_s: float) -> dict[str, Any]:
+        client = self._parameter_clients["eye_to_hand"]
+        if not client.wait_for_service(timeout_sec=timeout_s):
+            return {"success": False, "message": f"Service is unavailable: {client.srv_name}"}
+        request = SetParameters.Request()
+        request.parameters = [
+            Parameter(
+                name=name,
+                value=ParameterValue(type=ParameterType.PARAMETER_STRING, string_value=value),
+            )
+        ]
+        future = client.call_async(request)
+        done = threading.Event()
+        future.add_done_callback(lambda _: done.set())
+        if not done.wait(timeout=timeout_s):
+            return {"success": False, "message": f"Service timed out: {client.srv_name}"}
+        try:
+            response = future.result()
+        except Exception as exc:
+            return {"success": False, "message": repr(exc)}
+        for result in response.results:
+            if not result.successful:
+                return {"success": False, "message": result.reason or f"Failed to set parameter {name}."}
+        return {"success": True, "message": "ok"}
 
     def _call_trigger(self, key: str, *, timeout_s: float) -> dict[str, Any]:
         client = self._service_clients[key]
@@ -889,12 +947,14 @@ class UiRosBridge(Node):
     def _quality_flags(self, reprojection_error_px: Any, board_margin_px: Any) -> dict[str, Any]:
         reprojection = _to_float(reprojection_error_px)
         margin = _to_float(board_margin_px)
-        reprojection_limit_enabled = self.effective_max_reprojection_error_px > 0.0
-        reprojection_ok = None if reprojection is None or not reprojection_limit_enabled else reprojection <= self.effective_max_reprojection_error_px
-        margin_ok = None if margin is None else margin >= self.effective_min_board_margin_px
+        max_reprojection_error_px = float(getattr(self, "effective_max_reprojection_error_px", getattr(self, "max_reprojection_error_px", 0.0)))
+        min_board_margin_px = float(getattr(self, "effective_min_board_margin_px", getattr(self, "min_board_margin_px", 10.0)))
+        reprojection_limit_enabled = max_reprojection_error_px > 0.0
+        reprojection_ok = None if reprojection is None or not reprojection_limit_enabled else reprojection <= max_reprojection_error_px
+        margin_ok = None if margin is None else margin >= min_board_margin_px
         return {
-            "max_reprojection_error_px": self.effective_max_reprojection_error_px,
-            "min_board_margin_px": self.effective_min_board_margin_px,
+            "max_reprojection_error_px": max_reprojection_error_px,
+            "min_board_margin_px": min_board_margin_px,
             "reprojection_limit_enabled": reprojection_limit_enabled,
             "reprojection_ok": reprojection_ok,
             "margin_ok": margin_ok,

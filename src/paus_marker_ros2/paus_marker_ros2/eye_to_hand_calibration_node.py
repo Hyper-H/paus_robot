@@ -155,6 +155,7 @@ class EyeToHandCalibrationNode(Node):
         self.declare_parameter("solver_method", "opencv_handeye_park")
         self.declare_parameter("fresh_image_timeout_s", 2.0)
         self.declare_parameter("sample_log_path", "/tmp/paus_robot/eye_to_hand_samples.jsonl")
+        self.declare_parameter("selected_waypoint_name", "")
         self.declare_parameter("tool_to_board.translation_m", [0.0, 0.0, 0.0])
         self.declare_parameter("tool_to_board.rotation_rpy_deg", [0.0, 0.0, 0.0])
         self.declare_parameter("min_sample_count", 10)
@@ -289,6 +290,7 @@ class EyeToHandCalibrationNode(Node):
         self.save_service = self.create_service(Trigger, "/eye_to_hand/save", self._save_callback, callback_group=self.callback_group)
         self.record_waypoint_service = self.create_service(Trigger, "/eye_to_hand/record_waypoint", self._record_waypoint_callback, callback_group=self.callback_group)
         self.delete_waypoint_service = self.create_service(Trigger, "/eye_to_hand/delete_last_waypoint", self._delete_last_waypoint_callback, callback_group=self.callback_group)
+        self.delete_selected_waypoint_service = self.create_service(Trigger, "/eye_to_hand/delete_selected_waypoint", self._delete_selected_waypoint_callback, callback_group=self.callback_group)
         self.save_trajectory_service = self.create_service(Trigger, "/eye_to_hand/save_trajectory", self._save_trajectory_callback, callback_group=self.callback_group)
         self.run_semi_auto_service = self.create_service(Trigger, "/eye_to_hand/run_semi_auto_calibration", self._run_semi_auto_callback, callback_group=self.callback_group)
 
@@ -432,6 +434,23 @@ class EyeToHandCalibrationNode(Node):
 
     def _write_recorded_trajectory(self) -> None:
         save_trajectory(self.recorded_trajectory, self.trajectory_path)
+
+    def _persist_recorded_trajectory_after_delete(self) -> None:
+        if self.recorded_trajectory.waypoints:
+            self._write_recorded_trajectory()
+        elif getattr(self, "trajectory_path", None) is not None and self.trajectory_path.exists():
+            self.trajectory_path.unlink()
+
+    def _delete_recorded_waypoint_by_index(self, index: int) -> CalibrationWaypoint:
+        removed = self.recorded_trajectory.waypoints.pop(index)
+        self._persist_recorded_trajectory_after_delete()
+        return removed
+
+    def _delete_recorded_waypoint_by_name(self, name: str) -> CalibrationWaypoint | None:
+        for index, waypoint in enumerate(self.recorded_trajectory.waypoints):
+            if waypoint.name == name:
+                return self._delete_recorded_waypoint_by_index(index)
+        return None
 
     def _archive_current_trajectory(self) -> None:
         if getattr(self, "session_dir", None) is None or not self.trajectory_path.exists():
@@ -1049,6 +1068,24 @@ class EyeToHandCalibrationNode(Node):
             self._publish_status("record_waypoint_failed", response.message, {"session_dir": str(getattr(self, "session_dir", None)) if getattr(self, "session_dir", None) else None})
         return response
 
+    def _delete_waypoint_response(self, response: Trigger.Response, removed: CalibrationWaypoint) -> Trigger.Response:
+        trajectory_path = getattr(self, "trajectory_path", None)
+        session_dir = getattr(self, "session_dir", None)
+        payload = {
+            "waypoint_name": removed.name,
+            "waypoint": removed.to_payload(),
+            "waypoint_count": len(self.recorded_trajectory.waypoints),
+            "recorded_trajectory": self.recorded_trajectory.to_payload(),
+            "trajectory_dirty": True,
+            "trajectory_path": str(trajectory_path) if trajectory_path is not None else None,
+            "session_dir": str(session_dir) if session_dir else None,
+        }
+        self._append_run_log("waypoint_deleted", payload)
+        response.success = True
+        response.message = f"Deleted {removed.name} from {trajectory_path}."
+        self._publish_status("waypoint_deleted", response.message, payload)
+        return response
+
     def _delete_last_waypoint_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         del request
         if self._reject_manual_service_if_semi_auto_active(response):
@@ -1061,24 +1098,43 @@ class EyeToHandCalibrationNode(Node):
             return response
         try:
             self._ensure_session_started(owner="manual")
+            removed = self._delete_recorded_waypoint_by_index(len(self.recorded_trajectory.waypoints) - 1)
+            return self._delete_waypoint_response(response, removed)
+        except Exception as exc:
+            response.success = False
+            response.message = repr(exc)
+            self._publish_status("delete_waypoint_failed", response.message, {"session_dir": str(getattr(self, "session_dir", None)) if getattr(self, "session_dir", None) else None})
+        return response
+
+    def _delete_selected_waypoint_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+        del request
+        if self._reject_manual_service_if_semi_auto_active(response):
+            return response
+        selected_name = self.get_parameter("selected_waypoint_name").get_parameter_value().string_value.strip()
+        if not selected_name:
+            response.success = False
+            response.message = "No selected waypoint name was provided."
             session_dir = getattr(self, "session_dir", None)
-            removed = self.recorded_trajectory.waypoints.pop()
-            if self.recorded_trajectory.waypoints:
-                self._write_recorded_trajectory()
-            elif getattr(self, "trajectory_path", None) is not None and self.trajectory_path.exists():
-                self.trajectory_path.unlink()
-            trajectory_path = getattr(self, "trajectory_path", None)
-            payload = {
-                "waypoint_name": removed.name,
-                "waypoint": removed.to_payload(),
-                "waypoint_count": len(self.recorded_trajectory.waypoints),
-                "trajectory_path": str(trajectory_path) if trajectory_path is not None else None,
-                "session_dir": str(session_dir) if session_dir else None,
-            }
-            self._append_run_log("waypoint_deleted", payload)
-            response.success = True
-            response.message = f"Deleted {removed.name} from {trajectory_path}."
-            self._publish_status("waypoint_deleted", response.message, payload)
+            self._publish_status("delete_waypoint_failed", response.message, {"session_dir": str(session_dir) if session_dir else None})
+            return response
+        try:
+            self._ensure_session_started(owner="manual")
+            removed = self._delete_recorded_waypoint_by_name(selected_name)
+            if removed is None:
+                response.success = False
+                response.message = f"Recorded waypoint not found: {selected_name}."
+                self._publish_status(
+                    "delete_waypoint_failed",
+                    response.message,
+                    {
+                        "waypoint_name": selected_name,
+                        "recorded_trajectory": self.recorded_trajectory.to_payload(),
+                        "trajectory_dirty": True,
+                        "session_dir": str(self.session_dir) if self.session_dir else None,
+                    },
+                )
+                return response
+            return self._delete_waypoint_response(response, removed)
         except Exception as exc:
             response.success = False
             response.message = repr(exc)
@@ -1194,27 +1250,66 @@ class EyeToHandCalibrationNode(Node):
                 self._append_run_log("waypoint_reached", {"waypoint": waypoint.to_payload(), "stable_tcp_pose_mmdeg": stable_pose, "waypoint_index": index, "session_dir": str(self.session_dir)})
                 self._publish_status("semi_auto_waypoint_reached", f"Reached {waypoint.name}.", {"waypoint": waypoint.to_payload(), "session_dir": str(self.session_dir)})
                 if waypoint.capture:
-                    sample = self._capture_one_sample(owner="semi_auto")
-                    captured_count += 1
-                    self._publish_status(
-                        "sample_captured",
-                        f"Captured sample #{len(self.samples)}.",
-                        {
-                            "sample_quality": sample.sample_quality,
-                            "capture_timing": self._sample_to_log_record(sample),
-                            "sample_log_path": str(self.sample_log_path) if self.sample_log_path else None,
+                    try:
+                        sample = self._capture_one_sample(owner="semi_auto")
+                    except SampleRejectedError as exc:
+                        skipped_payload = {
+                            "waypoint": waypoint.to_payload(),
+                            "waypoint_name": waypoint.name,
+                            "waypoint_index": index,
+                            "waypoint_count": len(trajectory.waypoints),
+                            "reason": exc.reject_reason,
+                            "sample_quality": exc.sample_quality,
+                            "reprojection_error_px": exc.sample_quality.get("reprojection_error_px") if isinstance(exc.sample_quality, dict) else None,
+                            "board_margin_px": exc.sample_quality.get("board_margin_px") if isinstance(exc.sample_quality, dict) else None,
                             "session_dir": str(self.session_dir),
-                        },
+                        }
+                        self._append_run_log("waypoint_capture_skipped", skipped_payload)
+                        self._publish_status("waypoint_capture_skipped", f"Skipped {waypoint.name}: {exc.reject_reason}.", skipped_payload)
+                        continue
+                    captured_count += 1
+                    sample_record = self._sample_to_log_record(sample)
+                    sample_index = int(sample_record.get("sample_index", len(self.samples)))
+                    captured_payload = {
+                        "waypoint": waypoint.to_payload(),
+                        "waypoint_name": waypoint.name,
+                        "waypoint_index": index,
+                        "waypoint_count": len(trajectory.waypoints),
+                        "sample_index": sample_index,
+                        "sample_quality": sample.sample_quality,
+                        "capture_timing": sample_record,
+                        "sample_log_path": str(self.sample_log_path) if self.sample_log_path else None,
+                        "reprojection_error_px": sample.sample_quality.get("reprojection_error_px"),
+                        "board_margin_px": sample.sample_quality.get("board_margin_px"),
+                        "session_dir": str(self.session_dir),
+                    }
+                    self._append_run_log("waypoint_sample_captured", captured_payload)
+                    self._publish_status(
+                        "waypoint_sample_captured",
+                        f"Captured sample #{len(self.samples)} at {waypoint.name}.",
+                        captured_payload,
                     )
 
             solve_response = self._solve_callback(Trigger.Request(), Trigger.Response())
             if not solve_response.success:
-                raise RuntimeError(solve_response.message)
+                response.success = False
+                response.message = solve_response.message
+                insufficient_payload = {
+                    "captured_count": captured_count,
+                    "waypoint_count": len(trajectory.waypoints),
+                    "session_dir": str(self.session_dir),
+                }
+                self._append_run_log("semi_auto_insufficient_samples", {**insufficient_payload, "error": solve_response.message})
+                self._publish_status("semi_auto_insufficient_samples", solve_response.message, insufficient_payload)
+                return response
             self._save_current_solution()
             response.success = True
+            skipped_count = max(sum(1 for item in trajectory.waypoints if item.capture) - captured_count, 0)
             response.message = f"Semi-auto calibration finished with {captured_count} captured samples."
-            self._append_run_log("semi_auto_finished", {"captured_count": captured_count, "session_dir": str(self.session_dir), "report_path": str(self.report_path) if self.report_path else None})
-            self._publish_status("semi_auto_finished", response.message, {"session_dir": str(self.session_dir), "report_path": str(self.report_path) if self.report_path else None})
+            finish_status = "semi_auto_finished_with_skips" if skipped_count else "semi_auto_finished"
+            finish_payload = {"captured_count": captured_count, "skipped_count": skipped_count, "session_dir": str(self.session_dir), "report_path": str(self.report_path) if self.report_path else None}
+            self._append_run_log("semi_auto_finished", finish_payload)
+            self._publish_status(finish_status, response.message, finish_payload)
         except Exception as exc:
             response.success = False
             response.message = repr(exc)

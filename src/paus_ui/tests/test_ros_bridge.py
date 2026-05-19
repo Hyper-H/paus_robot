@@ -60,6 +60,63 @@ class _EventSink:
         return item
 
 
+def _bridge_for_waypoint_shaping() -> UiRosBridge:
+    bridge = UiRosBridge.__new__(UiRosBridge)
+    bridge.effective_max_reprojection_error_px = 2.5
+    bridge.effective_min_board_margin_px = 10.0
+    return bridge
+
+
+def test_shape_recorded_waypoint_uses_accepted_record_quality() -> None:
+    bridge = _bridge_for_waypoint_shaping()
+
+    row = UiRosBridge._shape_recorded_waypoint(
+        bridge,
+        {
+            "name": "waypoint_001",
+            "capture": True,
+            "record_quality": {
+                "accepted": True,
+                "status": "accepted",
+                "reprojection_error_px": 0.0936,
+                "board_margin_px": 169.7,
+            },
+        },
+    )
+
+    assert row["status"] == "accepted"
+    assert row["result"] == "OK"
+    assert row["reprojection_error_px"] == pytest.approx(0.0936)
+    assert row["board_margin_px"] == pytest.approx(169.7)
+    assert row["thresholds"]["quality_ok"] is True
+
+
+def test_shape_recorded_waypoint_uses_rejected_record_quality() -> None:
+    bridge = _bridge_for_waypoint_shaping()
+
+    row = UiRosBridge._shape_recorded_waypoint(
+        bridge,
+        {
+            "name": "waypoint_002",
+            "capture": True,
+            "record_quality": {
+                "accepted": False,
+                "status": "rejected",
+                "reject_reason": "chessboard_not_found",
+                "expected_corners": 88,
+                "detected_corners": 0,
+            },
+        },
+    )
+
+    assert row["status"] == "skipped"
+    assert row["result"] == "FAIL"
+    assert row["reason"] == "chessboard_not_found"
+    assert row["reason_display"] != "chessboard_not_found"
+    assert row["reprojection_error_px"] is None
+    assert row["board_margin_px"] is None
+
+
 def test_call_trigger_honors_full_service_wait_timeout() -> None:
     bridge = UiRosBridge.__new__(UiRosBridge)
     client = _RecordingWaitClient()
