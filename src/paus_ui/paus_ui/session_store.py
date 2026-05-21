@@ -142,6 +142,8 @@ class SessionStore:
             sample["board_angle_deg"] = sample.get("board_angle_deg") if sample.get("board_angle_deg") is not None else _matrix_board_angle_deg(sample.get("camera_to_board_matrix"))
             sample["capture_time_s"] = sample.get("image_header_time_s") or sample.get("image_received_time_s")
             sample["thresholds"] = self._quality_flags(sample.get("reprojection_error_px"), sample.get("board_margin_px"))
+            sample["observation_mode"] = sample.get("observation_mode") or _sample_observation_mode(sample)
+            sample["quality_payload"] = sample.get("sample_quality") or sample.get("record_quality") or sample.get("quality")
         return samples
 
     def per_sample_residuals(self, session_id: str) -> list[dict[str, Any]]:
@@ -389,6 +391,8 @@ class SessionStore:
         image_path = sample.get("image_path") if sample else None
         has_image = bool(sample and sample.get("has_image"))
         camera_to_board_translation_m = sample.get("camera_to_board_translation_m") if sample else None
+        quality_payload = sample.get("sample_quality") if sample else None
+        observation_mode = (sample.get("observation_mode") if sample else None) or _sample_observation_mode(sample or {})
         flags = self._quality_flags(reprojection_error_px, board_margin_px)
         thumbnail_url = f"/api/sessions/{session_id}/sample-image/{row_index}.jpg?mode=overlay" if row_index and has_image else None
         return {
@@ -413,6 +417,8 @@ class SessionStore:
             "camera_to_board_rotation_rpy_deg": sample.get("camera_to_board_rotation_rpy_deg") if sample else None,
             "board_angle_deg": sample.get("board_angle_deg") if sample else None,
             "tcp_pose_mmdeg": sample.get("tcp_pose_mmdeg") if sample else None,
+            "observation_mode": observation_mode,
+            "quality_payload": quality_payload or sample.get("record_quality") if sample else None,
             "image_sequence": sample.get("image_sequence") if sample else None,
             "capture_time_s": sample.get("capture_time_s") if sample else None,
             "translation_residual_mm": residuals.get("translation_residual_mm") if residuals else None,
@@ -499,6 +505,7 @@ class SessionStore:
         normalized["camera_to_board_translation_m"] = normalized.get("camera_to_board_translation_m") or _matrix_translation(normalized.get("camera_to_board_matrix"))
         normalized["camera_to_board_rotation_rpy_deg"] = normalized.get("camera_to_board_rotation_rpy_deg") or _matrix_rotation_rpy_deg(normalized.get("camera_to_board_matrix"))
         normalized["board_angle_deg"] = normalized.get("board_angle_deg") if normalized.get("board_angle_deg") is not None else _matrix_board_angle_deg(normalized.get("camera_to_board_matrix"))
+        normalized["observation_mode"] = normalized.get("observation_mode") or _sample_observation_mode(normalized)
         return normalized
 
     def _session_path(self, session_id: str) -> Path:
@@ -546,6 +553,11 @@ def _first_present(primary: dict[str, Any] | None, fallback: dict[str, Any], key
     if primary and primary.get(key) is not None:
         return primary.get(key)
     return fallback.get(key)
+
+def _sample_observation_mode(sample: dict[str, Any]) -> str | None:
+    quality = sample.get("sample_quality") if isinstance(sample.get("sample_quality"), dict) else {}
+    record_quality = sample.get("record_quality") if isinstance(sample.get("record_quality"), dict) else {}
+    return sample.get("observation_mode") or quality.get("observation_mode") or record_quality.get("observation_mode") or sample.get("quality_payload", {}).get("observation_mode") if isinstance(sample.get("quality_payload"), dict) else None
 
 
 def _matrix_translation(matrix: Any) -> list[float] | None:
