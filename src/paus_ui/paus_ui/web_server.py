@@ -104,6 +104,14 @@ def create_app(bridge: "UiRosBridge"):
     async def quality() -> dict[str, Any]:
         return await asyncio.to_thread(bridge.get_latest_quality)
 
+    @app.post("/api/handeye/observation-mode")
+    async def observation_mode(body: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+        payload = body or {}
+        mode = payload.get("mode", payload.get("observation_mode", ""))
+        if not isinstance(mode, str) or not mode.strip():
+            raise HTTPException(status_code=422, detail="mode must be provided.")
+        return await asyncio.to_thread(bridge.set_observation_mode, mode.strip())
+
     @app.get("/api/handeye/waypoints")
     async def waypoints() -> dict[str, Any]:
         return await asyncio.to_thread(bridge.get_waypoints)
