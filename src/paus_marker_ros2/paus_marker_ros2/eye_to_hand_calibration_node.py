@@ -193,7 +193,7 @@ class EyeToHandCalibrationNode(Node):
         )
         self.declare_parameter(
             "session_root_path",
-            str(calibration_cfg.get("session_root_path", "/home/chen_lab/paus_robot/calibration_sessions")),
+            str(calibration_cfg.get("session_root_path", "/mnt/data/projects/paus_robot/calibration/sessions")),
         )
         self.declare_parameter("save_sample_images", bool(calibration_cfg.get("save_sample_images", True)))
         self.declare_parameter("max_reprojection_error_px", float(calibration_cfg.get("max_reprojection_error_px", 2.5)))
