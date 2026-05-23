@@ -32,6 +32,20 @@ class OnlineStackLaunchStaticTests(unittest.TestCase):
 
         self.assertIn('camera_bridge_cmd += ["--enable-depth"]', launch_text)
 
+    def test_neck_target_eval_launch_is_default_enabled(self) -> None:
+        launch_text = (PROJECT_ROOT / "src" / "paus_bringup" / "launch" / "online_stack.launch.py").read_text(
+            encoding="utf-8"
+        )
+
+        config = yaml.safe_load(
+            (PROJECT_ROOT / "src" / "paus_bringup" / "configs" / "default.yaml").read_text(encoding="utf-8")
+        )
+
+        self.assertTrue(config["neck_surface"]["eval_enabled"])
+        self.assertIn('enable_neck_eval = bool(neck_cfg.get("eval_enabled", False))', launch_text)
+        self.assertIn('if enable_neck_eval:', launch_text)
+        self.assertIn('executable="neck_target_eval_node"', launch_text)
+
     def test_online_stack_prints_neck_runtime_config(self) -> None:
         launch_text = (PROJECT_ROOT / "src" / "paus_bringup" / "launch" / "online_stack.launch.py").read_text(
             encoding="utf-8"
@@ -39,6 +53,7 @@ class OnlineStackLaunchStaticTests(unittest.TestCase):
 
         self.assertIn('"event": "online_stack_config"', launch_text)
         self.assertIn('"neck_surface_enabled": enable_neck_surface', launch_text)
+        self.assertIn('"neck_eval_enabled": enable_neck_eval', launch_text)
         self.assertIn('"camera_bridge_enable_depth": enable_neck_surface', launch_text)
 
     def test_camera_bridge_defaults_to_paus_robot_conda_python(self) -> None:

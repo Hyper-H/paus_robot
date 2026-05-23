@@ -58,6 +58,7 @@ calibration:
 
 neck_surface:
   enabled: true
+  eval_enabled: true
   image_topic: "/camera/image_bridge"
   depth_topic: "/camera/depth_aligned"
   camera_info_topic: "/camera/camera_info"

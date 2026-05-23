@@ -22,4 +22,9 @@ setup(
     maintainer_email="local@example.com",
     description="Launch and runtime configuration package for PAUS Robot.",
     license="Proprietary",
+    entry_points={
+        "console_scripts": [
+            "stop_paus_runtime = paus_bringup.stop_paus_runtime:main",
+        ],
+    },
 )

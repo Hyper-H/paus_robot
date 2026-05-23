@@ -27,6 +27,7 @@ setup(
             "eye_to_hand_semi_auto = paus_marker_ros2.eye_to_hand_semi_auto_cli:main",
             "target_transform_node = paus_marker_ros2.target_transform_node:main",
             "neck_surface_pose_node = paus_marker_ros2.neck_surface_pose_node:main",
+            "neck_target_eval_node = paus_marker_ros2.neck_target_eval_node:main",
         ],
     },
 )

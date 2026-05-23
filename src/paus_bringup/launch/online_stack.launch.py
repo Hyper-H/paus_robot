@@ -32,6 +32,7 @@ def _launch_setup(context, *args, **kwargs):
     config = load_config(config_path)
     neck_cfg = config.get("neck_surface", {})
     enable_neck_surface = bool(neck_cfg.get("enabled", False))
+    enable_neck_eval = bool(neck_cfg.get("eval_enabled", False))
 
     camera_bridge_cmd = [
         python_exec,
@@ -57,6 +58,7 @@ def _launch_setup(context, *args, **kwargs):
                 "config_path": config_path,
                 "execute_motion": execute_motion == "true",
                 "neck_surface_enabled": enable_neck_surface,
+                "neck_eval_enabled": enable_neck_eval,
                 "camera_bridge_enable_depth": enable_neck_surface,
                 "image_topic": neck_cfg.get("image_topic", "/camera/image_bridge"),
                 "depth_topic": neck_cfg.get("depth_topic", "/camera/depth_aligned"),
@@ -120,6 +122,15 @@ def _launch_setup(context, *args, **kwargs):
                 ],
             )
         )
+        if enable_neck_eval:
+            nodes.append(
+                Node(
+                    package="paus_marker_ros2",
+                    executable="neck_target_eval_node",
+                    name="neck_target_eval_node",
+                    output="screen",
+                )
+            )
     nodes.append(
         Node(
             package="paus_motion_ros2",
