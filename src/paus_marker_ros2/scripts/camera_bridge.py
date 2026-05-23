@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import signal
 import socket
 import sys
 import time
@@ -23,7 +24,26 @@ from paus_perception import (  # noqa: E402
     open_camera_runtime,
     pack_frame_packet,
     read_runtime_calibration,
+    save_camera_calibration,
 )
+
+_SHUTDOWN_REQUESTED = False
+
+
+def _request_shutdown(signum=None, _frame=None) -> None:
+    global _SHUTDOWN_REQUESTED
+    if not _SHUTDOWN_REQUESTED:
+        print(json.dumps({"event": "camera_bridge_shutdown_requested", "signal": signum}, ensure_ascii=False), flush=True)
+    _SHUTDOWN_REQUESTED = True
+
+
+def _install_signal_handlers() -> None:
+    signal.signal(signal.SIGINT, _request_shutdown)
+    signal.signal(signal.SIGTERM, _request_shutdown)
+
+
+def _log_event(payload: dict[str, object]) -> None:
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
 def _load_depth_alignment_helpers():
@@ -57,6 +77,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=5001, help="TCP destination port.")
     parser.add_argument("--camera-ip", default=None, help="Optional camera IP to connect.")
     parser.add_argument("--camera-index", type=int, default=None, help="Optional camera index to connect.")
+    parser.add_argument("--camera-config-output", default="", help="Optional path to write camera calibration YAML for legacy UI calibration consumers.")
     parser.add_argument("--jpeg-quality", type=int, default=90, help="JPEG encoding quality.")
     parser.add_argument("--frame-id", default="camera", help="Frame id attached to bridge messages.")
     parser.add_argument("--reconnect-delay", type=float, default=1.0, help="Seconds to wait before reconnect.")
@@ -77,36 +98,45 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    _install_signal_handlers()
     depth_enabled = bool(args.enable_depth)
-    while True:
-        try:
-            depth_config = None
-            capture_aligned_depth_frame = None
-            if depth_enabled:
-                DepthAlignmentConfig, capture_aligned_depth_frame = _load_depth_alignment_helpers()
-                depth_config = DepthAlignmentConfig(
-                    point_channel=args.point_channel,
-                    rgb_channel=args.rgb_channel,
-                    rgb_camera_count=args.rgb_camera_count,
-                    extrinsic_direction=args.extrinsic_direction,
-                )
-            with _open_camera_runtime_for_args(args, depth_enabled=depth_enabled) as runtime:
-                calibration = read_runtime_calibration(runtime, camera_count=args.rgb_camera_count)
-                camera_info_payload = camera_calibration_to_camera_info_payload(
-                    calibration,
-                    frame_id=args.frame_id,
-                    rgb_camera_count=args.rgb_camera_count,
-                    source="dkam_sdk",
-                )
-                print(
-                    json.dumps(
-                        {"event": "camera_info_loaded", **camera_info_payload_summary(camera_info_payload)},
-                        ensure_ascii=False,
+    _log_event(
+        {
+            "event": "camera_bridge_started",
+            "host": args.host,
+            "port": args.port,
+            "enable_depth": bool(args.enable_depth),
+            "camera_ip": args.camera_ip,
+            "camera_index": args.camera_index,
+        }
+    )
+    try:
+        while not _SHUTDOWN_REQUESTED:
+            try:
+                depth_config = None
+                capture_aligned_depth_frame = None
+                if depth_enabled:
+                    DepthAlignmentConfig, capture_aligned_depth_frame = _load_depth_alignment_helpers()
+                    depth_config = DepthAlignmentConfig(
+                        point_channel=args.point_channel,
+                        rgb_channel=args.rgb_channel,
+                        rgb_camera_count=args.rgb_camera_count,
+                        extrinsic_direction=args.extrinsic_direction,
                     )
-                )
-                with socket.create_connection((args.host, args.port), timeout=5.0) as connection:
-                    print(
-                        json.dumps(
+                with _open_camera_runtime_for_args(args, depth_enabled=depth_enabled) as runtime:
+                    calibration = read_runtime_calibration(runtime, camera_count=args.rgb_camera_count)
+                    camera_info_payload = camera_calibration_to_camera_info_payload(
+                        calibration,
+                        frame_id=args.frame_id,
+                        rgb_camera_count=args.rgb_camera_count,
+                        source="dkam_sdk",
+                    )
+                    if args.camera_config_output:
+                        save_camera_calibration(calibration, args.camera_config_output)
+                        _log_event({"event": "camera_config_written", "path": args.camera_config_output})
+                    _log_event({"event": "camera_info_loaded", **camera_info_payload_summary(camera_info_payload)})
+                    with socket.create_connection((args.host, args.port), timeout=5.0) as connection:
+                        _log_event(
                             {
                                 "event": "camera_bridge_connected",
                                 "camera_index": runtime.camera_index,
@@ -120,94 +150,82 @@ def main() -> int:
                                 "rgb_camera_count": args.rgb_camera_count,
                                 "extrinsic_direction": args.extrinsic_direction,
                                 "depth_enabled_runtime": bool(depth_enabled),
-                            },
-                            ensure_ascii=False,
+                            }
                         )
-                    )
-                    depth_error_count = 0
-                    max_depth_capture_errors = 5
-                    while True:
-                        image_bgr = capture_rgb_frame(runtime, timeout_us=args.timeout_us)
-                        depth_frame = None
-                        if depth_enabled:
-                            try:
-                                assert depth_config is not None
-                                assert capture_aligned_depth_frame is not None
-                                depth_frame = capture_aligned_depth_frame(
-                                    runtime,
-                                    calibration=calibration,
-                                    timeout_us=args.timeout_us,
-                                    config=depth_config,
-                                )
-                                depth_error_count = 0
-                            except Exception as exc:
-                                depth_error_count += 1
-                                print(
-                                    json.dumps(
+                        depth_error_count = 0
+                        while not _SHUTDOWN_REQUESTED:
+                            image_bgr = capture_rgb_frame(runtime, timeout_us=args.timeout_us)
+                            depth_frame = None
+                            if depth_enabled:
+                                try:
+                                    assert depth_config is not None
+                                    assert capture_aligned_depth_frame is not None
+                                    depth_frame = capture_aligned_depth_frame(
+                                        runtime,
+                                        calibration=calibration,
+                                        timeout_us=args.timeout_us,
+                                        config=depth_config,
+                                    )
+                                    depth_error_count = 0
+                                except Exception as exc:
+                                    depth_error_count += 1
+                                    _log_event(
                                         {
                                             "event": "depth_capture_error",
                                             "error": repr(exc),
                                             "consecutive_errors": depth_error_count,
-                                        },
-                                        ensure_ascii=False,
+                                        }
                                     )
-                                )
-                                if depth_error_count >= max_depth_capture_errors:
-                                    print(
-                                        json.dumps(
-                                            {
-                                                "event": "depth_capture_disabled",
-                                                "error": repr(exc),
-                                                "consecutive_errors": depth_error_count,
-                                            },
-                                            ensure_ascii=False,
-                                        )
-                                    )
-                                    depth_enabled = False
-                        frame_timestamp_ns = time.time_ns()
-                        payload = encode_bgr_frame_to_jpeg(image_bgr, jpeg_quality=args.jpeg_quality)
-                        header = {
-                            "frame_type": "rgb",
-                            "encoding": "jpeg",
-                            "width": int(image_bgr.shape[1]),
-                            "height": int(image_bgr.shape[0]),
-                            "timestamp_ns": frame_timestamp_ns,
-                            "frame_id": args.frame_id,
-                            "camera_info_version": "inline_camera_info",
-                            "camera_info": camera_info_payload,
-                        }
-                        connection.sendall(pack_frame_packet(header, payload))
-                        if depth_frame is not None:
-                            depth_map = np.ascontiguousarray(depth_frame.aligned_depth_m, dtype=np.float32)
-                            depth_payload = compress_payload(depth_map.tobytes(), level=args.depth_compression_level)
-                            depth_header = {
-                                "frame_type": "aligned_depth",
-                                "encoding": "32FC1",
-                                "compression": "zlib",
-                                "width": int(depth_frame.rgb_width),
-                                "height": int(depth_frame.rgb_height),
+                            frame_timestamp_ns = time.time_ns()
+                            payload = encode_bgr_frame_to_jpeg(image_bgr, jpeg_quality=args.jpeg_quality)
+                            header = {
+                                "frame_type": "rgb",
+                                "encoding": "jpeg",
+                                "width": int(image_bgr.shape[1]),
+                                "height": int(image_bgr.shape[0]),
                                 "timestamp_ns": frame_timestamp_ns,
                                 "frame_id": args.frame_id,
                                 "camera_info_version": "inline_camera_info",
                                 "camera_info": camera_info_payload,
-                                "unit": "m",
-                                "point_channel": args.point_channel,
-                                "rgb_camera_count": args.rgb_camera_count,
-                                "extrinsic_direction": args.extrinsic_direction,
-                                "aligned_pixel_count": int(depth_frame.aligned_pixel_count),
-                                "coverage_ratio": float(depth_frame.coverage_ratio),
                             }
-                            connection.sendall(pack_frame_packet(depth_header, depth_payload))
-        except KeyboardInterrupt:
-            return 0
-        except Exception as exc:
-            if bool(args.enable_depth) and depth_enabled:
-                print(json.dumps({"event": "camera_bridge_depth_fallback", "error": repr(exc)}, ensure_ascii=False))
-                depth_enabled = False
+                            connection.sendall(pack_frame_packet(header, payload))
+                            if depth_frame is not None:
+                                depth_map = np.ascontiguousarray(depth_frame.aligned_depth_m, dtype=np.float32)
+                                depth_payload = compress_payload(depth_map.tobytes(), level=args.depth_compression_level)
+                                depth_header = {
+                                    "frame_type": "aligned_depth",
+                                    "encoding": "32FC1",
+                                    "compression": "zlib",
+                                    "width": int(depth_frame.rgb_width),
+                                    "height": int(depth_frame.rgb_height),
+                                    "timestamp_ns": frame_timestamp_ns,
+                                    "frame_id": args.frame_id,
+                                    "camera_info_version": "inline_camera_info",
+                                    "camera_info": camera_info_payload,
+                                    "unit": "m",
+                                    "point_channel": args.point_channel,
+                                    "rgb_camera_count": args.rgb_camera_count,
+                                    "extrinsic_direction": args.extrinsic_direction,
+                                    "aligned_pixel_count": int(depth_frame.aligned_pixel_count),
+                                    "coverage_ratio": float(depth_frame.coverage_ratio),
+                                }
+                                connection.sendall(pack_frame_packet(depth_header, depth_payload))
+            except KeyboardInterrupt:
+                _request_shutdown("KeyboardInterrupt")
+                break
+            except Exception as exc:
+                if _SHUTDOWN_REQUESTED:
+                    break
+                if bool(args.enable_depth) and depth_enabled:
+                    _log_event({"event": "camera_bridge_depth_fallback", "error": repr(exc)})
+                    depth_enabled = False
+                    time.sleep(float(args.reconnect_delay))
+                    continue
+                _log_event({"event": "camera_bridge_error", "error": repr(exc)})
                 time.sleep(float(args.reconnect_delay))
-                continue
-            print(json.dumps({"event": "camera_bridge_error", "error": repr(exc)}, ensure_ascii=False))
-            time.sleep(float(args.reconnect_delay))
+    finally:
+        _log_event({"event": "camera_bridge_stopped"})
+    return 0
 
 
 if __name__ == "__main__":
