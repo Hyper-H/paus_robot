@@ -3,6 +3,7 @@ const state = {
   selectedSession: "",
   selectedWaypointName: "",
   selectedSampleRow: null,
+  selectionVersion: 0,
   status: null,
   quality: null,
   sessions: [],
@@ -23,6 +24,8 @@ const state = {
   liveImageFrameCount: 0,
   liveImageLastFrameAt: 0,
   thumbObserver: null,
+  refreshInFlight: null,
+  fullRefreshTimer: null,
   eventReconnectTimer: null,
   eventReconnectDelay: 5000,
   eventDedupe: new Map(),
@@ -63,6 +66,7 @@ const els = {
   eventLog: document.getElementById("event-log"),
   eventMode: document.getElementById("event-mode"),
   deleteBtn: document.getElementById("delete-btn"),
+  loadSessionTrajectoryBtn: document.getElementById("load-session-trajectory-btn"),
 };
 
 function fmt(value, digits = 2, suffix = "") {
@@ -373,6 +377,8 @@ async function refreshSessions() {
     state.selectedSession = "";
     state.autoSelectedSession = false;
     state.userSelectedSession = false;
+    state.currentTrajectorySelected = true;
+    state.selectionVersion += 1;
   }
   const handeye = (state.status && state.status.handeye) || {};
   const latestReportSession = sessions.find((session) => session.has_solution || (session.has_report && !session.is_invalid));
@@ -381,34 +387,39 @@ async function refreshSessions() {
     state.autoSelectedSession = true;
     state.selectedWaypointName = "";
     state.selectedSampleRow = null;
+    state.selectionVersion += 1;
   }
-  const options = ['<option value="">当前示教轨迹</option>'];
+  const options = ['<option value="">\u5f53\u524d\u5c06\u8fd0\u884c\u7684\u8f68\u8ff9</option>'];
   options.push(...sessions.map((session) => {
-    const label = `${session.id} (${session.sample_count || 0})${session.has_solution ? "" : session.has_report ? " unsolved" : " no report"}`;
+    const suffix = session.has_solution ? "" : session.has_report ? " / unsolved" : " / no report";
+    const label = `\u5386\u53f2 session ${session.id} (${session.sample_count || 0})${suffix}`;
     return `<option value="${escapeHtml(session.id)}">${escapeHtml(label)}</option>`;
   }));
   els.sessionSelect.innerHTML = options.join("");
   els.sessionSelect.value = state.selectedSession || "";
+  updateLoadSessionTrajectoryButton();
 }
-
 async function refreshReport() {
-  if (!state.selectedSession) {
-    renderEmptyReport("暂无 session");
+  const sessionId = state.selectedSession || "";
+  const selectionVersion = state.selectionVersion;
+  if (!sessionId) {
+    renderEmptyReport("\u6682\u65e0 session");
     return;
   }
-  const report = await getJson(`/api/sessions/${encodeURIComponent(state.selectedSession)}/report`, {});
+  const report = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/report`, {});
+  if (state.selectionVersion !== selectionVersion || state.selectedSession !== sessionId) return;
   if (!report.has_report) {
-    renderEmptyReport(report.empty_reason || "该 session 暂无 report.yaml。");
+    renderEmptyReport(report.empty_reason || "\u8be5 session \u6682\u65e0 report.yaml\u3002");
     return;
   }
-  els.reportPath.textContent = report.report_path || `calibration_sessions/${state.selectedSession}/report.yaml`;
+  els.reportPath.textContent = report.report_path || `calibration_sessions/${sessionId}/report.yaml`;
   els.sampleCount.textContent = report.sample_count ?? "--";
   els.acceptedCount.textContent = report.accepted_count ?? "--";
   els.skippedCount.textContent = report.skipped_count ?? "--";
   els.pendingCount.textContent = report.pending_count ?? "--";
   if (!report.has_solution) {
     const message = report.is_invalid
-      ? (report.empty_reason || report.report_error || "该 session 无效。")
+      ? (report.empty_reason || report.report_error || "\u8be5 session \u65e0\u6548\u3002")
       : "report.yaml exists, but this session has not produced a solved calibration result yet.";
     els.residualGrid.innerHTML = `<div class="empty-card">${escapeHtml(message)}</div>`;
     els.residualBars.innerHTML = "";
@@ -429,7 +440,6 @@ async function refreshReport() {
     return `<div class="bar-row" title="${escapeHtml(row.target_note || "")}"><span>${escapeHtml(row.label)}</span><div class="bar-track"><div class="bar-fill ${tone}" style="width:${pct}%"></div></div><strong>${fmt(row.value, 2, ` ${row.unit}`)}</strong></div>`;
   }).join("");
 }
-
 function renderEmptyReport(message) {
   els.reportPath.textContent = message;
   els.sampleCount.textContent = "--";
@@ -453,18 +463,23 @@ function renderWaypointLoadError(message) {
 }
 
 async function refreshWaypoints() {
+  const sessionId = state.selectedSession || "";
+  const selectionVersion = state.selectionVersion;
   let waypoints = [];
-  state.waypointsDirty = false;
-  state.trajectoryLoadError = "";
-  if (state.selectedSession) {
-    waypoints = await getJson(`/api/sessions/${encodeURIComponent(state.selectedSession)}/waypoints`, []);
+  let trajectoryLoadError = "";
+  if (sessionId) {
+    waypoints = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/waypoints`, []);
+    if (state.selectionVersion !== selectionVersion || state.selectedSession !== sessionId) return;
+    state.waypointsDirty = false;
+    state.trajectoryLoadError = "";
     const sessionRoot = text(state.status?.handeye?.session_root_path, "calibration_sessions").replace(/[\\/]+$/, "");
-    els.trajectoryPath.textContent = `${sessionRoot}/${state.selectedSession}/trajectory_used.yaml`;
+    els.trajectoryPath.textContent = `${sessionRoot}/${sessionId}/trajectory_used.yaml`;
   } else {
     const trajectory = await getJson("/api/handeye/waypoints", { waypoints: [] });
+    if (state.selectionVersion !== selectionVersion || state.selectedSession !== sessionId) return;
     state.waypointsDirty = Boolean(trajectory.dirty);
     if (trajectory.error) {
-      state.trajectoryLoadError = trajectory.error;
+      trajectoryLoadError = trajectory.error;
       if (trajectory.trajectory_path) els.trajectoryPath.textContent = trajectory.trajectory_path;
       waypoints = [];
     } else {
@@ -489,17 +504,18 @@ async function refreshWaypoints() {
       }));
       if (trajectory.trajectory_path) els.trajectoryPath.textContent = trajectory.trajectory_path;
     }
+    state.trajectoryLoadError = trajectoryLoadError;
   }
   state.waypoints = Array.isArray(waypoints) ? waypoints : [];
-  if (state.trajectoryLoadError && !state.selectedSession) {
+  if (state.trajectoryLoadError && !sessionId) {
     renderWaypointLoadError(state.trajectoryLoadError);
     return;
   }
   const accepted = state.waypoints.filter((item) => item.status === "accepted").length;
   const skipped = state.waypoints.filter((item) => item.status === "skipped").length;
   const pending = state.waypoints.filter((item) => item.status === "pending").length;
-  els.waypointStats.textContent = `共 ${state.waypoints.length} 个点`;
-  els.tableFooter.textContent = `已接受 ${accepted}　跳过 ${skipped}　待采集 ${pending}`;
+  els.waypointStats.textContent = `\u5171 ${state.waypoints.length} \u4e2a\u70b9`;
+  els.tableFooter.textContent = `\u5df2\u63a5\u53d7 ${accepted}\u3000\u8df3\u8fc7 ${skipped}\u3000\u5f85\u91c7\u96c6 ${pending}`;
   els.waypointBody.innerHTML = state.waypoints.map(renderWaypointRow).join("");
   hydrateWaypointThumbnails();
   if (!state.waypoints.length) {
@@ -513,7 +529,6 @@ async function refreshWaypoints() {
     updateDeleteButtonState();
   }
 }
-
 function renderWaypointRow(item, index) {
   const waypoint = item.waypoint || item;
   const status = item.status || "pending";
@@ -607,6 +622,18 @@ function updateDeleteButtonState() {
   els.deleteBtn.textContent = canDelete ? `\u5220\u9664\u9009\u4e2d ${selected.name}` : "\u5220\u9664\u9009\u4e2d";
   els.deleteBtn.title = state.selectedSession ? "\u5386\u53f2 session \u4e0d\u5141\u8bb8\u5220\u9664 waypoint" : (canDelete ? `\u5220\u9664 ${selected.name}` : "\u5148\u5728\u5f53\u524d\u8f68\u8ff9\u5217\u8868\u4e2d\u9009\u62e9 waypoint");
 }
+
+function updateLoadSessionTrajectoryButton() {
+  if (!els.loadSessionTrajectoryBtn) return;
+  const sessionId = state.selectedSession || "";
+  const selected = state.sessions.find((session) => session.id === sessionId);
+  const canLoad = Boolean(sessionId && selected && !selected.trajectory_error);
+  els.loadSessionTrajectoryBtn.disabled = !canLoad;
+  els.loadSessionTrajectoryBtn.title = canLoad
+    ? `\u5c06 session ${sessionId} \u7684 trajectory_used.yaml \u8f7d\u5165\u4e3a\u5f53\u524d\u5c06\u8fd0\u884c\u7684\u8f68\u8ff9`
+    : "\u5148\u9009\u62e9\u4e00\u4e2a\u5305\u542b trajectory_used.yaml \u7684\u5386\u53f2 session";
+}
+
 
 function renderPreview(item) {
   if (!item) {
@@ -736,11 +763,41 @@ function normalizeWorkflowStage(stage) {
 }
 
 async function refreshAll() {
-  await refreshStatus();
-  await refreshSessions();
-  await refreshReport();
-  await refreshWaypoints();
+  if (state.refreshInFlight) return state.refreshInFlight;
+  state.refreshInFlight = (async () => {
+    await refreshStatus();
+    await refreshSessions();
+    await refreshReport();
+    await refreshWaypoints();
+  })();
+  try {
+    await state.refreshInFlight;
+  } finally {
+    state.refreshInFlight = null;
+  }
 }
+
+function scheduleFullRefresh(reason = "refresh") {
+  if (state.fullRefreshTimer) window.clearTimeout(state.fullRefreshTimer);
+  state.fullRefreshTimer = window.setTimeout(() => {
+    state.fullRefreshTimer = null;
+    refreshAll();
+  }, 80);
+}
+
+function isTerminalStatusEvent(event) {
+  const payload = event?.payload || {};
+  const status = payload.status || event?.status || event?.result?.status || "";
+  return [
+    "solved",
+    "semi_auto_finished",
+    "semi_auto_finished_with_skips",
+    "semi_auto_stopped",
+    "semi_auto_failed",
+    "semi_auto_insufficient_samples",
+  ].includes(String(status));
+}
+
 
 async function runCommand(label, url, body = {}) {
   try {
@@ -779,6 +836,34 @@ async function saveTrajectoryIfDirty() {
   const result = await runCommand("保存轨迹", "/api/handeye/save_trajectory");
   return Boolean(result?.success);
 }
+
+async function loadSelectedSessionTrajectory() {
+  const sessionId = state.selectedSession || "";
+  if (!sessionId) {
+    setNotice("\u8bf7\u5148\u9009\u62e9\u4e00\u4e2a\u5386\u53f2 session\u3002", "bad");
+    return;
+  }
+  const confirmed = window.confirm(
+    [
+      `\u5c06\u628a session ${sessionId} \u7684 waypoints \u8f7d\u5165\u4e3a\u5f53\u524d\u5c06\u8fd0\u884c\u7684\u8f68\u8ff9\u3002`,
+      "\u4e0b\u4e00\u6b21\u5f00\u59cb\u6807\u5b9a\u4f1a\u6267\u884c\u8fd9\u7ec4\u70b9\u3002",
+      "\u5386\u53f2 session \u672c\u8eab\u4e0d\u4f1a\u88ab\u4fee\u6539\u3002",
+    ].join("\n")
+  );
+  if (!confirmed) return;
+  const result = await runCommand("\u8f7d\u5165\u4e3a\u5f53\u524d\u8f68\u8ff9", `/api/sessions/${encodeURIComponent(sessionId)}/load_trajectory`);
+  if (!result?.success) return;
+  state.selectedSession = "";
+  state.userSelectedSession = false;
+  state.currentTrajectorySelected = true;
+  state.autoSelectedSession = false;
+  state.selectedWaypointName = "";
+  state.selectedSampleRow = null;
+  state.selectionVersion += 1;
+  setNotice(result.operator_message || `\u5df2\u8f7d\u5165 session ${sessionId} \u7684 ${result.waypoint_count || ""} \u4e2a waypoints\u3002`, "good");
+  await refreshAll();
+}
+
 
 function addEvent(event) {
   const key = event.dedupe_key || `${event.type}:${event.operator_message || event.message || ""}`;
@@ -835,9 +920,13 @@ async function pollEvents() {
   const events = payload.events || [];
   events.forEach(addEvent);
   if (events.some((event) => event.type === "eye_to_hand_status" || event.type === "ui_command_result")) {
-    refreshStatus();
-    refreshWaypoints();
-    refreshReport();
+    if (events.some(isTerminalStatusEvent)) {
+      scheduleFullRefresh("terminal-poll-event");
+    } else {
+      refreshStatus();
+      refreshWaypoints();
+      refreshReport();
+    }
   }
 }
 
@@ -857,6 +946,7 @@ function connectEvents() {
     state.wsConnected = true;
     state.eventReconnectDelay = 5000;
     els.eventMode.textContent = "WebSocket connected";
+    scheduleFullRefresh("events-ws-open");
   });
   socket.addEventListener("message", (event) => {
     try {
@@ -864,9 +954,13 @@ function connectEvents() {
       state.lastEventId = Math.max(state.lastEventId, Number(payload.id || 0));
       addEvent(payload);
       if (payload.type === "eye_to_hand_status" || payload.type === "ui_command_result") {
-        refreshStatus();
-        refreshWaypoints();
-        refreshReport();
+        if (isTerminalStatusEvent(payload)) {
+          scheduleFullRefresh("terminal-ws-event");
+        } else {
+          refreshStatus();
+          refreshWaypoints();
+          refreshReport();
+        }
       }
     } catch (parseError) {
       // ignore malformed messages
@@ -897,7 +991,9 @@ function bindUi() {
   });
   document.getElementById("record-btn").addEventListener("click", () => runCommand("记录当前点", "/api/handeye/record_waypoint"));
   els.deleteBtn.addEventListener("click", deleteSelectedWaypoint);
+  els.loadSessionTrajectoryBtn?.addEventListener("click", loadSelectedSessionTrajectory);
   updateDeleteButtonState();
+  updateLoadSessionTrajectoryButton();
   document.getElementById("save-trajectory-btn").addEventListener("click", () => runCommand("保存轨迹", "/api/handeye/save_trajectory"));
   document.getElementById("dry-run-btn").addEventListener("click", async () => {
     const handeye = state.status?.handeye || {};
@@ -950,10 +1046,16 @@ function bindUi() {
     state.selectedSession = selectedSession;
     state.selectedWaypointName = "";
     state.selectedSampleRow = null;
+    state.selectionVersion += 1;
     updateDeleteButtonState();
+    updateLoadSessionTrajectoryButton();
     refreshReport();
     refreshWaypoints();
   });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) scheduleFullRefresh("visible");
+  });
+  window.addEventListener("focus", () => scheduleFullRefresh("focus"));
   document.getElementById("modal-close").addEventListener("click", hideCompletionDialog);
   els.waypointBody.addEventListener("click", (event) => {
     const row = event.target.closest("tr");

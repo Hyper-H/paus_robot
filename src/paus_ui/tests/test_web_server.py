@@ -32,7 +32,9 @@ def test_frontend_bundle_contains_live_ws_and_cache_bust() -> None:
 
     assert "ws/image" in app_js
     assert "startLiveImageWatchdog" in app_js
-    assert "/static/app.js?v=20260506" in index_html
+    assert "visibilitychange" in app_js
+    assert "load-session-trajectory-btn" in index_html
+    assert "/static/app.js?v=20260521" in index_html
 
 
 def test_frontend_avoids_live_http_resync_and_lazy_loads_thumbnails() -> None:
@@ -44,6 +46,8 @@ def test_frontend_avoids_live_http_resync_and_lazy_loads_thumbnails() -> None:
     assert "图像 HTTP resync" not in app_js
     assert "图像 WS stale" in app_js
     assert "IntersectionObserver" in app_js
+    assert "\\u8f7d\\u5165\\u4e3a\\u5f53\\u524d\\u8f68\\u8ff9" in app_js
+    assert "scheduleFullRefresh" in app_js
     assert 'class="thumb-image" data-src=' in app_js
 
 

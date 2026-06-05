@@ -84,7 +84,9 @@ class SessionStore:
         samples = self._read_samples_without_report_fallback(session_path)
         events = self._read_jsonl(session_path / "run.log")
         counts = self._counts_for_session(path=session_path, report=report, samples=samples, events=events)
-        residuals = report.get("residuals", {}) if isinstance(report.get("residuals"), dict) else {}
+        raw_residuals = report.get("raw_residuals", {}) if isinstance(report.get("raw_residuals"), dict) else {}
+        corrected_residuals = report.get("corrected_residuals", {}) if isinstance(report.get("corrected_residuals"), dict) else {}
+        residuals = corrected_residuals or (report.get("residuals", {}) if isinstance(report.get("residuals"), dict) else {})
         report_error = report.get("error")
         trajectory_error = counts.get("trajectory_error")
         invalid_reason = report_error or trajectory_error
@@ -111,6 +113,8 @@ class SessionStore:
                 "skipped_count": counts["skipped"],
                 "pending_count": counts["pending"],
                 "residuals": residuals,
+                "raw_residuals": raw_residuals,
+                "corrected_residuals": corrected_residuals,
                 "residual_comparison": self._residual_comparison(residuals),
                 "empty_reason": invalid_reason or (None if has_solution else ("report.yaml 存在，但该 session 尚未完成求解。" if has_report else "该 session 暂无 report.yaml。")),
             }
@@ -148,7 +152,7 @@ class SessionStore:
         session_path = self._session_path(session_id)
         report = self._read_yaml(session_path / "report.yaml")
         base_to_camera = report.get("base_to_camera")
-        tool_to_board_cfg = report.get("tool_to_board")
+        tool_to_board_cfg = report.get("estimated_tool_to_board") or report.get("tool_to_board")
         if not base_to_camera or not tool_to_board_cfg:
             return []
         if isinstance(base_to_camera, dict):
@@ -333,6 +337,26 @@ class SessionStore:
     def read_waypoints(self) -> dict[str, Any]:
         return self._read_waypoints_from_path(self.trajectory_path)
 
+    def load_session_trajectory(self, session_id: str) -> dict[str, Any]:
+        session_path = self._session_path(session_id)
+        source_path = self._trajectory_path_for_session(session_path)
+        if source_path is None or not source_path.exists():
+            raise FileNotFoundError(f"Session has no trajectory_used.yaml: {session_id}")
+        try:
+            trajectory = load_trajectory(source_path)
+        except (TrajectoryValidationError, yaml.YAMLError, OSError, ValueError) as exc:
+            raise ValueError(f"Session trajectory is invalid: {exc}") from exc
+        payload_text = source_path.read_text(encoding="utf-8")
+        self.trajectory_path.parent.mkdir(parents=True, exist_ok=True)
+        self.trajectory_path.write_text(payload_text, encoding="utf-8")
+        return {
+            "session_id": session_id,
+            "source_trajectory_path": str(source_path),
+            "trajectory_path": str(self.trajectory_path),
+            "waypoint_count": len(trajectory.waypoints),
+            "operator_message": f"\u5df2\u8f7d\u5165 session {session_id} \u7684 {len(trajectory.waypoints)} \u4e2a waypoints\u3002",
+        }
+
     def sample_image_path(self, session_id: str, row_index: int) -> Path | None:
         sample = self.sample_for_row(session_id, row_index)
         if sample is None:
@@ -420,7 +444,7 @@ class SessionStore:
         }
 
     def _counts_for_session(self, *, path: Path, report: dict[str, Any], samples: list[dict[str, Any]], events: list[dict[str, Any]]) -> dict[str, int]:
-        accepted = sum(1 for event in events if event.get("event") == "waypoint_sample_captured")
+        accepted = sum(1 for event in events if event.get("event") in {"waypoint_sample_captured", "sample_captured"})
         skipped = sum(1 for event in events if event.get("event") in {"waypoint_capture_skipped", "waypoint_capture_disabled", "waypoint_dry_run_complete"})
         if not accepted:
             accepted = int(report.get("sample_count", 0) or len(samples))

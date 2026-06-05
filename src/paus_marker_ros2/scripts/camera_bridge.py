@@ -23,6 +23,7 @@ from paus_perception import (  # noqa: E402
     open_camera_runtime,
     pack_frame_packet,
     read_runtime_calibration,
+    save_camera_calibration,
 )
 
 
@@ -59,6 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-index", type=int, default=None, help="Optional camera index to connect.")
     parser.add_argument("--jpeg-quality", type=int, default=90, help="JPEG encoding quality.")
     parser.add_argument("--frame-id", default="camera", help="Frame id attached to bridge messages.")
+    parser.add_argument("--camera-config-output", default=None, help="Optional path to write runtime camera calibration YAML.")
     parser.add_argument("--reconnect-delay", type=float, default=1.0, help="Seconds to wait before reconnect.")
     parser.add_argument("--timeout-us", type=int, default=3_000_000, help="SDK capture timeout in microseconds.")
     parser.add_argument("--enable-depth", action="store_true", help="Also publish RGB-aligned depth frames from DkamSDK channel 1.")
@@ -92,6 +94,15 @@ def main() -> int:
                 )
             with _open_camera_runtime_for_args(args, depth_enabled=depth_enabled) as runtime:
                 calibration = read_runtime_calibration(runtime, camera_count=args.rgb_camera_count)
+                if args.camera_config_output:
+                    calibration.source_path = str(args.camera_config_output)
+                    save_camera_calibration(calibration, args.camera_config_output)
+                    print(
+                        json.dumps(
+                            {"event": "camera_config_written", "path": str(args.camera_config_output)},
+                            ensure_ascii=False,
+                        )
+                    )
                 camera_info_payload = camera_calibration_to_camera_info_payload(
                     calibration,
                     frame_id=args.frame_id,

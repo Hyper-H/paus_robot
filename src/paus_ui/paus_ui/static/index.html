@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PAUS Robot UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260506" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260521" />
   </head>
   <body>
     <div class="app-shell">
@@ -162,7 +162,10 @@
                 <h2>标定结果</h2>
                 <p id="report-path">尚未选择 session</p>
               </div>
-              <select id="session-select" class="session-select" aria-label="session"></select>
+              <div class="session-actions">
+                <select id="session-select" class="session-select" aria-label="session"></select>
+                <button id="load-session-trajectory-btn" class="ghost-button small" type="button" disabled>&#36733;&#20837;&#20026;&#24403;&#21069;&#36712;&#36857;</button>
+              </div>
             </div>
             <div class="summary-grid">
               <div class="summary-cell"><span>sample_count</span><strong id="sample-count">--</strong></div>
@@ -194,6 +197,6 @@
         <button id="modal-close" class="action primary" type="button">关闭</button>
       </div>
     </div>
-    <script src="/static/app.js?v=20260506"></script>
+    <script src="/static/app.js?v=20260521"></script>
   </body>
 </html>

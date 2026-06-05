@@ -777,13 +777,64 @@ tbody tr.selected td {
   overflow: auto;
 }
 
+.result-panel .panel-header {
+  align-items: flex-start;
+}
+
+.result-panel .panel-header > div:first-child {
+  min-width: 0;
+}
+
+.result-panel #report-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.result-panel .session-actions {
+  flex: 0 0 170px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+  gap: 4px;
+}
+
 .session-select {
   min-width: 150px;
+  max-width: 240px;
   height: 32px;
+  padding: 0 6px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: #fff;
   color: var(--ink);
+}
+
+.result-panel .session-select {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+}
+
+#load-session-trajectory-btn {
+  width: 100%;
+  min-width: 0;
+  min-height: 26px;
+  padding: 4px 6px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+#load-session-trajectory-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .summary-grid {

@@ -170,6 +170,13 @@ def create_app(bridge: "UiRosBridge"):
         except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.post("/api/sessions/{session_id}/load_trajectory")
+    async def load_session_trajectory(session_id: str) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(bridge.load_session_trajectory, session_id)
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.get("/api/sessions/{session_id}/per-sample-residuals")
     async def per_sample_residuals(session_id: str) -> list[dict[str, Any]]:
         try:

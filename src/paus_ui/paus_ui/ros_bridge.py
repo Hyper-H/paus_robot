@@ -153,6 +153,7 @@ class UiRosBridge(Node):
             "delete_selected_waypoint": self.create_client(Trigger, "/eye_to_hand/delete_selected_waypoint"),
             "save_trajectory": self.create_client(Trigger, "/eye_to_hand/save_trajectory"),
             "run_semi_auto": self.create_client(Trigger, "/eye_to_hand/run_semi_auto_calibration"),
+            "stop": self.create_client(Trigger, "/eye_to_hand/stop"),
         }
         self.events.push({"type": "ui_started", "message": "PAUS UI server started.", "operator_message": "UI 服务已启动。"})
 
@@ -538,7 +539,13 @@ class UiRosBridge(Node):
                     "source": "recorded_trajectory",
                     "dirty": trajectory_dirty,
                 }
-        return self.session_store.read_waypoints()
+        trajectory = self.session_store.read_waypoints()
+        waypoints = trajectory.get("waypoints", [])
+        if isinstance(waypoints, list):
+            trajectory = dict(trajectory)
+            trajectory["waypoints"] = [self._shape_recorded_waypoint(w) for w in waypoints]
+            trajectory["source"] = trajectory.get("source", "trajectory_file")
+        return trajectory
 
     def _shape_recorded_waypoint(self, waypoint: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(waypoint, dict):
@@ -603,6 +610,30 @@ class UiRosBridge(Node):
         self._sync_backend_state()
         return self.session_store.read_session_waypoints(session_id)
 
+    def load_session_trajectory(self, session_id: str) -> dict[str, Any]:
+        self._sync_backend_state()
+        result = self.session_store.load_session_trajectory(session_id)
+        self.effective_trajectory_path = self.session_store.trajectory_path
+        self.trajectory_path = self.session_store.trajectory_path
+        result["success"] = True
+        result["loaded"] = True
+        self._last_command_result = {
+            "command": "load_session_trajectory",
+            "success": True,
+            "message": str(result.get("operator_message", "Session trajectory loaded.")),
+            "operator_message": str(result.get("operator_message", "\u5df2\u8f7d\u5165\u5386\u53f2 session \u8f68\u8ff9\u3002")),
+        }
+        self.events.push(
+            {
+                "type": "ui_command_result",
+                "command": "load_session_trajectory",
+                "result": self._last_command_result,
+                "operator_message": self._last_command_result["operator_message"],
+                "dedupe_key": self._event_dedupe_key("ui_command_result", self._last_command_result),
+            }
+        )
+        return result
+
     def per_sample_residuals(self, session_id: str) -> list[dict[str, Any]]:
         self._sync_backend_state()
         return self.session_store.per_sample_residuals(session_id)
@@ -647,13 +678,11 @@ class UiRosBridge(Node):
         return result
 
     def stop_run(self) -> dict[str, Any]:
-        result = self._shape_command_result(
-            "stop",
-            False,
-            "Stop is not supported by the current calibration node. Use terminal interrupt or the physical emergency stop if motion must stop immediately.",
-            extra={"stop_supported": False},
-        )
-        self._last_command_result = result
+        result = self._call_trigger("stop", timeout_s=2.0)
+        if result.get("success"):
+            result["accepted"] = True
+            result["stopping"] = True
+            result["operator_message"] = "\u6b63\u5728\u505c\u6b62\u534a\u81ea\u52a8\u6807\u5b9a\uff0c\u5f53\u524d\u52a8\u4f5c\u5b8c\u6210\u540e\u4f1a\u5728\u4e0b\u4e00\u4e2a\u5b89\u5168\u68c0\u67e5\u70b9\u505c\u4e0b\u3002"
         return result
 
     def get_events_since(self, last_id: int) -> tuple[list[dict[str, Any]], int]:
@@ -834,6 +863,8 @@ class UiRosBridge(Node):
             "waypoint_capture_disabled": ("skipped", "无需采样"),
             "waypoint_capture_skipped": ("skipped", "该点已跳过"),
             "waypoint_sample_captured": ("accepted", "样本已接受"),
+            "sample_captured": ("accepted", "样本已接受"),
+            "capture_failed": ("error", "采样失败"),
             "semi_auto_insufficient_samples": ("error", "有效样本不足"),
             "solving": ("solve", "正在求解手眼标定"),
             "solved": ("solve", "标定已求解"),
