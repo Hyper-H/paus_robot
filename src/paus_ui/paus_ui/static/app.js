@@ -6,6 +6,8 @@ const state = {
   selectionVersion: 0,
   status: null,
   quality: null,
+  observationMode: "rgb_pnp",
+  qualitySchema: null,
   sessions: [],
   waypoints: [],
   waypointsDirty: false,
@@ -40,6 +42,9 @@ const els = {
   extrinsicsChip: document.getElementById("extrinsics-chip"),
   motionChip: document.getElementById("motion-chip"),
   imageChip: document.getElementById("image-chip"),
+  modeChip: document.getElementById("mode-chip"),
+  observationModeToggle: document.getElementById("observation-mode-toggle"),
+  waypointHead: document.getElementById("waypoint-head"),
   currentWaypoint: document.getElementById("current-waypoint"),
   workflowFlow: document.getElementById("workflow-flow"),
   tcpPoseGrid: document.getElementById("tcp-pose-grid"),
@@ -68,6 +73,157 @@ const els = {
   deleteBtn: document.getElementById("delete-btn"),
   loadSessionTrajectoryBtn: document.getElementById("load-session-trajectory-btn"),
 };
+
+const QUALITY_SCHEMAS = {
+  rgb_pnp: {
+    label: "RGB PnP",
+    liveMetrics: [
+      { key: "detected", label: "\u68c0\u6d4b", kind: "bool" },
+      { path: "reprojection_error_px", label: "\u91cd\u6295\u5f71 px", digits: 3 },
+      { path: "board_margin_px", label: "\u8fb9\u8ddd px", digits: 1 },
+      { path: "camera_to_board_translation_m.2", label: "Tz", digits: 3, suffix: " m" },
+      { path: "board_angle_deg", label: "\u68cb\u76d8\u89d2\u5ea6", digits: 2, suffix: " deg" },
+    ],
+    tableColumns: [
+      { key: "index", label: "#", kind: "index" },
+      { key: "name", label: "waypoint" },
+      { key: "status", label: "\u72b6\u6001", kind: "pill" },
+      { key: "result", label: "result", kind: "pill" },
+      { path: "reprojection_error_px", label: "\u91cd\u6295\u5f71 px", digits: 3 },
+      { path: "board_margin_px", label: "\u8fb9\u8ddd px", digits: 1 },
+      { path: "camera_to_board_translation_m.2", label: "Tz (m)", digits: 3, suffix: " m" },
+      { path: "translation_residual_mm", label: "trans resid mm", digits: 3, suffix: " mm" },
+      { path: "rotation_residual_deg", label: "rot resid deg", digits: 4, suffix: " deg" },
+      { key: "capture", label: "capture", kind: "bool" },
+      { key: "reason_display", label: "reason" },
+      { key: "thumbnail", label: "thumbnail", kind: "thumb" },
+    ],
+    previewFields: [
+      { path: "reprojection_error_px", label: "reprojection_error_px", digits: 3 },
+      { path: "board_margin_px", label: "board_margin_px", digits: 1 },
+      { path: "board_angle_deg", label: "board_angle_deg", digits: 2, suffix: " deg" },
+      { path: "camera_to_board_translation_m.0", label: "T_camera_board x", digits: 3, suffix: " m" },
+      { path: "camera_to_board_translation_m.1", label: "T_camera_board y", digits: 3, suffix: " m" },
+      { path: "camera_to_board_translation_m.2", label: "T_camera_board z", digits: 3, suffix: " m" },
+      { path: "camera_to_board_rotation_rpy_deg.0", label: "board rx", digits: 2, suffix: " deg" },
+      { path: "camera_to_board_rotation_rpy_deg.1", label: "board ry", digits: 2, suffix: " deg" },
+      { path: "camera_to_board_rotation_rpy_deg.2", label: "board rz", digits: 2, suffix: " deg" },
+      { path: "image_sequence", label: "image_sequence" },
+      { path: "capture_time_s", label: "capture_time" },
+      { path: "translation_residual_mm", label: "translation_residual_mm", digits: 3, suffix: " mm" },
+      { path: "rotation_residual_deg", label: "rotation_residual_deg", digits: 4, suffix: " deg" },
+    ],
+  },
+  depth_aligned: {
+    label: "Depth Align",
+    liveMetrics: [
+      { path: "quality_payload.valid_depth_ratio", label: "\u6df1\u5ea6\u6709\u6548\u7387", digits: 2 },
+      { path: "quality_payload.board_model_fit_rmse_mm", label: "\u5e73\u9762\u5bf9\u9f50\u8bef\u5dee", digits: 2, suffix: " mm" },
+      { path: "quality_payload.plane_residual_std_mm_median", label: "\u6df1\u5ea6\u6b8b\u5dee", digits: 2, suffix: " mm" },
+      { path: "quality_payload.global_plane_point_count", label: "\u6709\u6548\u70b9\u6570", digits: 0 },
+      { path: "board_angle_deg", label: "\u68cb\u76d8\u89d2\u5ea6", digits: 2, suffix: " deg" },
+    ],
+    tableColumns: [
+      { key: "index", label: "#", kind: "index" },
+      { key: "name", label: "waypoint" },
+      { key: "status", label: "\u72b6\u6001", kind: "pill" },
+      { key: "result", label: "result", kind: "pill" },
+      { path: "quality_payload.valid_depth_ratio", label: "\u6df1\u5ea6\u6709\u6548\u7387", digits: 2 },
+      { path: "quality_payload.board_model_fit_rmse_mm", label: "\u5e73\u9762\u5bf9\u9f50\u8bef\u5dee", digits: 2, suffix: " mm" },
+      { path: "quality_payload.plane_residual_std_mm_median", label: "\u6df1\u5ea6\u6b8b\u5dee", digits: 2, suffix: " mm" },
+      { path: "quality_payload.global_plane_point_count", label: "\u6709\u6548\u70b9\u6570", digits: 0 },
+      { path: "board_angle_deg", label: "\u68cb\u76d8\u89d2\u5ea6", digits: 2, suffix: " deg" },
+      { key: "capture", label: "capture", kind: "bool" },
+      { key: "reason_display", label: "reason" },
+      { key: "thumbnail", label: "thumbnail", kind: "thumb" },
+    ],
+    previewFields: [
+      { path: "quality_payload.valid_depth_ratio", label: "valid_depth_ratio", digits: 2 },
+      { path: "quality_payload.board_model_fit_rmse_mm", label: "board_model_fit_rmse_mm", digits: 2, suffix: " mm" },
+      { path: "quality_payload.plane_residual_std_mm_median", label: "plane_residual_std_mm_median", digits: 2, suffix: " mm" },
+      { path: "quality_payload.plane_residual_std_mm_p95", label: "plane_residual_std_mm_p95", digits: 2, suffix: " mm" },
+      { path: "quality_payload.global_plane_point_count", label: "global_plane_point_count" },
+      { path: "quality_payload.board_model_fit_mean_mm", label: "board_model_fit_mean_mm", digits: 2, suffix: " mm" },
+      { path: "quality_payload.board_center_z_m", label: "board_center_z_m", digits: 3, suffix: " m" },
+      { path: "quality_payload.rgb_depth_delta_ms", label: "rgb_depth_delta_ms", digits: 1, suffix: " ms" },
+      { path: "board_angle_deg", label: "board_angle_deg", digits: 2, suffix: " deg" },
+      { path: "image_sequence", label: "image_sequence" },
+      { path: "capture_time_s", label: "capture_time" },
+    ],
+  },
+};
+
+function getValueByPath(source, path) {
+  if (!path) return source;
+  return String(path).split('.').reduce((value, part) => {
+    if (value === null || value === undefined) return undefined;
+    if (Array.isArray(value) && /^\d+$/.test(part)) return value[Number(part)];
+    return value[part];
+  }, source);
+}
+
+function activeSchema() {
+  return state.qualitySchema || QUALITY_SCHEMAS[state.observationMode] || QUALITY_SCHEMAS.rgb_pnp;
+}
+
+function setModeToggleActive(mode) {
+  document.querySelectorAll('[data-observation-mode]').forEach((button) => {
+    button.classList.toggle('active', button.dataset.observationMode === mode);
+  });
+}
+
+function renderMetricValue(metric, source) {
+  const resolved = getValueByPath(source, metric.path || metric.key);
+  if (metric.kind === 'bool') {
+    return resolved === true ? 'OK' : (resolved === false ? 'NO' : '--');
+  }
+  if (resolved === null || resolved === undefined || resolved === '') return '--';
+  if (typeof resolved === 'string' && Number.isNaN(Number(resolved))) {
+    return `${resolved}${metric.suffix || ''}`;
+  }
+  if (metric.digits === undefined) {
+    return `${text(resolved)}${metric.suffix || ''}`;
+  }
+  return fmt(resolved, metric.digits, metric.suffix || '');
+}
+
+function renderColumnValue(column, item, displayIndex) {
+  const raw = column.key === 'index' ? displayIndex : (column.kind === 'thumb' ? null : getValueByPath(item, column.path || column.key));
+  if (column.kind === 'index') return escapeHtml(displayIndex);
+  if (column.kind === 'pill') {
+    if (column.key === 'status') return `<span class="status-pill ${escapeHtml(text(raw, '-'))}">${escapeHtml(text(raw, '-'))}</span>`;
+    if (column.key === 'result') return `<span class="result-pill ${escapeHtml(String(text(raw, '-')).toLowerCase())}">${escapeHtml(text(raw, '-'))}</span>`;
+    return `<span>${escapeHtml(text(raw, '-'))}</span>`;
+  }
+  if (column.kind === 'bool') return escapeHtml(raw === false ? 'no' : (raw === true ? 'OK' : '--'));
+  if (column.kind === 'thumb') {
+    const row = item.sample_row_index || item.row_index || item.index;
+    if (item.has_image && row) {
+      const src = `/api/sessions/${encodeURIComponent(state.selectedSession)}/sample-image/${row}.jpg?mode=raw&axes=false`;
+      return `<button class="thumb-button" type="button" data-row="${row}"><img class="thumb-image" data-src="${src}" alt="sample ${row}" loading="lazy" decoding="async" /></button>`;
+    }
+    return '-';
+  }
+  if (raw === null || raw === undefined || raw === '') return '--';
+  if (typeof raw === 'string' && Number.isNaN(Number(raw))) return escapeHtml(raw);
+  if (column.digits === undefined) return escapeHtml(text(raw));
+  return escapeHtml(fmt(raw, column.digits, column.suffix || ''));
+}
+
+function renderTableHeader() {
+  const schema = activeSchema();
+  els.waypointHead.innerHTML = `<tr>${schema.tableColumns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join('')}</tr>`;
+}
+
+function renderWaypointCells(item, index) {
+  const schema = activeSchema();
+  return schema.tableColumns.map((column) => `<td>${renderColumnValue(column, item, index)}</td>`).join('');
+}
+
+function renderDetailCards(source) {
+  const schema = activeSchema();
+  return schema.previewFields.map((field) => `<div class="kv"><span>${escapeHtml(field.label)}</span><strong>${escapeHtml(renderMetricValue(field, source))}</strong></div>`).join('');
+}
 
 function fmt(value, digits = 2, suffix = "") {
   if (value === null || value === undefined || value === "" || Number.isNaN(Number(value))) {
@@ -276,6 +432,9 @@ async function refreshStatus() {
   const current = handeye.current_waypoint || {};
   const session = handeye.session || {};
   const motion = handeye.motion || {};
+  const observationMode = handeye.observation_mode || workflow.observation_mode || current.observation_mode || state.observationMode || 'rgb_pnp';
+  state.observationMode = observationMode;
+  state.qualitySchema = QUALITY_SCHEMAS[observationMode] || QUALITY_SCHEMAS.rgb_pnp;
   if (handeye.trajectory_dirty !== null && handeye.trajectory_dirty !== undefined) {
     state.waypointsDirty = Boolean(handeye.trajectory_dirty);
   }
@@ -322,7 +481,7 @@ async function refreshStatus() {
   } else {
     els.boardAngle.textContent = "--";
   }
-  renderQualityMetrics(current);
+  renderQualityMetrics(current.quality_payload || current.sample_quality || current.record_quality || current);
   if (session.session_id && handeye.run_active && !state.userSelectedSession && state.selectedSession !== session.session_id) {
     state.selectedSession = session.session_id;
     state.autoSelectedSession = true;
@@ -356,17 +515,22 @@ async function refreshStatus() {
 }
 
 function renderQualityMetrics(quality = {}) {
-  const t = quality.camera_to_board_translation_m || [];
-  const thresholds = quality.thresholds || {};
-  const detected = quality.quality_detected ?? quality.detected;
-  const metrics = [
-    { label: "检测", value: detected === true ? "ok" : (detected === false ? "no" : "--"), tone: detected === false ? "warn" : "" },
-    { label: "重投影 px", value: fmt(quality.reprojection_error_px, 3), tone: thresholds.reprojection_ok === false ? "bad" : "" },
-    { label: "边距 px", value: fmt(quality.board_margin_px, 1), tone: thresholds.margin_ok === false ? "bad" : "" },
-    { label: "Z m", value: fmt(t[2], 3), tone: "" },
-    { label: "棋盘角度", value: fmt(quality.board_angle_deg, 2, " deg"), tone: "" },
-  ];
-  els.qualityMetrics.innerHTML = metrics.map((item) => `<div class="metric ${item.tone}"><span>${item.label}</span><strong>${item.value}</strong></div>`).join("");
+  const schema = activeSchema();
+  const metrics = (schema.liveMetrics || []).map((metric) => {
+    const value = renderMetricValue(metric, quality);
+    let tone = metric.tone || '';
+    const threshold = metric.threshold;
+    if (typeof threshold === 'number') {
+      const numeric = Number(getValueByPath(quality, metric.path || metric.key));
+      if (Number.isFinite(numeric) && numeric > threshold) tone = 'bad';
+    }
+    if (metric.key === 'detected') {
+      const detected = getValueByPath(quality, 'detected');
+      tone = detected === false ? 'warn' : '';
+    }
+    return { label: metric.label, value, tone };
+  });
+  els.qualityMetrics.innerHTML = metrics.map((item) => `<div class="metric ${item.tone}"><span>${escapeHtml(item.label)}</span><strong>${escapeHtml(item.value)}</strong></div>`).join('');
 }
 
 async function refreshSessions() {
@@ -501,6 +665,8 @@ async function refreshWaypoints() {
         has_image: waypoint.has_image || false,
         sample_row_index: waypoint.sample_row_index || null,
         thumbnail_url: waypoint.thumbnail_url || null,
+        observation_mode: waypoint.observation_mode || state.observationMode,
+        quality_payload: waypoint.quality_payload || waypoint.record_quality || {},
       }));
       if (trajectory.trajectory_path) els.trajectoryPath.textContent = trajectory.trajectory_path;
     }
@@ -532,33 +698,69 @@ async function refreshWaypoints() {
 function renderWaypointRow(item, index) {
   const waypoint = item.waypoint || item;
   const status = item.status || "pending";
-  const thresholds = item.thresholds || {};
-  const t = item.camera_to_board_translation_m || [];
   const displayIndex = item.index ?? item.display_index ?? index + 1;
-  const reprojClass = thresholds.reprojection_ok === false ? "quality-bad" : "";
-  const marginClass = thresholds.margin_ok === false ? "quality-bad" : "";
-  const transResid = item.translation_residual_mm;
-  const rotResid = item.rotation_residual_deg;
-  const transResidClass = transResid !== null && transResid !== undefined && transResid > 10 ? "quality-bad" : (transResid !== null && transResid !== undefined && transResid > 5 ? "quality-warn" : "");
-  const rotResidClass = rotResid !== null && rotResid !== undefined && rotResid > 2 ? "quality-bad" : (rotResid !== null && rotResid !== undefined && rotResid > 1 ? "quality-warn" : "");
-  const thumb = item.has_image && item.sample_row_index
-    ? `<button class="thumb-button" type="button" data-row="${item.sample_row_index}"><img class="thumb-image" data-src="/api/sessions/${encodeURIComponent(state.selectedSession)}/sample-image/${item.sample_row_index}.jpg?mode=raw&axes=false" alt="sample ${item.sample_row_index}" loading="lazy" decoding="async" /></button>`
-    : "-";
-  return `
-    <tr data-name="${escapeHtml(item.name || waypoint.name || "")}" data-row="${item.sample_row_index || ""}">
-      <td>${escapeHtml(displayIndex)}</td>
-      <td title="${escapeHtml(item.name || waypoint.name || "")}">${escapeHtml(item.name || waypoint.name || "--")}</td>
-      <td><span class="status-pill ${escapeHtml(status)}">${escapeHtml(status)}</span></td>
-      <td><span class="result-pill ${escapeHtml(String(item.result || "-").toLowerCase())}">${escapeHtml(item.result || "-")}</span></td>
-      <td class="${reprojClass}">${fmt(item.reprojection_error_px, 3)}</td>
-      <td class="${marginClass}">${fmt(item.board_margin_px, 1)}</td>
-      <td>${fmt(t[2], 3)}</td>
-      <td class="${transResidClass}">${fmt(transResid, 3)}</td>
-      <td class="${rotResidClass}">${fmt(rotResid, 4)}</td>
-      <td>${item.capture === false ? "no" : "OK"}</td>
-      <td title="${escapeHtml(item.reason_display || item.reason || "")}">${escapeHtml(item.reason_display || item.reason || "-")}</td>
-      <td>${thumb}</td>
-    </tr>`;
+  const rowClass = status === 'accepted' ? 'quality-good' : status === 'skipped' ? 'quality-warn' : '';
+  return `<tr data-name="${escapeHtml(item.name || waypoint.name || '')}" data-row="${item.sample_row_index || ''}" class="${rowClass}">${renderWaypointCells(item, displayIndex)}</tr>`;
+}
+
+function selectWaypoint(item) {
+  if (!item) return;
+  state.selectedWaypointName = item.name || item.waypoint?.name || '';
+  state.selectedSampleRow = item.sample_row_index || null;
+  markSelectedRow();
+  renderPreview(item);
+}
+
+function markSelectedRow() {
+  [...els.waypointBody.querySelectorAll('tr')].forEach((row) => {
+    row.classList.toggle('selected', row.dataset.name === state.selectedWaypointName);
+  });
+}
+
+function renderPreview(item) {
+  if (!item) {
+    els.previewTitle.textContent = '????';
+    els.previewSubtitle.textContent = '?? waypoint ?????????';
+    els.samplePreview.removeAttribute('src');
+    els.samplePreview.style.display = 'none';
+    els.previewEmpty.classList.remove('hidden');
+    els.previewEmpty.textContent = '?????';
+    els.previewDetails.innerHTML = '';
+    return;
+  }
+  const name = item.name || item.waypoint?.name || '????';
+  els.previewTitle.textContent = `${name} ??`;
+  const rowIndex = item.sample_row_index || item.row_index;
+  els.previewSubtitle.textContent = item.status ? `${item.status} / ${item.result || '-'}` : '?? waypoint ?????????';
+  const schema = activeSchema();
+  const source = { ...item, quality_payload: item.quality_payload || item.sample_quality || item.record_quality || {} };
+  if (state.previewMode === 'raw') {
+    els.previewDetails.innerHTML = '';
+    if (state.selectedSession && rowIndex && item.has_image) {
+      els.previewEmpty.classList.add('hidden');
+      els.samplePreview.style.display = 'block';
+      els.samplePreview.src = `/api/sessions/${encodeURIComponent(state.selectedSession)}/sample-image/${rowIndex}.jpg?mode=raw&axes=false`;
+    } else {
+      els.samplePreview.removeAttribute('src');
+      els.samplePreview.style.display = 'none';
+      els.previewEmpty.classList.remove('hidden');
+      els.previewEmpty.textContent = item.reason_display || '? waypoint ??????';
+    }
+    return;
+  }
+  els.samplePreview.removeAttribute('src');
+  els.samplePreview.style.display = 'none';
+  els.previewEmpty.classList.add('hidden');
+  els.previewDetails.innerHTML = renderDetailCards(source);
+}
+
+function initPreviewErrorHandler() {
+  els.samplePreview.addEventListener('error', () => {
+    els.samplePreview.removeAttribute('src');
+    els.samplePreview.style.display = 'none';
+    els.previewEmpty.classList.remove('hidden');
+    els.previewEmpty.textContent = '?????????????????';
+  });
 }
 
 function clearThumbnailObserver() {
@@ -980,6 +1182,18 @@ function bindUi() {
   els.liveImage.addEventListener("load", hideLivePlaceholder);
   els.liveImage.addEventListener("error", () => {
     showLivePlaceholder(state.imageWsConnected ? "图像加载失败" : "等待相机图像");
+  });
+  document.querySelectorAll('[data-observation-mode]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const mode = button.dataset.observationMode;
+      if (!mode || mode === state.observationMode) return;
+      setNotice(`??????? ${mode}...`);
+      const result = await runCommand('????', '/api/handeye/observation-mode', { mode });
+      if (result?.success) {
+        state.observationMode = result.observation_mode || result.mode || mode;
+        setModeToggleActive(state.observationMode);
+      }
+    });
   });
   document.querySelectorAll("[data-preview-mode]").forEach((button) => {
     button.addEventListener("click", () => {

@@ -136,6 +136,7 @@ def main() -> int:
                         )
                     )
                     depth_error_count = 0
+                    max_depth_capture_errors = 5
                     while True:
                         image_bgr = capture_rgb_frame(runtime, timeout_us=args.timeout_us)
                         depth_frame = None
@@ -162,6 +163,18 @@ def main() -> int:
                                         ensure_ascii=False,
                                     )
                                 )
+                                if depth_error_count >= max_depth_capture_errors:
+                                    print(
+                                        json.dumps(
+                                            {
+                                                "event": "depth_capture_disabled",
+                                                "error": repr(exc),
+                                                "consecutive_errors": depth_error_count,
+                                            },
+                                            ensure_ascii=False,
+                                        )
+                                    )
+                                    depth_enabled = False
                         frame_timestamp_ns = time.time_ns()
                         payload = encode_bgr_frame_to_jpeg(image_bgr, jpeg_quality=args.jpeg_quality)
                         header = {

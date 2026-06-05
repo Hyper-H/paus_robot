@@ -28,6 +28,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rcl_interfaces.msg import SetParametersResult
 # 导入消息与服务类型。
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
@@ -266,6 +267,7 @@ class EyeToHandCalibrationNode(Node):
         self.run_log_path: Path | None = None
         self.recorded_trajectory = self._load_or_create_trajectory_for_recording()
         self._semi_auto_lock = threading.Lock()
+        self._parameter_update_lock = threading.Lock()
         self._semi_auto_active = False
         self._stop_requested = False
         self._stop_lock = threading.Lock()
@@ -296,9 +298,8 @@ class EyeToHandCalibrationNode(Node):
 
         # 创建图像订阅器与状态发布器。
         self.image_subscription = self.create_subscription(Image, self.image_topic, self._image_callback, 10, callback_group=self.callback_group)
-        self.depth_subscription = None
-        if self._uses_depth_observation():
-            self.depth_subscription = self.create_subscription(Image, self.depth_topic, self._depth_callback, 10, callback_group=self.callback_group)
+        self.depth_subscription = self.create_subscription(Image, self.depth_topic, self._depth_callback, 10, callback_group=self.callback_group)
+        self.add_on_set_parameters_callback(self._on_parameters_changed)
         self.status_publisher = self.create_publisher(String, self.status_topic, STATUS_QOS)
 
         # 创建“采样 / 求解 / 保存”以及半自动轨迹服务接口。
@@ -351,6 +352,55 @@ class EyeToHandCalibrationNode(Node):
         )
 
     # 接收最新图像。
+    def _on_parameters_changed(self, parameters) -> SetParametersResult:
+        changed: dict[str, object] = {}
+        try:
+            for parameter in parameters:
+                if parameter.name == "observation_mode":
+                    changed["observation_mode"] = normalize_observation_mode(parameter.value)
+                elif parameter.name == "depth_topic":
+                    depth_topic = str(parameter.value).strip()
+                    if not depth_topic:
+                        raise ValueError("depth_topic cannot be empty.")
+                    changed["depth_topic"] = depth_topic
+        except ValueError as exc:
+            return SetParametersResult(successful=False, reason=str(exc))
+
+        observation_mode_changed = False
+        depth_topic_changed = False
+        with self._parameter_update_lock:
+            if "observation_mode" in changed and changed["observation_mode"] != self.observation_mode:
+                self.observation_mode = str(changed["observation_mode"])
+                observation_mode_changed = True
+            if "depth_topic" in changed and changed["depth_topic"] != self.depth_topic:
+                self.depth_topic = str(changed["depth_topic"])
+                depth_topic_changed = True
+                try:
+                    if self.depth_subscription is not None:
+                        self.destroy_subscription(self.depth_subscription)
+                except Exception:
+                    pass
+                self.depth_subscription = self.create_subscription(Image, self.depth_topic, self._depth_callback, 10, callback_group=self.callback_group)
+
+        if observation_mode_changed or depth_topic_changed:
+            self._append_run_log(
+                "observation_mode_changed",
+                {
+                    "observation_mode": self.observation_mode,
+                    "depth_topic": self.depth_topic,
+                },
+            )
+            self._publish_status(
+                "observation_mode_changed",
+                f"Observation mode set to {self.observation_mode}.",
+                {
+                    "observation_mode": self.observation_mode,
+                    "depth_topic": self.depth_topic,
+                    "session_dir": str(self.session_dir) if self.session_dir else None,
+                },
+            )
+        return SetParametersResult(successful=True)
+
     def _image_callback(self, message: Image) -> None:
         image_bgr = self.bridge.imgmsg_to_cv2(message, desired_encoding="bgr8")
         header_time_s = None
@@ -1215,6 +1265,7 @@ class EyeToHandCalibrationNode(Node):
                 "git_dirty": bool(git_metadata.get("git_dirty")),
                 "sample_count": len(self.samples),
                 "method": solve_method,
+                "observation_mode": self.observation_mode,
                 "base_to_camera": asdict(transform),
                 "tool_to_board": {
                     "translation_m": list(self.tool_to_board_translation),

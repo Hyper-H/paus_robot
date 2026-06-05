@@ -16,7 +16,9 @@ import rclpy
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import SetParameters
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rcl_interfaces.srv import SetParameters
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
@@ -24,6 +26,8 @@ from std_srvs.srv import Trigger
 from paus_perception import load_camera_calibration, load_config
 
 from .operator_messages import classify_operator_message
+from paus_marker_ros2.board_observation import DEPTH_ALIGNED_MODE, RGB_PNP_MODE, SUPPORTED_OBSERVATION_MODES, normalize_observation_mode
+
 from .overlay import BoardOverlayDetector, encode_jpeg, make_placeholder_image
 from .path_resolvers import resolve_ui_calibration_paths
 from .session_store import SessionStore
@@ -73,11 +77,13 @@ class UiRosBridge(Node):
         self.declare_parameter("camera_config_path", "/tmp/paus_robot/camera.yaml")
         self.declare_parameter("image_topic", "/camera/image_bridge")
         self.declare_parameter("status_topic", "/eye_to_hand/status")
-
         self.config_path = self.get_parameter("config_path").get_parameter_value().string_value
         self.config = load_config(self.config_path)
         calibration_cfg = self.config["calibration"]
         control_cfg = self.config["control"]
+
+        self.declare_parameter("observation_mode", str(calibration_cfg.get("observation_mode", RGB_PNP_MODE)))
+        self.declare_parameter("depth_topic", str(calibration_cfg.get("depth_topic", "/camera/depth_aligned")))
 
         self.declare_parameter("board_rows", int(calibration_cfg.get("board_rows", 6)))
         self.declare_parameter("board_cols", int(calibration_cfg.get("board_cols", 9)))
@@ -93,6 +99,9 @@ class UiRosBridge(Node):
         self.camera_config_path = Path(self.get_parameter("camera_config_path").get_parameter_value().string_value)
         self.image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
         self.status_topic = self.get_parameter("status_topic").get_parameter_value().string_value
+        self.observation_mode = normalize_observation_mode(self.get_parameter("observation_mode").get_parameter_value().string_value)
+        self.depth_topic = self.get_parameter("depth_topic").get_parameter_value().string_value
+        self.supported_observation_modes = [RGB_PNP_MODE, DEPTH_ALIGNED_MODE]
         self.board_rows = int(self.get_parameter("board_rows").get_parameter_value().integer_value)
         self.board_cols = int(self.get_parameter("board_cols").get_parameter_value().integer_value)
         self.square_size_m = float(self.get_parameter("square_size_m").get_parameter_value().double_value)
@@ -155,6 +164,7 @@ class UiRosBridge(Node):
             "run_semi_auto": self.create_client(Trigger, "/eye_to_hand/run_semi_auto_calibration"),
             "stop": self.create_client(Trigger, "/eye_to_hand/stop"),
         }
+        self._set_parameters_client = self.create_client(SetParameters, "/eye_to_hand_calibration_node/set_parameters")
         self.events.push({"type": "ui_started", "message": "PAUS UI server started.", "operator_message": "UI 服务已启动。"})
 
     def _resolve_default_config_path(self, bringup_share: Path) -> Path:
@@ -218,6 +228,10 @@ class UiRosBridge(Node):
             self.effective_min_board_margin_px = self.min_board_margin_px
         if not hasattr(self, "effective_execute_motion"):
             self.effective_execute_motion = self.execute_motion
+        if not hasattr(self, "observation_mode"):
+            self.observation_mode = RGB_PNP_MODE
+        if not hasattr(self, "depth_topic"):
+            self.depth_topic = "/camera/depth_aligned"
         local_camera_config_path = Path(getattr(self, "local_camera_config_path", getattr(self, "camera_config_path", Path(""))))
         local_board_rows = int(getattr(self, "local_board_rows", getattr(self, "board_rows", 6)))
         local_board_cols = int(getattr(self, "local_board_cols", getattr(self, "board_cols", 9)))
@@ -288,8 +302,15 @@ class UiRosBridge(Node):
             self.effective_max_reprojection_error_px = self.max_reprojection_error_px
             self.effective_min_board_margin_px = self.min_board_margin_px
         motion_state_known = bool((status_recent or run_active) and last_status is not None)
-        if motion_state_known:
+        if status_recent or run_active:
             self.effective_execute_motion = _to_bool(payload.get("execute_motion"), self.effective_execute_motion)
+            if payload.get("observation_mode"):
+                try:
+                    self.observation_mode = normalize_observation_mode(payload.get("observation_mode"))
+                except ValueError:
+                    pass
+            if payload.get("depth_topic"):
+                self.depth_topic = str(payload.get("depth_topic"))
         if (
             self.session_store.trajectory_path != self.effective_trajectory_path
             or self.session_store.session_root_path != self.effective_session_root_path
@@ -333,6 +354,7 @@ class UiRosBridge(Node):
         status_payload = live_status or {}
         reprojection = _to_float(status_payload.get("reprojection_error_px"))
         board_margin = _to_float(status_payload.get("board_margin_px"))
+        quality_payload = status_payload.get("sample_quality") or status_payload.get("record_quality") or status_payload.get("quality") or status_payload.get("quality_payload")
         current_waypoint.update(
             {
                 "camera_to_board_translation_m": status_payload.get("camera_to_board_translation_m"),
@@ -345,6 +367,8 @@ class UiRosBridge(Node):
                 "quality_reason_code": status_payload.get("quality_reason_code", status_payload.get("reason_code")),
                 "empty_reason": status_payload.get("empty_reason"),
                 "image_sequence": status_payload.get("image_sequence"),
+                "observation_mode": status_payload.get("observation_mode", self.observation_mode),
+                "quality_payload": quality_payload,
             }
         )
         latest_session = self.session_store.latest_valid_session_id()
@@ -381,6 +405,10 @@ class UiRosBridge(Node):
                 "run_active": bool(self._run_thread and self._run_thread.is_alive()),
                 "workflow": shaped_status["workflow"],
                 "current_waypoint": current_waypoint,
+                "observation_mode": self.observation_mode,
+                "depth_topic": self.depth_topic,
+                "supported_observation_modes": self.supported_observation_modes,
+                "quality_schema": self._quality_schema(self.observation_mode),
                 "session": shaped_status["session"] | {"latest_valid_session_id": latest_session},
                 "motion": self._motion_summary(),
                 "stop": self._stop_status(),
@@ -585,6 +613,8 @@ class UiRosBridge(Node):
             "camera_to_board_translation_m": record_quality.get("camera_to_board_translation_m"),
             "camera_to_board_rotation_rpy_deg": record_quality.get("camera_to_board_rotation_rpy_deg"),
             "board_angle_deg": _to_float(record_quality.get("board_angle_deg")),
+            "observation_mode": record_quality.get("observation_mode", self.observation_mode),
+            "quality_payload": record_quality,
             "has_image": False,
             "sample_row_index": None,
             "thumbnail_url": None,
@@ -675,6 +705,52 @@ class UiRosBridge(Node):
         )
         result["operator_message"] = "半自动标定请求已排队，等待标定节点确认。"
         self._last_command_result = result
+        return result
+
+    def set_observation_mode(self, mode: str) -> dict[str, Any]:
+        normalized_mode = normalize_observation_mode(mode)
+        if normalized_mode == self.observation_mode:
+            result = self._shape_command_result(
+                "set_observation_mode",
+                True,
+                f"Observation mode already set to {normalized_mode}.",
+                extra={"mode": normalized_mode, "observation_mode": normalized_mode, "depth_topic": self.depth_topic},
+            )
+            self._last_command_result = result
+            return result
+        client = self._set_parameters_client
+        if not client.wait_for_service(timeout_sec=2.0):
+            result = self._shape_command_result("set_observation_mode", False, f"Service is unavailable: {client.srv_name}")
+            self._last_command_result = result
+            return result
+        request = SetParameters.Request()
+        request.parameters = [Parameter("observation_mode", Parameter.Type.STRING, normalized_mode).to_parameter_msg()]
+        future = client.call_async(request)
+        done = threading.Event()
+        future.add_done_callback(lambda _: done.set())
+        if not done.wait(timeout=5.0):
+            result = self._shape_command_result("set_observation_mode", False, "Timed out while switching observation mode.")
+            self._last_command_result = result
+            return result
+        try:
+            response = future.result()
+        except Exception as exc:
+            result = self._shape_command_result("set_observation_mode", False, repr(exc))
+        else:
+            ok = bool(response.results) and all(getattr(item, "successful", False) for item in response.results)
+            if ok:
+                self.observation_mode = normalized_mode
+                result = self._shape_command_result(
+                    "set_observation_mode",
+                    True,
+                    f"Observation mode switched to {normalized_mode}.",
+                    extra={"mode": normalized_mode, "observation_mode": normalized_mode, "depth_topic": self.depth_topic},
+                )
+            else:
+                reasons = [getattr(item, 'reason', '') for item in getattr(response, 'results', []) if not getattr(item, 'successful', False)]
+                result = self._shape_command_result("set_observation_mode", False, "; ".join(reason for reason in reasons if reason) or "Failed to switch observation mode.")
+        self._last_command_result = result
+        self.events.push({"type": "ui_command_result", "command": "set_observation_mode", "result": result, "operator_message": result["operator_message"], "dedupe_key": self._event_dedupe_key("ui_command_result", result)})
         return result
 
     def stop_run(self) -> dict[str, Any]:
@@ -812,6 +888,7 @@ class UiRosBridge(Node):
         waypoint_name = payload.get("waypoint_name") or waypoint.get("name")
         workflow = self._workflow_for_status(status)
         session_dir = payload.get("session_dir")
+        quality_payload = payload.get("sample_quality") or payload.get("record_quality") or payload.get("quality") or payload.get("quality_payload")
         return {
             "workflow": {
                 "status": status,
@@ -821,6 +898,7 @@ class UiRosBridge(Node):
                 "progress_count": payload.get("waypoint_count"),
                 "sample_count": payload.get("sample_count"),
                 "min_sample_count": payload.get("min_sample_count"),
+                "observation_mode": payload.get("observation_mode", self.observation_mode),
             },
             "current_waypoint": {
                 "name": waypoint_name,
@@ -832,6 +910,8 @@ class UiRosBridge(Node):
                 "dwell_s": waypoint.get("dwell_s"),
                 "stable_tcp_pose_mmdeg": payload.get("stable_tcp_pose_mmdeg"),
                 "tcp_pose_mmdeg": payload.get("tcp_pose_mmdeg"),
+                "observation_mode": payload.get("observation_mode", self.observation_mode),
+                "quality_payload": quality_payload,
             },
             "session": {
                 "session_dir": session_dir,
@@ -899,6 +979,26 @@ class UiRosBridge(Node):
             "trajectory_path": str(self.effective_trajectory_path),
             "trajectory_error": trajectory.get("error"),
         }
+
+    def _quality_schema(self, observation_mode: str) -> dict[str, Any]:
+        mode = normalize_observation_mode(observation_mode)
+        if mode == DEPTH_ALIGNED_MODE:
+            live_metrics = [
+                {"key": "valid_depth_ratio", "label": "\u6df1\u5ea6\u6709\u6548\u7387", "digits": 2},
+                {"key": "board_model_fit_rmse_mm", "label": "\u5e73\u9762\u5bf9\u9f50\u8bef\u5dee", "digits": 2, "suffix": " mm"},
+                {"key": "plane_residual_std_mm_median", "label": "\u6df1\u5ea6\u6b8b\u5dee", "digits": 2, "suffix": " mm"},
+                {"key": "global_plane_point_count", "label": "\u6709\u6548\u70b9\u6570", "digits": 0},
+                {"key": "board_angle_deg", "label": "\u68cb\u76d8\u89d2\u5ea6", "digits": 2, "suffix": " deg"},
+            ]
+        else:
+            live_metrics = [
+                {"key": "detected", "label": "\u68c0\u6d4b"},
+                {"key": "reprojection_error_px", "label": "\u91cd\u6295\u5f71", "digits": 3},
+                {"key": "board_margin_px", "label": "\u8fb9\u8ddd", "digits": 1, "suffix": " px"},
+                {"path": "camera_to_board_translation_m.2", "label": "Tz", "digits": 3, "suffix": " m"},
+                {"key": "board_angle_deg", "label": "\u68cb\u76d8\u89d2\u5ea6", "digits": 2, "suffix": " deg"},
+            ]
+        return {"mode": mode, "live_metrics": live_metrics}
 
     def _stop_status(self) -> dict[str, Any]:
         return {

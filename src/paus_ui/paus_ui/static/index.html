@@ -48,6 +48,7 @@
                 <span id="node-chip" class="chip neutral">机器人 --</span>
                 <span id="extrinsics-chip" class="chip neutral">外参 --</span>
                 <span id="motion-chip" class="chip neutral">execute_motion: --</span>
+                <span id="mode-chip" class="chip neutral">?? --</span>
               </div>
             </div>
           </div>
@@ -76,6 +77,16 @@
           </section>
 
           <section class="panel current-panel">
+            <div class="panel-header compact">
+              <div>
+                <h2>?????</h2>
+                <p>?? RGB PnP / Depth Align</p>
+              </div>
+              <div id="observation-mode-toggle" class="segmented">
+                <button class="seg-button active" data-observation-mode="rgb_pnp" type="button">RGB PnP</button>
+                <button class="seg-button" data-observation-mode="depth_aligned" type="button">Depth Align</button>
+              </div>
+            </div>
             <div class="split-panel">
               <div class="waypoint-now">
                 <div class="section-label">当前位姿点</div>
