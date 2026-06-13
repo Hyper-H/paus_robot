@@ -692,9 +692,45 @@ def test_load_session_trajectory_rejects_missing_trajectory(tmp_path: Path) -> N
     try:
         store.load_session_trajectory("2026-05-21_104426")
     except FileNotFoundError as exc:
-        assert "trajectory_used.yaml" in str(exc)
+        assert "recorded waypoints" in str(exc)
     else:
         raise AssertionError("Expected FileNotFoundError")
+
+
+def test_load_session_trajectory_rebuilds_from_run_log_waypoint_records(tmp_path: Path) -> None:
+    active_trajectory = tmp_path / "active" / "eye_to_hand_trajectory.yaml"
+    session_root = tmp_path / "calibration_sessions"
+    session_path = session_root / "2026-05-21_160620"
+    session_path.mkdir(parents=True)
+    _write_jsonl(
+        session_path / "run.log",
+        [
+            {
+                "event": "waypoint_recorded",
+                "waypoint_name": "waypoint_001",
+                "waypoint": {
+                    "name": "waypoint_001",
+                    "motion": "movej",
+                    "joint_deg": [1, 2, 3, 4, 5, 6],
+                    "expected_tcp_pose_mmdeg": [100, 200, 300, 10, 20, 30],
+                    "vel": 10.0,
+                    "acc": 10.0,
+                    "dwell_s": 0.5,
+                    "capture": True,
+                },
+            }
+        ],
+    )
+    store = SessionStore(session_root_path=session_root, trajectory_path=active_trajectory)
+
+    result = store.load_session_trajectory("2026-05-21_160620")
+
+    assert result["source_trajectory_path"] == str(session_path / "run.log")
+    assert result["waypoint_count"] == 1
+    assert active_trajectory.exists()
+    loaded = yaml.safe_load(active_trajectory.read_text(encoding="utf-8"))
+    assert loaded["waypoints"][0]["name"] == "waypoint_001"
+    assert store.read_waypoints()["waypoints"][0]["joint_deg"] == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
 
 
 def test_load_session_trajectory_rejects_path_escape(tmp_path: Path) -> None:
@@ -706,3 +742,33 @@ def test_load_session_trajectory_rejects_path_escape(tmp_path: Path) -> None:
         assert "Invalid session id" in str(exc)
     else:
         raise AssertionError("Expected ValueError")
+
+
+def test_session_store_expands_legacy_archive_wrappers(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
+    trajectory_path.write_text(
+        yaml.safe_dump({"version": 1, "tool_id": 0, "user_id": 0, "defaults": {"motion": "movej"}, "waypoints": []}),
+        encoding="utf-8",
+    )
+    session_root = tmp_path / "calibration_sessions"
+    session_path = session_root / "legacy_paus_robot_ui_depth_20260522_135547" / "2026-05-21_160620"
+    (session_path / "images").mkdir(parents=True)
+    _write_jsonl(
+        session_path / "run.log",
+        [
+            {
+                "event": "waypoint_recorded",
+                "waypoint_name": "waypoint_001",
+                "waypoint": {"name": "waypoint_001", "capture": True},
+            }
+        ],
+    )
+
+    store = SessionStore(session_root_path=session_root, trajectory_path=trajectory_path)
+
+    sessions = store.list_sessions()
+    assert [session["id"] for session in sessions] == ["2026-05-21_160620"]
+    assert sessions[0]["pending_count"] == 1
+    assert sessions[0]["path"] == str(session_path)
+    waypoints = store.read_session_waypoints("2026-05-21_160620")
+    assert [waypoint["name"] for waypoint in waypoints] == ["waypoint_001"]

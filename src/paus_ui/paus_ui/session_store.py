@@ -33,7 +33,7 @@ class SessionStore:
         if not self.session_root_path.exists():
             return []
         sessions: list[dict[str, Any]] = []
-        for path in sorted((item for item in self.session_root_path.iterdir() if item.is_dir()), reverse=True):
+        for session_id, path in self._session_entries():
             report_path = path / "report.yaml"
             samples_path = path / "samples.jsonl"
             report = self._read_yaml(report_path)
@@ -47,7 +47,7 @@ class SessionStore:
             has_solution = bool(report.get("base_to_camera") or report.get("residuals")) and not invalid_reason
             sessions.append(
                 {
-                    "id": path.name,
+                    "id": session_id,
                     "path": str(path),
                     "report_path": str(report_path),
                     "sample_count": counts["sample_count"],
@@ -342,21 +342,55 @@ class SessionStore:
     def load_session_trajectory(self, session_id: str) -> dict[str, Any]:
         session_path = self._session_path(session_id)
         source_path = self._trajectory_path_for_session(session_path)
-        if source_path is None or not source_path.exists():
-            raise FileNotFoundError(f"Session has no trajectory_used.yaml: {session_id}")
-        try:
-            trajectory = load_trajectory(source_path)
-        except (TrajectoryValidationError, yaml.YAMLError, OSError, ValueError) as exc:
-            raise ValueError(f"Session trajectory is invalid: {exc}") from exc
-        payload_text = source_path.read_text(encoding="utf-8")
+        source_label: str
+        if source_path is not None and source_path.exists():
+            try:
+                trajectory = load_trajectory(source_path)
+            except (TrajectoryValidationError, yaml.YAMLError, OSError, ValueError) as exc:
+                raise ValueError(f"Session trajectory is invalid: {exc}") from exc
+            payload = trajectory.to_payload()
+            source_label = str(source_path)
+        else:
+            payload = self._trajectory_payload_from_run_log(session_path)
+            if not payload["waypoints"]:
+                raise FileNotFoundError(f"Session has no trajectory_used.yaml or recorded waypoints: {session_id}")
+            source_label = str(session_path / "run.log")
         self.trajectory_path.parent.mkdir(parents=True, exist_ok=True)
+        payload_text = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
         self.trajectory_path.write_text(payload_text, encoding="utf-8")
         return {
             "session_id": session_id,
-            "source_trajectory_path": str(source_path),
+            "source_trajectory_path": source_label,
             "trajectory_path": str(self.trajectory_path),
-            "waypoint_count": len(trajectory.waypoints),
-            "operator_message": f"\u5df2\u8f7d\u5165 session {session_id} \u7684 {len(trajectory.waypoints)} \u4e2a waypoints\u3002",
+            "waypoint_count": len(payload["waypoints"]),
+            "operator_message": f"\u5df2\u8f7d\u5165 session {session_id} \u7684 {len(payload['waypoints'])} \u4e2a waypoints\u3002",
+        }
+
+    def _trajectory_payload_from_run_log(self, session_path: Path) -> dict[str, Any]:
+        waypoints: dict[str, dict[str, Any]] = {}
+        for event in self._read_jsonl(session_path / "run.log"):
+            event_name = str(event.get("event", ""))
+            waypoint = event.get("waypoint")
+            waypoint_name = event.get("waypoint_name")
+            if isinstance(waypoint, dict):
+                waypoint_name = waypoint.get("name", waypoint_name)
+            if not waypoint_name:
+                continue
+            name = str(waypoint_name)
+            if event_name == "waypoint_deleted":
+                waypoints.pop(name, None)
+                continue
+            if event_name != "waypoint_recorded" or not isinstance(waypoint, dict):
+                continue
+            candidate = dict(waypoint)
+            candidate["name"] = str(candidate.get("name", name))
+            waypoints[name] = candidate
+        return {
+            "version": 1,
+            "tool_id": 0,
+            "user_id": 0,
+            "defaults": {"motion": "movej", "vel": 10.0, "acc": 10.0, "dwell_s": 0.5},
+            "waypoints": list(waypoints.values()),
         }
 
     def sample_image_path(self, session_id: str, row_index: int) -> Path | None:
@@ -537,8 +571,48 @@ class SessionStore:
             raise ValueError(f"Invalid session id: {session_id!r}")
         path = self.session_root_path / session_id
         if not path.exists() or not path.is_dir():
+            for entry_id, entry_path in self._session_entries():
+                if entry_id == session_id:
+                    return entry_path
             raise FileNotFoundError(f"Session does not exist: {path}")
         return path
+
+    def _session_entries(self) -> list[tuple[str, Path]]:
+        paths = list(self._iter_session_paths())
+        name_counts: dict[str, int] = {}
+        for path in paths:
+            name_counts[path.name] = name_counts.get(path.name, 0) + 1
+        entries: list[tuple[str, Path]] = []
+        for path in paths:
+            session_id = path.name
+            if name_counts[path.name] > 1 and path.parent != self.session_root_path:
+                session_id = f"{path.parent.name}__{path.name}"
+            entries.append((session_id, path))
+        return entries
+
+    def _iter_session_paths(self) -> list[Path]:
+        if not self.session_root_path.exists():
+            return []
+        paths: list[Path] = []
+        for path in sorted((item for item in self.session_root_path.iterdir() if item.is_dir()), reverse=True):
+            if self._is_legacy_wrapper_dir(path):
+                paths.extend(sorted((item for item in path.iterdir() if item.is_dir() and self._looks_like_session_dir(item)), reverse=True))
+            else:
+                paths.append(path)
+        return paths
+
+    def _is_legacy_wrapper_dir(self, path: Path) -> bool:
+        if not path.name.startswith("legacy_"):
+            return False
+        if self._looks_like_session_dir(path):
+            return False
+        return any(item.is_dir() and self._looks_like_session_dir(item) for item in path.iterdir())
+
+    def _looks_like_session_dir(self, path: Path) -> bool:
+        return any(
+            (path / name).exists()
+            for name in ("report.yaml", "samples.jsonl", "run.log", "trajectory_used.yaml", "images")
+        )
 
     def _read_yaml(self, path: Path) -> dict[str, Any]:
         if not path.exists():

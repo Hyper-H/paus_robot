@@ -719,19 +719,19 @@ function markSelectedRow() {
 
 function renderPreview(item) {
   if (!item) {
-    els.previewTitle.textContent = '????';
-    els.previewSubtitle.textContent = '?? waypoint ?????????';
+    els.previewTitle.textContent = '样本预览';
+    els.previewSubtitle.textContent = '选择 waypoint 查看图像和质量指标';
     els.samplePreview.removeAttribute('src');
     els.samplePreview.style.display = 'none';
     els.previewEmpty.classList.remove('hidden');
-    els.previewEmpty.textContent = '?????';
+    els.previewEmpty.textContent = '当前没有 waypoint';
     els.previewDetails.innerHTML = '';
     return;
   }
-  const name = item.name || item.waypoint?.name || '????';
-  els.previewTitle.textContent = `${name} ??`;
+  const name = item.name || item.waypoint?.name || '未命名';
+  els.previewTitle.textContent = `${name} 预览`;
   const rowIndex = item.sample_row_index || item.row_index;
-  els.previewSubtitle.textContent = item.status ? `${item.status} / ${item.result || '-'}` : '?? waypoint ?????????';
+  els.previewSubtitle.textContent = item.status ? `${item.status} / ${item.result || '-'}` : '选择 waypoint 查看图像和质量指标';
   const schema = activeSchema();
   const source = { ...item, quality_payload: item.quality_payload || item.sample_quality || item.record_quality || {} };
   if (state.previewMode === 'raw') {
@@ -744,7 +744,7 @@ function renderPreview(item) {
       els.samplePreview.removeAttribute('src');
       els.samplePreview.style.display = 'none';
       els.previewEmpty.classList.remove('hidden');
-      els.previewEmpty.textContent = item.reason_display || '? waypoint ??????';
+      els.previewEmpty.textContent = item.reason_display || '该 waypoint 暂无预览图像';
     }
     return;
   }
@@ -759,7 +759,7 @@ function initPreviewErrorHandler() {
     els.samplePreview.removeAttribute('src');
     els.samplePreview.style.display = 'none';
     els.previewEmpty.classList.remove('hidden');
-    els.previewEmpty.textContent = '?????????????????';
+    els.previewEmpty.textContent = '图像加载失败，请刷新后重试';
   });
 }
 
@@ -1187,8 +1187,8 @@ function bindUi() {
     button.addEventListener('click', async () => {
       const mode = button.dataset.observationMode;
       if (!mode || mode === state.observationMode) return;
-      setNotice(`??????? ${mode}...`);
-      const result = await runCommand('????', '/api/handeye/observation-mode', { mode });
+      setNotice(`正在切换观测模式到 ${mode}...`);
+      const result = await runCommand('切换观测模式', '/api/handeye/observation-mode', { mode });
       if (result?.success) {
         state.observationMode = result.observation_mode || result.mode || mode;
         setModeToggleActive(state.observationMode);

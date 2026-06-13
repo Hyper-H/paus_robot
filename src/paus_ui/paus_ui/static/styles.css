@@ -799,11 +799,7 @@ tbody tr.selected td {
 }
 
 .result-panel .session-actions {
-  flex: 0 0 170px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  align-items: stretch;
-  gap: 4px;
+  flex: 0 0 190px;
 }
 
 .session-select {
@@ -823,18 +819,33 @@ tbody tr.selected td {
   max-width: none;
 }
 
-#load-session-trajectory-btn {
-  width: 100%;
+.waypoint-actions {
   min-width: 0;
-  min-height: 26px;
-  padding: 4px 6px;
-  font-size: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.load-current-button {
+  min-height: 32px;
+  border: 1px solid var(--teal);
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: #fff;
+  background: var(--teal);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
   white-space: nowrap;
 }
 
-#load-session-trajectory-btn:disabled {
+.load-current-button:disabled {
+  border-color: var(--line);
+  color: var(--muted);
+  background: #f4f7f5;
   cursor: not-allowed;
-  opacity: 0.55;
+  font-weight: 500;
 }
 
 .summary-grid {

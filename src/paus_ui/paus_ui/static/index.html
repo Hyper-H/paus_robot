@@ -79,8 +79,8 @@
           <section class="panel current-panel">
             <div class="panel-header compact">
               <div>
-                <h2>?????</h2>
-                <p>?? RGB PnP / Depth Align</p>
+                <h2>当前标定</h2>
+                <p>采集 RGB PnP / Depth Align 观测</p>
               </div>
               <div id="observation-mode-toggle" class="segmented">
                 <button class="seg-button active" data-observation-mode="rgb_pnp" type="button">RGB PnP</button>
@@ -123,7 +123,10 @@
                 <h2>Waypoints</h2>
                 <p id="trajectory-path">trajectory YAML</p>
               </div>
-              <div class="table-stats" id="waypoint-stats">共 0 个点</div>
+              <div class="waypoint-actions">
+                <button id="load-session-trajectory-btn" class="load-current-button" type="button" disabled>&#36733;&#20837;&#36873;&#20013; session &#20026;&#24403;&#21069;&#36712;&#36857;</button>
+                <div class="table-stats" id="waypoint-stats">共 0 个点</div>
+              </div>
             </div>
             <div class="table-wrap">
               <table>
@@ -175,7 +178,6 @@
               </div>
               <div class="session-actions">
                 <select id="session-select" class="session-select" aria-label="session"></select>
-                <button id="load-session-trajectory-btn" class="ghost-button small" type="button" disabled>&#36733;&#20837;&#20026;&#24403;&#21069;&#36712;&#36857;</button>
               </div>
             </div>
             <div class="summary-grid">
