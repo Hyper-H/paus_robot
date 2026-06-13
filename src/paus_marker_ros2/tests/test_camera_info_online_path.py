@@ -75,7 +75,6 @@ class OnlineStackStaticTests(unittest.TestCase):
     def test_online_stack_no_longer_uses_tmp_camera_yaml(self) -> None:
         online_paths = [
             PROJECT_ROOT / "src" / "paus_bringup" / "launch" / "online_stack.launch.py",
-            PROJECT_ROOT / "src" / "paus_marker_ros2" / "scripts" / "camera_bridge.py",
             PROJECT_ROOT / "src" / "paus_marker_ros2" / "paus_marker_ros2" / "image_receiver_node.py",
             PROJECT_ROOT / "src" / "paus_marker_ros2" / "paus_marker_ros2" / "marker_pose_node.py",
         ]
@@ -105,6 +104,22 @@ class OnlineStackStaticTests(unittest.TestCase):
         self.assertIn('parser.add_argument("--rgb-camera-count", type=int, default=1', bridge_text)
         self.assertIn("camera_info_loaded", bridge_text)
         self.assertIn('"camera_info": camera_info_payload', bridge_text)
+
+    def test_ui_launch_camera_config_output_matches_bridge_argument(self) -> None:
+        ui_launch_text = (PROJECT_ROOT / "src" / "paus_bringup" / "launch" / "ui.launch.py").read_text(
+            encoding="utf-8"
+        )
+        calibration_launch_text = (
+            PROJECT_ROOT / "src" / "paus_bringup" / "launch" / "eye_to_hand_calibration.launch.py"
+        ).read_text(encoding="utf-8")
+        bridge_text = (PROJECT_ROOT / "src" / "paus_marker_ros2" / "scripts" / "camera_bridge.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('"--camera-config-output"', ui_launch_text)
+        self.assertIn('"--camera-config-output"', calibration_launch_text)
+        self.assertIn('parser.add_argument("--camera-config-output"', bridge_text)
+        self.assertIn("camera_config_written", bridge_text)
 
 
 class TargetTransformValidationTests(unittest.TestCase):

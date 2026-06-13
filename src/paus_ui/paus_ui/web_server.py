@@ -124,6 +124,15 @@ def create_app(bridge: "UiRosBridge"):
     async def delete_last_waypoint() -> dict[str, Any]:
         return await asyncio.to_thread(bridge.delete_last_waypoint)
 
+    @app.post("/api/handeye/delete_waypoint")
+    async def delete_waypoint(body: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=422, detail="waypoint_name must be provided in a JSON object.")
+        waypoint_name = str(body.get("waypoint_name", "")).strip()
+        if not waypoint_name:
+            raise HTTPException(status_code=422, detail="waypoint_name is required.")
+        return await asyncio.to_thread(bridge.delete_selected_waypoint, waypoint_name)
+
     @app.post("/api/handeye/save_trajectory")
     async def save_trajectory() -> dict[str, Any]:
         return await asyncio.to_thread(bridge.save_trajectory)
@@ -166,6 +175,13 @@ def create_app(bridge: "UiRosBridge"):
     async def session_waypoints(session_id: str) -> list[dict[str, Any]]:
         try:
             return await asyncio.to_thread(bridge.read_session_waypoints, session_id)
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/sessions/{session_id}/load_trajectory")
+    async def load_session_trajectory(session_id: str) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(bridge.load_session_trajectory, session_id)
         except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
