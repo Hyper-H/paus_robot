@@ -777,13 +777,75 @@ tbody tr.selected td {
   overflow: auto;
 }
 
+.result-panel .panel-header {
+  align-items: flex-start;
+}
+
+.result-panel .panel-header > div:first-child {
+  min-width: 0;
+}
+
+.result-panel #report-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.result-panel .session-actions {
+  flex: 0 0 190px;
+}
+
 .session-select {
   min-width: 150px;
+  max-width: 240px;
   height: 32px;
+  padding: 0 6px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: #fff;
   color: var(--ink);
+}
+
+.result-panel .session-select {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+}
+
+.waypoint-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.load-current-button {
+  min-height: 32px;
+  border: 1px solid var(--teal);
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: #fff;
+  background: var(--teal);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.load-current-button:disabled {
+  border-color: var(--line);
+  color: var(--muted);
+  background: #f4f7f5;
+  cursor: not-allowed;
+  font-weight: 500;
 }
 
 .summary-grid {

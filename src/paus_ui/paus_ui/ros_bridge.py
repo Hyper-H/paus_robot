@@ -13,6 +13,8 @@ from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 import numpy as np
 import rclpy
+from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
+from rcl_interfaces.srv import SetParameters
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -151,11 +153,16 @@ class UiRosBridge(Node):
 
         self.create_subscription(Image, self.image_topic, self._image_callback, 10)
         self.create_subscription(String, self.status_topic, self._status_callback, STATUS_QOS)
+        self._parameter_clients = {
+            "eye_to_hand": self.create_client(SetParameters, "/eye_to_hand_calibration_node/set_parameters"),
+        }
         self._service_clients = {
             "record_waypoint": self.create_client(Trigger, "/eye_to_hand/record_waypoint"),
             "delete_last_waypoint": self.create_client(Trigger, "/eye_to_hand/delete_last_waypoint"),
+            "delete_selected_waypoint": self.create_client(Trigger, "/eye_to_hand/delete_selected_waypoint"),
             "save_trajectory": self.create_client(Trigger, "/eye_to_hand/save_trajectory"),
             "run_semi_auto": self.create_client(Trigger, "/eye_to_hand/run_semi_auto_calibration"),
+            "stop": self.create_client(Trigger, "/eye_to_hand/stop"),
         }
         self._set_parameters_client = self.create_client(SetParameters, "/eye_to_hand_calibration_node/set_parameters")
         self.events.push({"type": "ui_started", "message": "PAUS UI server started.", "operator_message": "UI 服务已启动。"})
@@ -526,6 +533,19 @@ class UiRosBridge(Node):
     def delete_last_waypoint(self) -> dict[str, Any]:
         return self._call_trigger("delete_last_waypoint", timeout_s=5.0)
 
+    def delete_selected_waypoint(self, waypoint_name: str) -> dict[str, Any]:
+        name = str(waypoint_name or "").strip()
+        if not name:
+            result = self._shape_command_result("delete_selected_waypoint", False, "No waypoint selected.")
+            self._last_command_result = result
+            return result
+        parameter_result = self._set_eye_to_hand_string_parameter("selected_waypoint_name", name, timeout_s=5.0)
+        if not parameter_result["success"]:
+            result = self._shape_command_result("delete_selected_waypoint", False, str(parameter_result["message"]))
+            self._last_command_result = result
+            return result
+        return self._call_trigger("delete_selected_waypoint", timeout_s=5.0)
+
     def save_trajectory(self) -> dict[str, Any]:
         return self._call_trigger("save_trajectory", timeout_s=5.0)
 
@@ -547,26 +567,46 @@ class UiRosBridge(Node):
                     "source": "recorded_trajectory",
                     "dirty": trajectory_dirty,
                 }
-        return self.session_store.read_waypoints()
+        trajectory = self.session_store.read_waypoints()
+        waypoints = trajectory.get("waypoints", [])
+        if isinstance(waypoints, list):
+            trajectory = dict(trajectory)
+            trajectory["waypoints"] = [self._shape_recorded_waypoint(w) for w in waypoints]
+            trajectory["source"] = trajectory.get("source", "trajectory_file")
+        return trajectory
 
     def _shape_recorded_waypoint(self, waypoint: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(waypoint, dict):
             return {"name": str(waypoint), "status": "pending", "result": "-"}
         record_quality = waypoint.get("record_quality") if isinstance(waypoint.get("record_quality"), dict) else {}
-        reprojection = _to_float(record_quality.get("reprojection_error_px"))
+        reprojection = _to_float(record_quality.get("reprojection_error_px", record_quality.get("reprojection_rms_px")))
         board_margin = _to_float(record_quality.get("board_margin_px"))
         flags = self._quality_flags(reprojection, board_margin)
-        detected = bool(record_quality.get("detected", False))
-        was_sampled = detected and flags.get("quality_ok", False)
+        accepted = record_quality.get("accepted")
+        quality_status = str(record_quality.get("status", "")).strip().lower()
+        reject_reason = str(record_quality.get("reject_reason", record_quality.get("reason", "")) or "")
+        if accepted is True or quality_status == "accepted":
+            status = "accepted"
+            result = "OK"
+            reason = ""
+        elif accepted is False or quality_status == "rejected" or reject_reason:
+            status = "skipped"
+            result = "FAIL"
+            reason = reject_reason or quality_status or "sample_quality_rejected"
+        else:
+            status = "pending"
+            result = "-"
+            reason = str(record_quality.get("reason", "") or "")
+        reason_info = classify_operator_message(reason) if reason else {"message": ""}
         return {
             "waypoint": waypoint,
             "index": None,
             "name": str(waypoint.get("name", "")),
-            "status": "accepted" if was_sampled else ("skipped" if record_quality.get("filtered") else "pending"),
-            "result": "OK" if was_sampled else ("FAIL" if record_quality.get("filtered") else "-"),
+            "status": status,
+            "result": result,
             "capture": waypoint.get("capture", True),
-            "reason": record_quality.get("reason", ""),
-            "reason_display": record_quality.get("reason", ""),
+            "reason": reason,
+            "reason_display": reason_info.get("message") or reason,
             "reprojection_error_px": reprojection,
             "board_margin_px": board_margin,
             "thresholds": flags,
@@ -599,6 +639,30 @@ class UiRosBridge(Node):
     def read_session_waypoints(self, session_id: str) -> list[dict[str, Any]]:
         self._sync_backend_state()
         return self.session_store.read_session_waypoints(session_id)
+
+    def load_session_trajectory(self, session_id: str) -> dict[str, Any]:
+        self._sync_backend_state()
+        result = self.session_store.load_session_trajectory(session_id)
+        self.effective_trajectory_path = self.session_store.trajectory_path
+        self.trajectory_path = self.session_store.trajectory_path
+        result["success"] = True
+        result["loaded"] = True
+        self._last_command_result = {
+            "command": "load_session_trajectory",
+            "success": True,
+            "message": str(result.get("operator_message", "Session trajectory loaded.")),
+            "operator_message": str(result.get("operator_message", "\u5df2\u8f7d\u5165\u5386\u53f2 session \u8f68\u8ff9\u3002")),
+        }
+        self.events.push(
+            {
+                "type": "ui_command_result",
+                "command": "load_session_trajectory",
+                "result": self._last_command_result,
+                "operator_message": self._last_command_result["operator_message"],
+                "dedupe_key": self._event_dedupe_key("ui_command_result", self._last_command_result),
+            }
+        )
+        return result
 
     def per_sample_residuals(self, session_id: str) -> list[dict[str, Any]]:
         self._sync_backend_state()
@@ -690,13 +754,11 @@ class UiRosBridge(Node):
         return result
 
     def stop_run(self) -> dict[str, Any]:
-        result = self._shape_command_result(
-            "stop",
-            False,
-            "Stop is not supported by the current calibration node. Use terminal interrupt or the physical emergency stop if motion must stop immediately.",
-            extra={"stop_supported": False},
-        )
-        self._last_command_result = result
+        result = self._call_trigger("stop", timeout_s=2.0)
+        if result.get("success"):
+            result["accepted"] = True
+            result["stopping"] = True
+            result["operator_message"] = "\u6b63\u5728\u505c\u6b62\u534a\u81ea\u52a8\u6807\u5b9a\uff0c\u5f53\u524d\u52a8\u4f5c\u5b8c\u6210\u540e\u4f1a\u5728\u4e0b\u4e00\u4e2a\u5b89\u5168\u68c0\u67e5\u70b9\u505c\u4e0b\u3002"
         return result
 
     def get_events_since(self, last_id: int) -> tuple[list[dict[str, Any]], int]:
@@ -705,6 +767,31 @@ class UiRosBridge(Node):
     def _run_semi_auto_worker(self) -> None:
         self.events.push({"type": "ui_command", "command": "run_semi_auto", "message": "Semi-auto service call started.", "operator_message": "半自动标定请求已发送。"})
         self._call_trigger("run_semi_auto", timeout_s=3600.0)
+
+    def _set_eye_to_hand_string_parameter(self, name: str, value: str, *, timeout_s: float) -> dict[str, Any]:
+        client = self._parameter_clients["eye_to_hand"]
+        if not client.wait_for_service(timeout_sec=timeout_s):
+            return {"success": False, "message": f"Service is unavailable: {client.srv_name}"}
+        request = SetParameters.Request()
+        request.parameters = [
+            Parameter(
+                name=name,
+                value=ParameterValue(type=ParameterType.PARAMETER_STRING, string_value=value),
+            )
+        ]
+        future = client.call_async(request)
+        done = threading.Event()
+        future.add_done_callback(lambda _: done.set())
+        if not done.wait(timeout=timeout_s):
+            return {"success": False, "message": f"Service timed out: {client.srv_name}"}
+        try:
+            response = future.result()
+        except Exception as exc:
+            return {"success": False, "message": repr(exc)}
+        for result in response.results:
+            if not result.successful:
+                return {"success": False, "message": result.reason or f"Failed to set parameter {name}."}
+        return {"success": True, "message": "ok"}
 
     def _call_trigger(self, key: str, *, timeout_s: float) -> dict[str, Any]:
         client = self._service_clients[key]
@@ -856,6 +943,8 @@ class UiRosBridge(Node):
             "waypoint_capture_disabled": ("skipped", "无需采样"),
             "waypoint_capture_skipped": ("skipped", "该点已跳过"),
             "waypoint_sample_captured": ("accepted", "样本已接受"),
+            "sample_captured": ("accepted", "样本已接受"),
+            "capture_failed": ("error", "采样失败"),
             "semi_auto_insufficient_samples": ("error", "有效样本不足"),
             "solving": ("solve", "正在求解手眼标定"),
             "solved": ("solve", "标定已求解"),
@@ -989,12 +1078,14 @@ class UiRosBridge(Node):
     def _quality_flags(self, reprojection_error_px: Any, board_margin_px: Any) -> dict[str, Any]:
         reprojection = _to_float(reprojection_error_px)
         margin = _to_float(board_margin_px)
-        reprojection_limit_enabled = self.effective_max_reprojection_error_px > 0.0
-        reprojection_ok = None if reprojection is None or not reprojection_limit_enabled else reprojection <= self.effective_max_reprojection_error_px
-        margin_ok = None if margin is None else margin >= self.effective_min_board_margin_px
+        max_reprojection_error_px = float(getattr(self, "effective_max_reprojection_error_px", getattr(self, "max_reprojection_error_px", 0.0)))
+        min_board_margin_px = float(getattr(self, "effective_min_board_margin_px", getattr(self, "min_board_margin_px", 10.0)))
+        reprojection_limit_enabled = max_reprojection_error_px > 0.0
+        reprojection_ok = None if reprojection is None or not reprojection_limit_enabled else reprojection <= max_reprojection_error_px
+        margin_ok = None if margin is None else margin >= min_board_margin_px
         return {
-            "max_reprojection_error_px": self.effective_max_reprojection_error_px,
-            "min_board_margin_px": self.effective_min_board_margin_px,
+            "max_reprojection_error_px": max_reprojection_error_px,
+            "min_board_margin_px": min_board_margin_px,
             "reprojection_limit_enabled": reprojection_limit_enabled,
             "reprojection_ok": reprojection_ok,
             "margin_ok": margin_ok,

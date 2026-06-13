@@ -39,4 +39,5 @@ Thumbs.db
 # Agent/runtime metadata
 .humanize/
 .codex/
-
+# Local RLCR plans
+docs/handeye_waypoint_bugfix_plan.md

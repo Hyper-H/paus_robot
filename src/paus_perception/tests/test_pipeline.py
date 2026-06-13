@@ -32,6 +32,7 @@ from paus_perception import (
     detect_marker,
     estimate_marker_pose,
     evaluate_eye_to_hand_residuals,
+    estimate_tool_to_board_from_samples,
     invert_transform_matrix,
     load_camera_calibration,
     load_config,
@@ -161,12 +162,17 @@ class MarkerPipelineTests(unittest.TestCase):
 
     def test_control_decision_accepts_valid_target(self) -> None:
         decision = build_approach_decision(
-            target_point_base_m=[0.20, 0.0, 0.30],
+            target_position_base_m=[0.20, 0.0, 0.30],
+            raw_target_orientation_rpy_deg=[0.0, 0.0, 0.0],
             frame_id="robot_base",
             current_tcp_pose_mmdeg=[100.0, 0.0, 300.0, 180.0, 0.0, -180.0],
-            final_standoff_mm=30.0,
+            orientation_mode="face_marker_normal",
+            flange_face_axis="z",
+            hover_clearance_mm=30.0,
+            pre_approach_distance_mm=50.0,
             max_step_distance_mm=80.0,
             min_safe_z_mm=50.0,
+            min_plane_clearance_mm=10.0,
             workspace_min_mm=[-1000.0, -1000.0, 0.0],
             workspace_max_mm=[1000.0, 1000.0, 1000.0],
         )
@@ -176,31 +182,43 @@ class MarkerPipelineTests(unittest.TestCase):
 
     def test_control_decision_rejects_wrong_frame(self) -> None:
         decision = build_approach_decision(
-            target_point_base_m=[0.20, 0.0, 0.30],
+            target_position_base_m=[0.20, 0.0, 0.30],
+            raw_target_orientation_rpy_deg=[0.0, 0.0, 0.0],
             frame_id="camera",
             current_tcp_pose_mmdeg=[100.0, 0.0, 300.0, 180.0, 0.0, -180.0],
-            final_standoff_mm=30.0,
+            orientation_mode="face_marker_normal",
+            flange_face_axis="z",
+            hover_clearance_mm=30.0,
+            pre_approach_distance_mm=50.0,
             max_step_distance_mm=80.0,
             min_safe_z_mm=50.0,
+            min_plane_clearance_mm=10.0,
             workspace_min_mm=[-1000.0, -1000.0, 0.0],
             workspace_max_mm=[1000.0, 1000.0, 1000.0],
         )
         self.assertFalse(decision.check_passed)
         self.assertIn("frame_id", decision.error_message)
 
-    def test_control_decision_rejects_large_step(self) -> None:
+    def test_control_decision_limits_large_step(self) -> None:
         decision = build_approach_decision(
-            target_point_base_m=[0.50, 0.0, 0.30],
+            target_position_base_m=[0.50, 0.0, 0.30],
+            raw_target_orientation_rpy_deg=[0.0, 0.0, 0.0],
             frame_id="robot_base",
             current_tcp_pose_mmdeg=[100.0, 0.0, 300.0, 180.0, 0.0, -180.0],
-            final_standoff_mm=30.0,
+            orientation_mode="face_marker_normal",
+            flange_face_axis="z",
+            hover_clearance_mm=30.0,
+            pre_approach_distance_mm=50.0,
             max_step_distance_mm=40.0,
             min_safe_z_mm=50.0,
+            min_plane_clearance_mm=5.0,
             workspace_min_mm=[-1000.0, -1000.0, 0.0],
             workspace_max_mm=[1000.0, 1000.0, 1000.0],
+            enable_safe_lift_on_low_clearance=False,
         )
-        self.assertFalse(decision.check_passed)
-        self.assertIn("Step distance", decision.error_message)
+        self.assertTrue(decision.check_passed)
+        assert decision.step_distance_mm is not None
+        self.assertLessEqual(decision.step_distance_mm, 40.0)
 
     def test_process_image_file_writes_pose_outputs(self) -> None:
         config = load_config()
@@ -262,6 +280,7 @@ class MarkerPipelineTests(unittest.TestCase):
 
     def test_eye_to_hand_yaml_round_trip(self) -> None:
         transform = make_transform_struct([0.1, 0.2, 0.3], np.eye(3), "robot_base", "camera")
+        estimated_tool_to_board = make_transform_struct([0.02, -0.03, 0.1], np.eye(3), "tool", "board")
         solution = EyeToHandCalibrationSolution(
             status="ok",
             success=True,
@@ -270,6 +289,17 @@ class MarkerPipelineTests(unittest.TestCase):
             base_to_camera=transform,
             tool_to_board_translation_m=[0.0, 0.0, 0.1],
             tool_to_board_rotation_rpy_deg=[0.0, 0.0, 0.0],
+            estimated_tool_to_board=estimated_tool_to_board,
+            raw_residuals=None,
+            corrected_residuals=None,
+            quality_status="ok",
+            quality_warnings=[],
+            generated_at="2026-05-20T00:00:00+00:00",
+            session_dir="/tmp/session",
+            trajectory_path="/tmp/trajectory.yaml",
+            git_branch="codex/test",
+            git_commit="abc1234",
+            git_dirty=True,
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             yaml_path = Path(temp_dir) / "extrinsics.yaml"
@@ -279,6 +309,14 @@ class MarkerPipelineTests(unittest.TestCase):
             assert loaded.base_to_camera is not None
             self.assertEqual(loaded.sample_count, 12)
             self.assertEqual(loaded.base_to_camera.translation_m, [0.1, 0.2, 0.3])
+            assert loaded.estimated_tool_to_board is not None
+            self.assertEqual(loaded.estimated_tool_to_board.translation_m, [0.02, -0.03, 0.1])
+            self.assertEqual(loaded.generated_at, "2026-05-20T00:00:00+00:00")
+            self.assertEqual(loaded.session_dir, "/tmp/session")
+            self.assertEqual(loaded.trajectory_path, "/tmp/trajectory.yaml")
+            self.assertEqual(loaded.git_branch, "codex/test")
+            self.assertEqual(loaded.git_commit, "abc1234")
+            self.assertTrue(loaded.git_dirty)
 
     def test_average_transform_matrices(self) -> None:
         first = make_transform_matrix([0.1, 0.0, 0.0], np.eye(3))
@@ -358,6 +396,29 @@ class MarkerPipelineTests(unittest.TestCase):
         self.assertLess(residuals.translation_rms_mm, 1e-6)
         self.assertLess(residuals.rotation_rms_deg, 1e-6)
 
+    def test_estimated_tool_to_board_corrects_residuals(self) -> None:
+        base_to_camera = make_transform_matrix([0.24, -0.18, 0.42], rpy_deg_to_rotation_matrix([175.0, -5.0, 92.0]))
+        tool_to_board = make_transform_matrix([0.02, -0.03, 0.12], rpy_deg_to_rotation_matrix([1.0, -2.0, 3.0]))
+        base_to_tool_samples = [
+            make_transform_matrix([0.35, -0.10, 0.20], rpy_deg_to_rotation_matrix([-150.0, 10.0, -90.0])),
+            make_transform_matrix([0.30, -0.05, 0.25], rpy_deg_to_rotation_matrix([-145.0, 15.0, -80.0])),
+            make_transform_matrix([0.40, -0.15, 0.22], rpy_deg_to_rotation_matrix([-160.0, 5.0, -100.0])),
+            make_transform_matrix([0.32, -0.20, 0.28], rpy_deg_to_rotation_matrix([-155.0, -2.0, -95.0])),
+        ]
+        camera_to_board_samples = [
+            invert_transform_matrix(base_to_camera) @ base_to_tool @ tool_to_board
+            for base_to_tool in base_to_tool_samples
+        ]
+
+        raw = evaluate_eye_to_hand_residuals(base_to_camera, base_to_tool_samples, camera_to_board_samples, np.eye(4))
+        estimated = estimate_tool_to_board_from_samples(base_to_camera, base_to_tool_samples, camera_to_board_samples)
+        corrected = evaluate_eye_to_hand_residuals(base_to_camera, base_to_tool_samples, camera_to_board_samples, estimated)
+
+        self.assertGreater(raw.translation_rms_mm, 100.0)
+        self.assertTrue(np.allclose(estimated, tool_to_board, atol=1e-6))
+        self.assertLess(corrected.translation_rms_mm, 1e-6)
+        self.assertLess(corrected.rotation_rms_deg, 1e-6)
+
     def test_transform_inverse_round_trip(self) -> None:
         rotation = rpy_deg_to_rotation_matrix([10.0, 20.0, 30.0])
         matrix = make_transform_matrix([0.1, -0.2, 0.3], rotation)
@@ -407,4 +468,3 @@ class MarkerPipelineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

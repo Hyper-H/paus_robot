@@ -22,7 +22,7 @@ def classify_operator_message(message: Any) -> dict[str, str]:
     code = "unknown"
     operator = text or "暂无状态信息"
 
-    if "chessboard was not detected" in lower or ("棋盘" in lower and "未检测" in lower):
+    if "chessboard_not_found" in lower or "chessboard was not detected" in lower or ("棋盘" in lower and "未检测" in lower):
         code = "chessboard_not_detected"
         operator = "棋盘未检测到，请调整标定板姿态、光照或视野位置。"
     elif "no fresh image" in lower or "fresh image" in lower:

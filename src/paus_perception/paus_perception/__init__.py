@@ -1,6 +1,6 @@
 """PAUS Robot perception core public exports."""
 
-from .config import load_config, resolve_config_path
+from .config import load_config, resolve_config_artifact_path, resolve_config_path, resolve_runtime_data_path
 from .calibration import CameraCalibration, CalibrationResult, calibrate_camera_from_directory, load_camera_calibration, save_camera_calibration
 from .detection import (
     MarkerDetection,
@@ -110,6 +110,7 @@ from .transforms import (
     average_transform_matrices,
     build_ax_xb_motion_pairs,
     evaluate_eye_to_hand_residuals,
+    estimate_tool_to_board_from_samples,
     invert_transform_matrix,
     load_eye_to_hand_solution,
     make_transform_matrix,
@@ -177,6 +178,7 @@ __all__ = [
     "estimate_neck_surface_pose",
     "estimate_pca_normal",
     "evaluate_eye_to_hand_residuals",
+    "estimate_tool_to_board_from_samples",
     "extract_local_patch",
     "export_factory_calibration_to_yaml",
     "export_debug_images",
@@ -199,7 +201,9 @@ __all__ = [
     "read_runtime_calibration",
     "recv_frame_packet",
     "resolve_camera_index",
+    "resolve_config_artifact_path",
     "resolve_config_path",
+    "resolve_runtime_data_path",
     "render_visualization",
     "result_to_dict",
     "rotation_matrix_to_rpy_deg",

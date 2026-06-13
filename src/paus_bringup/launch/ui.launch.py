@@ -95,6 +95,8 @@ def _launch_setup(context, *args, **kwargs):
         image_receiver_host,
         "--port",
         image_receiver_port,
+        "--camera-config-output",
+        camera_config_output,
     ]
     if camera_ip:
         camera_bridge_cmd += ["--camera-ip", camera_ip]

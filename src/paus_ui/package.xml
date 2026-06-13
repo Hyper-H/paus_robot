@@ -12,6 +12,7 @@
   <depend>cv_bridge</depend>
   <depend>paus_marker_ros2</depend>
   <depend>paus_perception</depend>
+  <depend>rcl_interfaces</depend>
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>

@@ -8,8 +8,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 import math
 import shutil
+import subprocess
 import threading
 import time
+from datetime import datetime, timezone
 
 # 导入 OpenCV 与 NumPy，用于棋盘格检测和矩阵运算。
 import cv2
@@ -60,6 +62,7 @@ from paus_perception import (
     EyeToHandCalibrationSolution,
     average_transform_matrices,
     evaluate_eye_to_hand_residuals,
+    estimate_tool_to_board_from_samples,
     invert_transform_matrix,
     load_camera_calibration,
     load_config,
@@ -136,6 +139,12 @@ class SampleRejectedError(RuntimeError):
 
 
 # 这个节点负责采集 eye-to-hand 标定样本，并求解 `base -> camera` 外参。
+
+class SemiAutoStopped(RuntimeError):
+    def __init__(self, payload: dict[str, object]) -> None:
+        super().__init__("Semi-auto calibration stopped.")
+        self.payload = payload
+
 class EyeToHandCalibrationNode(Node):
     # 初始化节点。
     def __init__(self) -> None:
@@ -156,6 +165,7 @@ class EyeToHandCalibrationNode(Node):
         self.declare_parameter("solver_method", "opencv_handeye_park")
         self.declare_parameter("fresh_image_timeout_s", 2.0)
         self.declare_parameter("sample_log_path", "/tmp/paus_robot/eye_to_hand_samples.jsonl")
+        self.declare_parameter("selected_waypoint_name", "")
         self.declare_parameter("tool_to_board.translation_m", [0.0, 0.0, 0.0])
         self.declare_parameter("tool_to_board.rotation_rpy_deg", [0.0, 0.0, 0.0])
         self.declare_parameter("min_sample_count", 10)
@@ -203,6 +213,9 @@ class EyeToHandCalibrationNode(Node):
         self.declare_parameter("stable_window_s", float(calibration_cfg.get("stable_window_s", 0.5)))
         self.declare_parameter("stable_timeout_s", float(calibration_cfg.get("stable_timeout_s", 10.0)))
         self.declare_parameter("dwell_s", float(calibration_cfg.get("dwell_s", 0.5)))
+        self.declare_parameter("post_motion_capture_delay_s", float(calibration_cfg.get("post_motion_capture_delay_s", 0.3)))
+        self.declare_parameter("capture_retry_count", int(calibration_cfg.get("capture_retry_count", 8)))
+        self.declare_parameter("capture_retry_delay_s", float(calibration_cfg.get("capture_retry_delay_s", 0.15)))
 
         camera_config_path = self.get_parameter("camera_config_path").get_parameter_value().string_value
         self.image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
@@ -244,6 +257,9 @@ class EyeToHandCalibrationNode(Node):
         self.stable_window_s = float(self.get_parameter("stable_window_s").get_parameter_value().double_value)
         self.stable_timeout_s = float(self.get_parameter("stable_timeout_s").get_parameter_value().double_value)
         self.dwell_s = float(self.get_parameter("dwell_s").get_parameter_value().double_value)
+        self.post_motion_capture_delay_s = float(self.get_parameter("post_motion_capture_delay_s").get_parameter_value().double_value)
+        self.capture_retry_count = max(1, int(self.get_parameter("capture_retry_count").get_parameter_value().integer_value))
+        self.capture_retry_delay_s = float(self.get_parameter("capture_retry_delay_s").get_parameter_value().double_value)
         self.session_dir: Path | None = None
         self.session_owner: str | None = None
         self.sample_log_path: Path | None = None
@@ -253,6 +269,8 @@ class EyeToHandCalibrationNode(Node):
         self._semi_auto_lock = threading.Lock()
         self._parameter_update_lock = threading.Lock()
         self._semi_auto_active = False
+        self._stop_requested = False
+        self._stop_lock = threading.Lock()
 
         # 标定节点必须有相机内参文件，否则没法 solvePnP。
         ##runtimeerror表示运行时报错，即运行到这里时，状态不满足要求，所以不能继续
@@ -290,8 +308,10 @@ class EyeToHandCalibrationNode(Node):
         self.save_service = self.create_service(Trigger, "/eye_to_hand/save", self._save_callback, callback_group=self.callback_group)
         self.record_waypoint_service = self.create_service(Trigger, "/eye_to_hand/record_waypoint", self._record_waypoint_callback, callback_group=self.callback_group)
         self.delete_waypoint_service = self.create_service(Trigger, "/eye_to_hand/delete_last_waypoint", self._delete_last_waypoint_callback, callback_group=self.callback_group)
+        self.delete_selected_waypoint_service = self.create_service(Trigger, "/eye_to_hand/delete_selected_waypoint", self._delete_selected_waypoint_callback, callback_group=self.callback_group)
         self.save_trajectory_service = self.create_service(Trigger, "/eye_to_hand/save_trajectory", self._save_trajectory_callback, callback_group=self.callback_group)
         self.run_semi_auto_service = self.create_service(Trigger, "/eye_to_hand/run_semi_auto_calibration", self._run_semi_auto_callback, callback_group=self.callback_group)
+        self.stop_service = self.create_service(Trigger, "/eye_to_hand/stop", self._stop_callback, callback_group=self.callback_group)
 
         # 节点启动后发布初始状态。
         self._append_run_log(
@@ -483,6 +503,23 @@ class EyeToHandCalibrationNode(Node):
     def _write_recorded_trajectory(self) -> None:
         save_trajectory(self.recorded_trajectory, self.trajectory_path)
 
+    def _persist_recorded_trajectory_after_delete(self) -> None:
+        if self.recorded_trajectory.waypoints:
+            self._write_recorded_trajectory()
+        elif getattr(self, "trajectory_path", None) is not None and self.trajectory_path.exists():
+            self.trajectory_path.unlink()
+
+    def _delete_recorded_waypoint_by_index(self, index: int) -> CalibrationWaypoint:
+        removed = self.recorded_trajectory.waypoints.pop(index)
+        self._persist_recorded_trajectory_after_delete()
+        return removed
+
+    def _delete_recorded_waypoint_by_name(self, name: str) -> CalibrationWaypoint | None:
+        for index, waypoint in enumerate(self.recorded_trajectory.waypoints):
+            if waypoint.name == name:
+                return self._delete_recorded_waypoint_by_index(index)
+        return None
+
     def _archive_current_trajectory(self) -> None:
         if getattr(self, "session_dir", None) is None or not self.trajectory_path.exists():
             return
@@ -502,6 +539,53 @@ class EyeToHandCalibrationNode(Node):
         response.message = message
         self._publish_status(status, message, {"session_dir": str(session_dir) if session_dir else None})
         return True
+
+    def _clear_stop_requested(self) -> None:
+        with self._stop_lock:
+            self._stop_requested = False
+
+    def _request_stop(self) -> None:
+        with self._stop_lock:
+            self._stop_requested = True
+
+    def _is_stop_requested(self) -> bool:
+        with self._stop_lock:
+            return bool(self._stop_requested)
+
+    def _raise_if_stop_requested(self, *, waypoint_name: str | None = None, waypoint_index: int | None = None) -> None:
+        if not self._is_stop_requested():
+            return
+        payload = {
+            "session_dir": str(self.session_dir) if self.session_dir else None,
+            "waypoint_name": waypoint_name,
+            "waypoint_index": waypoint_index,
+        }
+        raise SemiAutoStopped(payload)
+
+    def _sleep_with_stop_checks(
+        self,
+        duration_s: float,
+        *,
+        waypoint_name: str | None = None,
+        waypoint_index: int | None = None,
+    ) -> None:
+        deadline = time.monotonic() + max(0.0, float(duration_s))
+        while True:
+            self._raise_if_stop_requested(waypoint_name=waypoint_name, waypoint_index=waypoint_index)
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0.0:
+                return
+            time.sleep(min(0.05, remaining_s))
+
+    def _stop_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+        del request
+        self._request_stop()
+        payload = {"session_dir": str(self.session_dir) if self.session_dir else None}
+        self._append_run_log("stop_requested", payload)
+        self._publish_status("stop_requested", "Stop requested for semi-auto calibration.", payload)
+        response.success = True
+        response.message = "Stop requested. Semi-auto calibration will stop at the next safe checkpoint."
+        return response
 
     def _write_report(self, payload: dict[str, object]) -> None:
         report_path = getattr(self, "report_path", None)
@@ -572,13 +656,16 @@ class EyeToHandCalibrationNode(Node):
         camera_matrix = np.asarray(self.camera_calibration.camera_matrix, dtype=np.float64)
         dist_coeffs = np.asarray(self.camera_calibration.dist_coeffs, dtype=np.float64)
         if self.observation_mode == RGB_PNP_MODE:
-            return estimate_rgb_pnp_board_pose(
-                captured_image.image_bgr,
-                board_rows=self.board_rows,
-                board_cols=self.board_cols,
-                square_size_m=self.square_size_m,
-                camera_matrix=camera_matrix,
-                dist_coeffs=dist_coeffs,
+            return self._apply_rgb_quality_gate(
+                estimate_rgb_pnp_board_pose(
+                    captured_image.image_bgr,
+                    board_rows=self.board_rows,
+                    board_cols=self.board_cols,
+                    square_size_m=self.square_size_m,
+                    camera_matrix=camera_matrix,
+                    dist_coeffs=dist_coeffs,
+                ),
+                captured_image.image_bgr.shape,
             )
         if captured_depth is None:
             return BoardPoseEstimate(
@@ -650,6 +737,62 @@ class EyeToHandCalibrationNode(Node):
                 height - 1.0 - np.max(corners[:, 1]),
             )
         )
+
+    def _apply_rgb_quality_gate(self, estimate: BoardPoseEstimate, image_shape: tuple[int, int, int] | tuple[int, int]) -> BoardPoseEstimate:
+        quality = dict(estimate.quality)
+        if "reprojection_rms_px" in quality and "reprojection_error_px" not in quality:
+            quality["reprojection_error_px"] = quality["reprojection_rms_px"]
+        if "reprojection_error_px" in quality and "reprojection_rms_px" not in quality:
+            quality["reprojection_rms_px"] = quality["reprojection_error_px"]
+        if estimate.corners_xy is not None and "board_margin_px" not in quality:
+            quality["board_margin_px"] = self._compute_board_margin_px(estimate.corners_xy, image_shape)
+        quality["max_reprojection_error_px"] = self.max_reprojection_error_px
+        quality["min_board_margin_px"] = self.min_board_margin_px
+
+        reprojection_error = quality.get("reprojection_error_px")
+        if reprojection_error is not None and self.max_reprojection_error_px > 0.0:
+            quality["reprojection_filter_enabled"] = True
+            quality["reprojection_filter_passed"] = float(reprojection_error) <= self.max_reprojection_error_px
+            if not bool(quality["reprojection_filter_passed"]):
+                quality["accepted"] = False
+                quality["status"] = "rejected"
+                quality["reject_reason"] = "reprojection_error_too_high"
+        board_margin = quality.get("board_margin_px")
+        if board_margin is not None:
+            quality["margin_filter_passed"] = float(board_margin) >= self.min_board_margin_px
+            if not bool(quality["margin_filter_passed"]):
+                quality["accepted"] = False
+                quality["status"] = "rejected"
+                quality["reject_reason"] = "board_margin_too_small"
+        return BoardPoseEstimate(
+            camera_to_board_matrix=estimate.camera_to_board_matrix if bool(quality.get("accepted", False)) else None,
+            quality=quality,
+            corners_xy=estimate.corners_xy,
+        )
+
+    def _git_metadata(self) -> dict[str, object]:
+        repo_root = Path(__file__).resolve().parents[3]
+
+        def run_git(args: list[str]) -> str | None:
+            try:
+                completed = subprocess.run(
+                    ["git", *args],
+                    cwd=repo_root,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=2.0,
+                )
+            except Exception:
+                return None
+            return completed.stdout.strip()
+
+        status = run_git(["status", "--short"])
+        return {
+            "git_branch": run_git(["branch", "--show-current"]),
+            "git_commit": run_git(["rev-parse", "--short", "HEAD"]),
+            "git_dirty": bool(status),
+        }
 
     def _probe_current_board_quality(self) -> dict[str, object]:
         with self._image_condition:
@@ -799,7 +942,7 @@ class EyeToHandCalibrationNode(Node):
             "sample_quality_summary": self._summarize_sample_quality(),
         }
 
-    def _capture_one_sample(self, *, owner: str) -> CalibrationSample:
+    def _capture_sample_candidate(self, *, owner: str, attempt_index: int = 1) -> tuple[CalibrationSample, dict[str, object]]:
         self._ensure_session_started(owner=owner)
         with self._image_condition:
             previous_sequence = self.image_sequence
@@ -813,7 +956,11 @@ class EyeToHandCalibrationNode(Node):
         observation = self._estimate_camera_to_board_observation(captured_image, captured_depth)
         if observation.camera_to_board_matrix is None or not bool(observation.quality.get("accepted", False)):
             reject_reason = str(observation.quality.get("reject_reason", "sample_quality_rejected"))
-            raise SampleRejectedError(reject_reason, observation.quality)
+            rejected_quality = dict(observation.quality)
+            rejected_quality["capture_attempt_index"] = int(attempt_index)
+            rejected_quality["image_sequence"] = captured_image.sequence
+            rejected_quality["image_header_time_s"] = captured_image.header_time_s
+            raise SampleRejectedError(reject_reason, rejected_quality)
         rgb_matrix = None
         depth_matrix = None
         hybrid_comparison = None
@@ -831,7 +978,7 @@ class EyeToHandCalibrationNode(Node):
             sample_quality["reprojection_rms_px"] = sample_quality["reprojection_error_px"]
         if observation.corners_xy is not None and "board_margin_px" not in sample_quality:
             sample_quality["board_margin_px"] = self._compute_board_margin_px(observation.corners_xy, captured_image.image_bgr.shape)
-        image_path = self._save_sample_image(captured_image.image_bgr, len(self.samples) + 1)
+        sample_quality["capture_attempt_index"] = int(attempt_index)
         sample = CalibrationSample(
             base_to_tool_matrix=base_to_tool,
             camera_to_board_matrix=observation.camera_to_board_matrix,
@@ -843,17 +990,109 @@ class EyeToHandCalibrationNode(Node):
             image_sequence=captured_image.sequence,
             observation_mode=self.observation_mode,
             sample_quality=sample_quality,
-            image_path=image_path,
+            image_path=None,
             camera_to_board_rgb_pnp_matrix=rgb_matrix,
             camera_to_board_depth_aligned_matrix=depth_matrix,
             hybrid_comparison=hybrid_comparison,
         )
+        attempt_payload = {
+            "attempt_index": int(attempt_index),
+            "accepted": True,
+            "sample_quality": sample_quality,
+            "reprojection_error_px": sample_quality.get("reprojection_error_px"),
+            "board_margin_px": sample_quality.get("board_margin_px"),
+            "image_sequence": captured_image.sequence,
+        }
+        sample._captured_image_bgr = captured_image.image_bgr  # type: ignore[attr-defined]
+        return sample, attempt_payload
+
+    def _attempt_sort_key(self, item: tuple[CalibrationSample, dict[str, object]]) -> tuple[float, float, int]:
+        sample, payload = item
+        quality = sample.sample_quality if isinstance(sample.sample_quality, dict) else {}
+        reprojection = quality.get("reprojection_error_px")
+        margin = quality.get("board_margin_px")
+        attempt_index = payload.get("attempt_index", quality.get("capture_attempt_index", 1))
+        reprojection_key = float(reprojection) if reprojection is not None else float("inf")
+        margin_key = -float(margin) if margin is not None else float("inf")
+        return reprojection_key, margin_key, int(attempt_index)
+
+    def _commit_sample_candidate(self, sample: CalibrationSample) -> CalibrationSample:
+        image_bgr = getattr(sample, "_captured_image_bgr", None)
+        if image_bgr is not None:
+            sample.image_path = self._save_sample_image(image_bgr, len(self.samples) + 1)
+            try:
+                delattr(sample, "_captured_image_bgr")
+            except AttributeError:
+                pass
         self.samples.append(sample)
         self._append_sample_log(sample)
         self._append_run_log("sample_captured", self._sample_to_log_record(sample))
         return sample
 
-    # 采集一次样本。
+    def _capture_one_sample(self, *, owner: str) -> CalibrationSample:
+        candidate, _ = self._capture_sample_candidate(owner=owner, attempt_index=1)
+        return self._commit_sample_candidate(candidate)
+
+    def _capture_best_sample_with_retries(
+        self,
+        *,
+        owner: str,
+        waypoint_name: str,
+        waypoint_index: int,
+        waypoint_count: int,
+    ) -> tuple[CalibrationSample, list[dict[str, object]], int]:
+        attempts: list[dict[str, object]] = []
+        accepted: list[tuple[CalibrationSample, dict[str, object]]] = []
+        last_rejection: SampleRejectedError | None = None
+        for attempt_index in range(1, self.capture_retry_count + 1):
+            self._raise_if_stop_requested(waypoint_name=waypoint_name, waypoint_index=waypoint_index)
+            try:
+                candidate, attempt_payload = self._capture_sample_candidate(owner=owner, attempt_index=attempt_index)
+            except SampleRejectedError as exc:
+                last_rejection = exc
+                attempt_payload = {
+                    "attempt_index": attempt_index,
+                    "accepted": False,
+                    "reason": exc.reject_reason,
+                    "sample_quality": exc.sample_quality,
+                    "reprojection_error_px": exc.sample_quality.get("reprojection_error_px") if isinstance(exc.sample_quality, dict) else None,
+                    "board_margin_px": exc.sample_quality.get("board_margin_px") if isinstance(exc.sample_quality, dict) else None,
+                    "waypoint_name": waypoint_name,
+                    "waypoint_index": waypoint_index,
+                    "waypoint_count": waypoint_count,
+                    "session_dir": str(self.session_dir) if self.session_dir else None,
+                }
+                attempts.append(attempt_payload)
+                self._append_run_log("capture_attempt_rejected", attempt_payload)
+                if attempt_index < self.capture_retry_count:
+                    self._sleep_with_stop_checks(
+                        self.capture_retry_delay_s,
+                        waypoint_name=waypoint_name,
+                        waypoint_index=waypoint_index,
+                    )
+                continue
+            attempts.append(attempt_payload)
+            accepted.append((candidate, attempt_payload))
+            if attempt_index < self.capture_retry_count:
+                self._sleep_with_stop_checks(
+                    self.capture_retry_delay_s,
+                    waypoint_name=waypoint_name,
+                    waypoint_index=waypoint_index,
+                )
+        if not accepted:
+            if last_rejection is not None:
+                quality = dict(last_rejection.sample_quality)
+                quality["capture_attempts"] = attempts
+                quality["capture_attempt_count"] = len(attempts)
+                raise SampleRejectedError(last_rejection.reject_reason, quality)
+            raise SampleRejectedError("sample_quality_rejected", {"accepted": False, "capture_attempts": attempts, "capture_attempt_count": len(attempts)})
+        selected, selected_payload = min(accepted, key=self._attempt_sort_key)
+        selected.sample_quality["capture_attempt_count"] = len(attempts)
+        selected.sample_quality["accepted_attempt_count"] = len(accepted)
+        selected.sample_quality["selected_attempt_index"] = int(selected_payload.get("attempt_index", 1))
+        sample = self._commit_sample_candidate(selected)
+        return sample, attempts, int(selected_payload.get("attempt_index", 1))
+
     def _capture_sample_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         del request
         if self._reject_manual_service_if_semi_auto_active(response, status="capture_rejected"):
@@ -939,12 +1178,32 @@ class EyeToHandCalibrationNode(Node):
                 except Exception:
                     solver_matrices[method_name] = None
 
-            residuals = evaluate_eye_to_hand_residuals(
+            base_to_tool_matrices = [sample.base_to_tool_matrix for sample in self.samples]
+            camera_to_board_matrices = [sample.camera_to_board_matrix for sample in self.samples]
+            raw_residuals = evaluate_eye_to_hand_residuals(
                 solved_matrix,
-                [sample.base_to_tool_matrix for sample in self.samples],
-                [sample.camera_to_board_matrix for sample in self.samples],
+                base_to_tool_matrices,
+                camera_to_board_matrices,
                 tool_to_board,
             )
+            estimated_tool_to_board_matrix = estimate_tool_to_board_from_samples(
+                solved_matrix,
+                base_to_tool_matrices,
+                camera_to_board_matrices,
+            )
+            corrected_residuals = evaluate_eye_to_hand_residuals(
+                solved_matrix,
+                base_to_tool_matrices,
+                camera_to_board_matrices,
+                estimated_tool_to_board_matrix,
+            )
+            residuals = corrected_residuals
+            quality_warnings: list[str] = []
+            if corrected_residuals.translation_rms_mm > 20.0:
+                quality_warnings.append(f"corrected_translation_rms_mm>{20.0:.1f}")
+            if corrected_residuals.rotation_rms_deg > 2.0:
+                quality_warnings.append(f"corrected_rotation_rms_deg>{2.0:.1f}")
+            quality_status = "warning" if quality_warnings else "ok"
             solver_residuals = {}
             for method_name, matrix in solver_matrices.items():
                 if matrix is None:
@@ -952,8 +1211,8 @@ class EyeToHandCalibrationNode(Node):
                     continue
                 summary = evaluate_eye_to_hand_residuals(
                     matrix,
-                    [sample.base_to_tool_matrix for sample in self.samples],
-                    [sample.camera_to_board_matrix for sample in self.samples],
+                    base_to_tool_matrices,
+                    camera_to_board_matrices,
                     tool_to_board,
                 )
                 solver_residuals[method_name] = asdict(summary)
@@ -961,7 +1220,15 @@ class EyeToHandCalibrationNode(Node):
             translation = solved_matrix[:3, 3]
             rotation = solved_matrix[:3, :3]
             transform = make_transform_struct(translation, rotation, "robot_base", "camera")
-            diagnostics = self._evaluate_session_diagnostics(solved_matrix, tool_to_board)
+            estimated_tool_to_board = make_transform_struct(
+                estimated_tool_to_board_matrix[:3, 3],
+                estimated_tool_to_board_matrix[:3, :3],
+                "tool",
+                "board",
+            )
+            diagnostics = self._evaluate_session_diagnostics(solved_matrix, estimated_tool_to_board_matrix)
+            git_metadata = self._git_metadata()
+            generated_at = datetime.now(timezone.utc).isoformat()
             self.current_solution = EyeToHandCalibrationSolution(
                 status="ok",
                 success=True,
@@ -975,12 +1242,27 @@ class EyeToHandCalibrationNode(Node):
                 residuals=residuals,
                 session_diagnostics=diagnostics,
                 sample_quality_summary=diagnostics.get("sample_quality_summary") if isinstance(diagnostics.get("sample_quality_summary"), dict) else None,
+                estimated_tool_to_board=estimated_tool_to_board,
+                raw_residuals=raw_residuals,
+                corrected_residuals=corrected_residuals,
+                quality_status=quality_status,
+                quality_warnings=quality_warnings,
+                generated_at=generated_at,
+                session_dir=str(self.session_dir) if self.session_dir else None,
+                trajectory_path=str(self.trajectory_path),
+                git_branch=git_metadata.get("git_branch") if isinstance(git_metadata.get("git_branch"), str) else None,
+                git_commit=git_metadata.get("git_commit") if isinstance(git_metadata.get("git_commit"), str) else None,
+                git_dirty=bool(git_metadata.get("git_dirty")),
             )
             report_payload = {
                 "session_dir": str(self.session_dir) if self.session_dir else None,
                 "trajectory_path": str(self.trajectory_path),
                 "sample_log_path": str(self.sample_log_path) if self.sample_log_path else None,
                 "sample_log_override_path": str(self.sample_log_override_path) if self.sample_log_override_path else None,
+                "generated_at": generated_at,
+                "git_branch": git_metadata.get("git_branch"),
+                "git_commit": git_metadata.get("git_commit"),
+                "git_dirty": bool(git_metadata.get("git_dirty")),
                 "sample_count": len(self.samples),
                 "method": solve_method,
                 "observation_mode": self.observation_mode,
@@ -989,7 +1271,12 @@ class EyeToHandCalibrationNode(Node):
                     "translation_m": list(self.tool_to_board_translation),
                     "rotation_rpy_deg": list(self.tool_to_board_rotation_rpy),
                 },
+                "estimated_tool_to_board": asdict(estimated_tool_to_board),
                 "residuals": asdict(residuals),
+                "raw_residuals": asdict(raw_residuals),
+                "corrected_residuals": asdict(corrected_residuals),
+                "quality_status": quality_status,
+                "quality_warnings": quality_warnings,
                 "solver_residuals": solver_residuals,
                 "session_diagnostics": diagnostics,
                 "samples": [self._sample_to_log_record(sample) for sample in self.samples],
@@ -1004,7 +1291,12 @@ class EyeToHandCalibrationNode(Node):
                 {
                     "method": solve_method,
                     "base_to_camera_translation_m": transform.translation_m,
+                    "estimated_tool_to_board": asdict(estimated_tool_to_board),
                     "residuals": asdict(residuals),
+                    "raw_residuals": asdict(raw_residuals),
+                    "corrected_residuals": asdict(corrected_residuals),
+                    "quality_status": quality_status,
+                    "quality_warnings": quality_warnings,
                     "solver_residuals": solver_residuals,
                     **diagnostics,
                     "session_dir": str(self.session_dir) if self.session_dir else None,
@@ -1046,6 +1338,7 @@ class EyeToHandCalibrationNode(Node):
             self._publish_status("save_failed", response.message, {"session_dir": str(self.session_dir) if self.session_dir else None})
             return response
         try:
+            self._raise_if_stop_requested()
             self._save_current_solution()
             response.success = True
             response.message = f"Saved extrinsic to {self.output_path}."
@@ -1087,6 +1380,8 @@ class EyeToHandCalibrationNode(Node):
                 "waypoint": waypoint.to_payload(),
                 "waypoint_count": len(self.recorded_trajectory.waypoints),
                 "record_quality": record_quality,
+                "recorded_trajectory": self.recorded_trajectory.to_payload(),
+                "trajectory_dirty": True,
                 "trajectory_path": str(self.trajectory_path),
                 "session_dir": str(session_dir) if session_dir else None,
             }
@@ -1098,6 +1393,24 @@ class EyeToHandCalibrationNode(Node):
             response.success = False
             response.message = repr(exc)
             self._publish_status("record_waypoint_failed", response.message, {"session_dir": str(getattr(self, "session_dir", None)) if getattr(self, "session_dir", None) else None})
+        return response
+
+    def _delete_waypoint_response(self, response: Trigger.Response, removed: CalibrationWaypoint) -> Trigger.Response:
+        trajectory_path = getattr(self, "trajectory_path", None)
+        session_dir = getattr(self, "session_dir", None)
+        payload = {
+            "waypoint_name": removed.name,
+            "waypoint": removed.to_payload(),
+            "waypoint_count": len(self.recorded_trajectory.waypoints),
+            "recorded_trajectory": self.recorded_trajectory.to_payload(),
+            "trajectory_dirty": True,
+            "trajectory_path": str(trajectory_path) if trajectory_path is not None else None,
+            "session_dir": str(session_dir) if session_dir else None,
+        }
+        self._append_run_log("waypoint_deleted", payload)
+        response.success = True
+        response.message = f"Deleted {removed.name} from {trajectory_path}."
+        self._publish_status("waypoint_deleted", response.message, payload)
         return response
 
     def _delete_last_waypoint_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
@@ -1112,24 +1425,43 @@ class EyeToHandCalibrationNode(Node):
             return response
         try:
             self._ensure_session_started(owner="manual")
+            removed = self._delete_recorded_waypoint_by_index(len(self.recorded_trajectory.waypoints) - 1)
+            return self._delete_waypoint_response(response, removed)
+        except Exception as exc:
+            response.success = False
+            response.message = repr(exc)
+            self._publish_status("delete_waypoint_failed", response.message, {"session_dir": str(getattr(self, "session_dir", None)) if getattr(self, "session_dir", None) else None})
+        return response
+
+    def _delete_selected_waypoint_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+        del request
+        if self._reject_manual_service_if_semi_auto_active(response):
+            return response
+        selected_name = self.get_parameter("selected_waypoint_name").get_parameter_value().string_value.strip()
+        if not selected_name:
+            response.success = False
+            response.message = "No selected waypoint name was provided."
             session_dir = getattr(self, "session_dir", None)
-            removed = self.recorded_trajectory.waypoints.pop()
-            if self.recorded_trajectory.waypoints:
-                self._write_recorded_trajectory()
-            elif getattr(self, "trajectory_path", None) is not None and self.trajectory_path.exists():
-                self.trajectory_path.unlink()
-            trajectory_path = getattr(self, "trajectory_path", None)
-            payload = {
-                "waypoint_name": removed.name,
-                "waypoint": removed.to_payload(),
-                "waypoint_count": len(self.recorded_trajectory.waypoints),
-                "trajectory_path": str(trajectory_path) if trajectory_path is not None else None,
-                "session_dir": str(session_dir) if session_dir else None,
-            }
-            self._append_run_log("waypoint_deleted", payload)
-            response.success = True
-            response.message = f"Deleted {removed.name} from {trajectory_path}."
-            self._publish_status("waypoint_deleted", response.message, payload)
+            self._publish_status("delete_waypoint_failed", response.message, {"session_dir": str(session_dir) if session_dir else None})
+            return response
+        try:
+            self._ensure_session_started(owner="manual")
+            removed = self._delete_recorded_waypoint_by_name(selected_name)
+            if removed is None:
+                response.success = False
+                response.message = f"Recorded waypoint not found: {selected_name}."
+                self._publish_status(
+                    "delete_waypoint_failed",
+                    response.message,
+                    {
+                        "waypoint_name": selected_name,
+                        "recorded_trajectory": self.recorded_trajectory.to_payload(),
+                        "trajectory_dirty": True,
+                        "session_dir": str(self.session_dir) if self.session_dir else None,
+                    },
+                )
+                return response
+            return self._delete_waypoint_response(response, removed)
         except Exception as exc:
             response.success = False
             response.message = repr(exc)
@@ -1209,6 +1541,7 @@ class EyeToHandCalibrationNode(Node):
             self._semi_auto_active = True
         created_session = False
         try:
+            self._clear_stop_requested()
             if not self.trajectory_path.exists():
                 response.success = False
                 response.message = f"Trajectory YAML does not exist: {self.trajectory_path}. Record waypoints first."
@@ -1230,6 +1563,7 @@ class EyeToHandCalibrationNode(Node):
 
             captured_count = 0
             for index, waypoint in enumerate(trajectory.waypoints, start=1):
+                self._raise_if_stop_requested(waypoint_name=waypoint.name, waypoint_index=index)
                 if waypoint.motion != "movej":
                     raise RuntimeError(f"Unsupported waypoint motion: {waypoint.motion}")
                 move_error = self.linux_client.move_j(
@@ -1240,32 +1574,111 @@ class EyeToHandCalibrationNode(Node):
                 )
                 if move_error != 0:
                     raise RuntimeError(f"MoveJ failed at {waypoint.name} with code {move_error}.")
+                self._raise_if_stop_requested(waypoint_name=waypoint.name, waypoint_index=index)
                 stable_pose = self._wait_until_tcp_stable()
-                time.sleep(max(0.0, waypoint.dwell_s))
+                self._raise_if_stop_requested(waypoint_name=waypoint.name, waypoint_index=index)
+                self._sleep_with_stop_checks(waypoint.dwell_s, waypoint_name=waypoint.name, waypoint_index=index)
+                self._sleep_with_stop_checks(
+                    self.post_motion_capture_delay_s,
+                    waypoint_name=waypoint.name,
+                    waypoint_index=index,
+                )
                 self._append_run_log("waypoint_reached", {"waypoint": waypoint.to_payload(), "stable_tcp_pose_mmdeg": stable_pose, "waypoint_index": index, "session_dir": str(self.session_dir)})
                 self._publish_status("semi_auto_waypoint_reached", f"Reached {waypoint.name}.", {"waypoint": waypoint.to_payload(), "session_dir": str(self.session_dir)})
                 if waypoint.capture:
-                    sample = self._capture_one_sample(owner="semi_auto")
-                    captured_count += 1
-                    self._publish_status(
-                        "sample_captured",
-                        f"Captured sample #{len(self.samples)}.",
-                        {
-                            "sample_quality": sample.sample_quality,
-                            "capture_timing": self._sample_to_log_record(sample),
-                            "sample_log_path": str(self.sample_log_path) if self.sample_log_path else None,
+                    try:
+                        sample, capture_attempts, selected_attempt_index = self._capture_best_sample_with_retries(
+                            owner="semi_auto",
+                            waypoint_name=waypoint.name,
+                            waypoint_index=index,
+                            waypoint_count=len(trajectory.waypoints),
+                        )
+                    except SampleRejectedError as exc:
+                        capture_attempts = exc.sample_quality.get("capture_attempts") if isinstance(exc.sample_quality, dict) else None
+                        capture_attempt_list = capture_attempts if isinstance(capture_attempts, list) else []
+                        skipped_payload = {
+                            "waypoint": waypoint.to_payload(),
+                            "waypoint_name": waypoint.name,
+                            "waypoint_index": index,
+                            "waypoint_count": len(trajectory.waypoints),
+                            "reason": exc.reject_reason,
+                            "sample_quality": exc.sample_quality,
+                            "capture_attempts": capture_attempt_list,
+                            "capture_attempt_count": len(capture_attempt_list),
+                            "reject_reasons": [
+                                item.get("reason")
+                                for item in capture_attempt_list
+                                if isinstance(item, dict) and item.get("reason") is not None
+                            ],
+                            "reprojection_error_px": exc.sample_quality.get("reprojection_error_px") if isinstance(exc.sample_quality, dict) else None,
+                            "board_margin_px": exc.sample_quality.get("board_margin_px") if isinstance(exc.sample_quality, dict) else None,
                             "session_dir": str(self.session_dir),
-                        },
+                        }
+                        self._append_run_log("waypoint_capture_skipped", skipped_payload)
+                        self._publish_status("waypoint_capture_skipped", f"Skipped {waypoint.name}: {exc.reject_reason}.", skipped_payload)
+                        continue
+                    captured_count += 1
+                    sample_record = self._sample_to_log_record(sample)
+                    sample_index = int(sample_record.get("sample_index", len(self.samples)))
+                    accepted_attempt_count = sum(
+                        1
+                        for item in capture_attempts
+                        if isinstance(item, dict) and bool(item.get("accepted"))
+                    )
+                    captured_payload = {
+                        "waypoint": waypoint.to_payload(),
+                        "waypoint_name": waypoint.name,
+                        "waypoint_index": index,
+                        "waypoint_count": len(trajectory.waypoints),
+                        "sample_index": sample_index,
+                        "sample_quality": sample.sample_quality,
+                        "capture_timing": sample_record,
+                        "capture_attempts": capture_attempts,
+                        "capture_attempt_count": len(capture_attempts),
+                        "accepted_attempt_count": accepted_attempt_count,
+                        "selected_attempt_index": selected_attempt_index,
+                        "sample_log_path": str(self.sample_log_path) if self.sample_log_path else None,
+                        "reprojection_error_px": sample.sample_quality.get("reprojection_error_px"),
+                        "board_margin_px": sample.sample_quality.get("board_margin_px"),
+                        "session_dir": str(self.session_dir),
+                    }
+                    self._append_run_log("waypoint_sample_captured", captured_payload)
+                    self._publish_status(
+                        "waypoint_sample_captured",
+                        f"Captured sample #{len(self.samples)} at {waypoint.name}.",
+                        captured_payload,
                     )
 
+            self._raise_if_stop_requested()
             solve_response = self._solve_callback(Trigger.Request(), Trigger.Response())
             if not solve_response.success:
-                raise RuntimeError(solve_response.message)
+                response.success = False
+                response.message = solve_response.message
+                insufficient_payload = {
+                    "captured_count": captured_count,
+                    "waypoint_count": len(trajectory.waypoints),
+                    "session_dir": str(self.session_dir),
+                }
+                self._append_run_log("semi_auto_insufficient_samples", {**insufficient_payload, "error": solve_response.message})
+                self._publish_status("semi_auto_insufficient_samples", solve_response.message, insufficient_payload)
+                return response
+            self._raise_if_stop_requested()
             self._save_current_solution()
             response.success = True
+            skipped_count = max(sum(1 for item in trajectory.waypoints if item.capture) - captured_count, 0)
             response.message = f"Semi-auto calibration finished with {captured_count} captured samples."
-            self._append_run_log("semi_auto_finished", {"captured_count": captured_count, "session_dir": str(self.session_dir), "report_path": str(self.report_path) if self.report_path else None})
-            self._publish_status("semi_auto_finished", response.message, {"session_dir": str(self.session_dir), "report_path": str(self.report_path) if self.report_path else None})
+            finish_status = "semi_auto_finished_with_skips" if skipped_count else "semi_auto_finished"
+            finish_payload = {"captured_count": captured_count, "skipped_count": skipped_count, "session_dir": str(self.session_dir), "report_path": str(self.report_path) if self.report_path else None}
+            self._append_run_log("semi_auto_finished", finish_payload)
+            self._publish_status(finish_status, response.message, finish_payload)
+        except SemiAutoStopped as exc:
+            response.success = False
+            response.message = "Semi-auto calibration stopped."
+            payload = dict(exc.payload)
+            payload["sample_count"] = len(self.samples)
+            if created_session:
+                self._append_run_log("semi_auto_stopped", payload)
+            self._publish_status("semi_auto_stopped", response.message, payload)
         except Exception as exc:
             response.success = False
             response.message = repr(exc)

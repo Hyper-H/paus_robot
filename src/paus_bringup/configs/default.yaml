@@ -31,9 +31,9 @@ calibration:
   square_size_m: 0.02
   solver_method: "joint_absolute"
   min_sample_count: 10
-  output_path: "src/paus_bringup/configs/extrinsics.yaml"
-  trajectory_path: "src/paus_bringup/configs/eye_to_hand_trajectory.yaml"
-  session_root_path: "calibration_sessions"
+  output_path: "/mnt/data/projects/paus_robot/calibration/current/extrinsics.yaml"
+  trajectory_path: "/mnt/data/projects/paus_robot/calibration/current/eye_to_hand_trajectory.yaml"
+  session_root_path: "/mnt/data/projects/paus_robot/calibration/sessions"
   save_sample_images: true
   max_reprojection_error_px: 2.5
   min_board_margin_px: 10.0

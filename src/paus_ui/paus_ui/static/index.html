@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PAUS Robot UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260506" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260521" />
   </head>
   <body>
     <div class="app-shell">
@@ -79,8 +79,8 @@
           <section class="panel current-panel">
             <div class="panel-header compact">
               <div>
-                <h2>?????</h2>
-                <p>?? RGB PnP / Depth Align</p>
+                <h2>当前标定</h2>
+                <p>采集 RGB PnP / Depth Align 观测</p>
               </div>
               <div id="observation-mode-toggle" class="segmented">
                 <button class="seg-button active" data-observation-mode="rgb_pnp" type="button">RGB PnP</button>
@@ -107,7 +107,7 @@
               <div class="control-stack">
                 <div class="section-label">控制操作</div>
                 <button id="record-btn" class="action primary" type="button">📷 记录当前点</button>
-                <button id="delete-btn" class="action" type="button">🗑 删除上一个</button>
+                <button id="delete-btn" class="action" type="button" disabled>&#21024;&#38500;&#36873;&#20013;</button>
                 <button id="save-trajectory-btn" class="action" type="button">💾 保存轨迹</button>
                 <button id="dry-run-btn" class="action" type="button">▶ Dry-run</button>
                 <button id="run-btn" class="action danger" type="button">▶ 开始标定</button>
@@ -123,7 +123,10 @@
                 <h2>Waypoints</h2>
                 <p id="trajectory-path">trajectory YAML</p>
               </div>
-              <div class="table-stats" id="waypoint-stats">共 0 个点</div>
+              <div class="waypoint-actions">
+                <button id="load-session-trajectory-btn" class="load-current-button" type="button" disabled>&#36733;&#20837;&#36873;&#20013; session &#20026;&#24403;&#21069;&#36712;&#36857;</button>
+                <div class="table-stats" id="waypoint-stats">共 0 个点</div>
+              </div>
             </div>
             <div class="table-wrap">
               <table>
@@ -173,7 +176,9 @@
                 <h2>标定结果</h2>
                 <p id="report-path">尚未选择 session</p>
               </div>
-              <select id="session-select" class="session-select" aria-label="session"></select>
+              <div class="session-actions">
+                <select id="session-select" class="session-select" aria-label="session"></select>
+              </div>
             </div>
             <div class="summary-grid">
               <div class="summary-cell"><span>sample_count</span><strong id="sample-count">--</strong></div>
@@ -205,6 +210,6 @@
         <button id="modal-close" class="action primary" type="button">关闭</button>
       </div>
     </div>
-    <script src="/static/app.js?v=20260506"></script>
+    <script src="/static/app.js?v=20260521"></script>
   </body>
 </html>
