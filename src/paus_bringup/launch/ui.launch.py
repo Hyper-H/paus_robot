@@ -8,7 +8,8 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, TimerAction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from paus_perception import load_config, resolve_config_artifact_path, resolve_runtime_data_path
+from paus_perception import load_config
+from paus_perception.config import resolve_config_artifact_path, resolve_runtime_data_path
 
 
 RUNTIME_CAMERA_CONFIG = "/tmp/paus_robot/camera.yaml"
@@ -52,10 +53,13 @@ def _launch_setup(context, *args, **kwargs):
     camera_ip = LaunchConfiguration("camera_ip").perform(context).strip()
     camera_index = LaunchConfiguration("camera_index").perform(context).strip()
     image_topic = LaunchConfiguration("image_topic").perform(context)
+    preview_image_topic = LaunchConfiguration("preview_image_topic").perform(context)
     status_topic = LaunchConfiguration("status_topic").perform(context)
     camera_config_wait_timeout_s = float(LaunchConfiguration("camera_config_wait_timeout_s").perform(context))
     ui_host = LaunchConfiguration("ui_host").perform(context)
     ui_port = int(LaunchConfiguration("ui_port").perform(context))
+    observation_mode = _arg_or_config(LaunchConfiguration("observation_mode").perform(context), calibration_cfg.get("observation_mode", "rgb_pnp")).strip()
+    depth_topic = _arg_or_config(LaunchConfiguration("depth_topic").perform(context), calibration_cfg.get("depth_topic", "/camera/depth_aligned")).strip()
     board_rows = int(_arg_or_config(LaunchConfiguration("board_rows").perform(context), calibration_cfg.get("board_rows", 6)))
     board_cols = int(_arg_or_config(LaunchConfiguration("board_cols").perform(context), calibration_cfg.get("board_cols", 9)))
     square_size_m = float(_arg_or_config(LaunchConfiguration("square_size_m").perform(context), calibration_cfg.get("square_size_m", 0.01)))
@@ -84,6 +88,9 @@ def _launch_setup(context, *args, **kwargs):
     start_calibration_node = _as_bool(LaunchConfiguration("start_calibration_node").perform(context))
     image_receiver_host = LaunchConfiguration("image_receiver_host").perform(context)
     image_receiver_port = LaunchConfiguration("image_receiver_port").perform(context)
+    preview_max_fps = LaunchConfiguration("preview_max_fps").perform(context)
+    preview_width = LaunchConfiguration("preview_width").perform(context)
+    preview_jpeg_quality = LaunchConfiguration("preview_jpeg_quality").perform(context)
 
     camera_bridge_cmd = [
         python_exec,
@@ -94,11 +101,18 @@ def _launch_setup(context, *args, **kwargs):
         image_receiver_port,
         "--camera-config-output",
         camera_config_output,
+        "--preview-max-fps",
+        preview_max_fps,
+        "--preview-width",
+        preview_width,
+        "--preview-jpeg-quality",
+        preview_jpeg_quality,
     ]
     if camera_ip:
         camera_bridge_cmd += ["--camera-ip", camera_ip]
     if camera_index:
         camera_bridge_cmd += ["--camera-index", camera_index]
+    camera_bridge_cmd += ["--enable-depth"]
 
     actions = []
     if start_image_receiver:
@@ -111,6 +125,8 @@ def _launch_setup(context, *args, **kwargs):
                 parameters=[
                     {
                         "image_topic": image_topic,
+                        "depth_topic": depth_topic,
+                        "preview_topic": preview_image_topic,
                     }
                 ],
             )
@@ -142,6 +158,8 @@ def _launch_setup(context, *args, **kwargs):
                     "camera_config_wait_timeout_s": camera_config_wait_timeout_s,
                     "image_topic": image_topic,
                     "status_topic": status_topic,
+                    "observation_mode": observation_mode,
+                    "depth_topic": depth_topic,
                     "board_rows": board_rows,
                     "board_cols": board_cols,
                     "square_size_m": square_size_m,
@@ -191,7 +209,13 @@ def _launch_setup(context, *args, **kwargs):
                 "-p",
                 f"image_topic:={image_topic}",
                 "-p",
+                f"preview_image_topic:={preview_image_topic}",
+                "-p",
                 f"status_topic:={status_topic}",
+                "-p",
+                f"observation_mode:={observation_mode}",
+                "-p",
+                f"depth_topic:={depth_topic}",
                 "-p",
                 f"board_rows:={board_rows}",
                 "-p",
@@ -221,6 +245,10 @@ def generate_launch_description() -> LaunchDescription:
     bringup_share = Path(get_package_share_directory("paus_bringup"))
     default_config_file = _resolve_default_config_path(bringup_share)
     default_config_path = str(default_config_file)
+    config_payload = load_config(default_config_path)
+    calibration_cfg = config_payload.get("calibration", {})
+    default_observation_mode = str(calibration_cfg.get("observation_mode", "rgb_pnp"))
+    default_depth_topic = str(calibration_cfg.get("depth_topic", "/camera/depth_aligned"))
 
     return LaunchDescription(
         [
@@ -230,11 +258,17 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("camera_index", default_value="", description="Optional camera index. Leave empty to use auto-selection."),
             DeclareLaunchArgument("image_receiver_host", default_value="127.0.0.1", description="TCP host where camera_bridge.py sends frames."),
             DeclareLaunchArgument("image_receiver_port", default_value="5001", description="TCP port where camera_bridge.py sends frames."),
-            DeclareLaunchArgument("image_topic", default_value="/camera/image_bridge", description="Image topic used by the UI preview."),
+            DeclareLaunchArgument("preview_max_fps", default_value="8.0", description="Max FPS for UI preview JPEG stream."),
+            DeclareLaunchArgument("preview_width", default_value="1280", description="Max width for UI preview JPEG stream. 0 keeps source width."),
+            DeclareLaunchArgument("preview_jpeg_quality", default_value="80", description="JPEG quality for UI preview stream."),
+            DeclareLaunchArgument("image_topic", default_value="/camera/image_bridge", description="Raw image topic used by calibration."),
+            DeclareLaunchArgument("preview_image_topic", default_value="/camera/preview_jpeg", description="Compressed JPEG topic used by the UI live preview."),
             DeclareLaunchArgument("status_topic", default_value="/eye_to_hand/status", description="Eye-to-hand JSON status topic."),
             DeclareLaunchArgument("camera_config_wait_timeout_s", default_value="15.0", description="How long the calibration node waits for camera.yaml to be written."),
             DeclareLaunchArgument("ui_host", default_value="0.0.0.0", description="UI bind host."),
             DeclareLaunchArgument("ui_port", default_value="8080", description="UI HTTP port."),
+            DeclareLaunchArgument("observation_mode", default_value=default_observation_mode, description="UI / calibration observation mode."),
+            DeclareLaunchArgument("depth_topic", default_value=default_depth_topic, description="Depth topic used for depth-aligned mode."),
             DeclareLaunchArgument("board_rows", default_value="", description="Chessboard inner-corner rows."),
             DeclareLaunchArgument("board_cols", default_value="", description="Chessboard inner-corner cols."),
             DeclareLaunchArgument("square_size_m", default_value="", description="Chessboard square size in meters."),

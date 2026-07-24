@@ -31,9 +31,9 @@ calibration:
   square_size_m: 0.02
   solver_method: "joint_absolute"
   min_sample_count: 10
-  output_path: "src/paus_bringup/configs/extrinsics.yaml"
-  trajectory_path: "src/paus_bringup/configs/eye_to_hand_trajectory.yaml"
-  session_root_path: "calibration_sessions"
+  output_path: "/mnt/data/projects/paus_robot/calibration/current/extrinsics.yaml"
+  trajectory_path: "/mnt/data/projects/paus_robot/calibration/current/eye_to_hand_trajectory.yaml"
+  session_root_path: "/mnt/data/projects/paus_robot/calibration/sessions"
   save_sample_images: true
   max_reprojection_error_px: 2.5
   min_board_margin_px: 10.0
@@ -55,6 +55,38 @@ calibration:
   tool_to_board:
     translation_m: [0.0, 0.0, 0.0]
     rotation_rpy_deg: [0.0, 0.0, 0.0]
+
+neck_surface:
+  enabled: true
+  eval_enabled: true
+  image_topic: "/camera/image_bridge"
+  depth_topic: "/camera/depth_aligned"
+  camera_info_topic: "/camera/camera_info"
+  pose_topic: "/neck_surface_pose"
+  target_pose_topic: "/target_pose_base"
+  approach_target_topic: "/approach_target"
+  status_topic: "/neck_surface_status"
+  debug_image_topic: "/neck_roi_debug_image"
+  publish_debug_image: true
+  keypoint_confidence_threshold: 0.5
+  alpha_with_ears: 0.72
+  alpha_with_nose: 0.78
+  roi_width_shoulder_scale: 0.35
+  roi_height_head_shoulder_scale: 0.45
+  center_window_scale: 0.34
+  depth_outlier_mm: 50.0
+  patch_radius_mm: 30.0
+  min_center_points: 80
+  min_patch_points: 50
+  max_plane_rmse_mm: 8.0
+  target_region: "patient_left"
+  lateral_offset_mm: 30.0
+  inferior_offset_mm: 10.0
+  hover_distance_mm: 80.0
+  latched_pose_timeout_s: 0.5
+  max_rgb_depth_delta_ms: 200.0
+  logging_enabled: true
+  logging_output_dir: "runtime_logs/neck_surface"
 
 control:
   robot_ip: "192.168.58.2"
@@ -82,8 +114,8 @@ control:
   completion_normal_tolerance_deg: 5.0
   min_safe_z_mm: 50.0
   min_plane_clearance_mm: 10.0
-  workspace_min_mm: [-1000.0, -1000.0, 0.0]
-  workspace_max_mm: [1000.0, 1000.0, 1000.0]
+  workspace_min_mm: [-2000.0, -2000.0, 0.0]
+  workspace_max_mm: [2000.0, 2000.0, 2000.0]
   repeat_distance_threshold_mm: 5.0
   stage_switch_buffer_mm: 10.0
   max_marker_displacement_before_relatch_mm: 200.0

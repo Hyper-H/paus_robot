@@ -51,6 +51,40 @@ class _RecordingWaitClient:
         return False
 
 
+
+
+class _ImmediateFuture:
+    def __init__(self, response: object) -> None:
+        self._response = response
+
+    def add_done_callback(self, callback) -> None:
+        callback(self)
+
+    def result(self) -> object:
+        return self._response
+
+
+class _TriggerClient:
+    def __init__(self, *, ready: bool = True, success: bool = True, message: str = "ok") -> None:
+        self._ready = ready
+        self.srv_name = "/eye_to_hand/stop"
+        self.calls = 0
+        self.wait_timeouts: list[float] = []
+        self.success = success
+        self.message = message
+
+    def service_is_ready(self) -> bool:
+        return self._ready
+
+    def wait_for_service(self, timeout_sec: float) -> bool:
+        self.wait_timeouts.append(timeout_sec)
+        return self._ready
+
+    def call_async(self, _request: object) -> _ImmediateFuture:
+        self.calls += 1
+        return _ImmediateFuture(type("TriggerResponse", (), {"success": self.success, "message": self.message})())
+
+
 class _EventSink:
     def __init__(self) -> None:
         self.items: list[dict[str, object]] = []
@@ -58,6 +92,63 @@ class _EventSink:
     def push(self, item: dict[str, object]) -> dict[str, object]:
         self.items.append(item)
         return item
+
+
+def _bridge_for_waypoint_shaping() -> UiRosBridge:
+    bridge = UiRosBridge.__new__(UiRosBridge)
+    bridge.effective_max_reprojection_error_px = 2.5
+    bridge.effective_min_board_margin_px = 10.0
+    return bridge
+
+
+def test_shape_recorded_waypoint_uses_accepted_record_quality() -> None:
+    bridge = _bridge_for_waypoint_shaping()
+
+    row = UiRosBridge._shape_recorded_waypoint(
+        bridge,
+        {
+            "name": "waypoint_001",
+            "capture": True,
+            "record_quality": {
+                "accepted": True,
+                "status": "accepted",
+                "reprojection_error_px": 0.0936,
+                "board_margin_px": 169.7,
+            },
+        },
+    )
+
+    assert row["status"] == "accepted"
+    assert row["result"] == "OK"
+    assert row["reprojection_error_px"] == pytest.approx(0.0936)
+    assert row["board_margin_px"] == pytest.approx(169.7)
+    assert row["thresholds"]["quality_ok"] is True
+
+
+def test_shape_recorded_waypoint_uses_rejected_record_quality() -> None:
+    bridge = _bridge_for_waypoint_shaping()
+
+    row = UiRosBridge._shape_recorded_waypoint(
+        bridge,
+        {
+            "name": "waypoint_002",
+            "capture": True,
+            "record_quality": {
+                "accepted": False,
+                "status": "rejected",
+                "reject_reason": "chessboard_not_found",
+                "expected_corners": 88,
+                "detected_corners": 0,
+            },
+        },
+    )
+
+    assert row["status"] == "skipped"
+    assert row["result"] == "FAIL"
+    assert row["reason"] == "chessboard_not_found"
+    assert row["reason_display"] != "chessboard_not_found"
+    assert row["reprojection_error_px"] is None
+    assert row["board_margin_px"] is None
 
 
 def test_call_trigger_honors_full_service_wait_timeout() -> None:
@@ -75,6 +166,71 @@ def test_call_trigger_honors_full_service_wait_timeout() -> None:
     assert bridge.events.items[-1]["command"] == "run"
 
 
+
+
+
+def test_load_session_trajectory_updates_command_result_and_emits_event() -> None:
+    bridge = UiRosBridge.__new__(UiRosBridge)
+    bridge.events = _EventSink()
+    bridge._last_command_result = None
+    bridge._event_dedupe_key = lambda event_type, payload: f"{event_type}:dedupe"
+    bridge._sync_backend_state = lambda: {}
+
+    class FakeStore:
+        trajectory_path = Path("/tmp/active_trajectory.yaml")
+
+        def load_session_trajectory(self, session_id: str) -> dict[str, object]:
+            return {
+                "session_id": session_id,
+                "trajectory_path": str(self.trajectory_path),
+                "waypoint_count": 2,
+                "operator_message": f"??? session {session_id} ? 2 ? waypoints?",
+            }
+
+    bridge.session_store = FakeStore()
+
+    result = UiRosBridge.load_session_trajectory(bridge, "2026-05-21_104426")
+
+    assert result["success"] is True
+    assert result["loaded"] is True
+    assert result["waypoint_count"] == 2
+    assert bridge.trajectory_path == Path("/tmp/active_trajectory.yaml")
+    assert bridge._last_command_result["command"] == "load_session_trajectory"
+    assert bridge.events.items[-1]["command"] == "load_session_trajectory"
+
+def test_stop_run_calls_stop_service_and_marks_stopping() -> None:
+    bridge = UiRosBridge.__new__(UiRosBridge)
+    client = _TriggerClient(ready=True, success=True, message="accepted")
+    bridge._service_clients = {"stop": client}
+    bridge.events = _EventSink()
+    bridge._last_command_result = None
+    bridge._event_dedupe_key = lambda event_type, payload: f"{event_type}:dedupe"
+
+    result = UiRosBridge.stop_run(bridge)
+
+    assert result["success"] is True
+    assert result["accepted"] is True
+    assert result["stopping"] is True
+    assert client.calls == 1
+    assert client.wait_timeouts == [2.0]
+    assert "\u505c\u6b62" in result["operator_message"]
+
+
+def test_stop_run_reports_unavailable_stop_service() -> None:
+    bridge = UiRosBridge.__new__(UiRosBridge)
+    client = _TriggerClient(ready=False)
+    bridge._service_clients = {"stop": client}
+    bridge.events = _EventSink()
+    bridge._last_command_result = None
+    bridge._event_dedupe_key = lambda event_type, payload: f"{event_type}:dedupe"
+
+    result = UiRosBridge.stop_run(bridge)
+
+    assert result["success"] is False
+    assert "Service is unavailable" in result["message"]
+    assert client.calls == 0
+
+
 def test_workflow_maps_semi_auto_started_to_motion_stage() -> None:
     bridge = UiRosBridge.__new__(UiRosBridge)
 
@@ -82,6 +238,18 @@ def test_workflow_maps_semi_auto_started_to_motion_stage() -> None:
 
     assert workflow["stage"] == "movej"
     assert workflow["label"] == "半自动标定已启动"
+
+
+def test_workflow_maps_manual_capture_statuses() -> None:
+    bridge = UiRosBridge.__new__(UiRosBridge)
+
+    accepted = UiRosBridge._workflow_for_status(bridge, "sample_captured")
+    failed = UiRosBridge._workflow_for_status(bridge, "capture_failed")
+
+    assert accepted["stage"] == "accepted"
+    assert accepted["label"] == "样本已接受"
+    assert failed["stage"] == "error"
+    assert failed["label"] == "采样失败"
 
 
 def test_get_detector_returns_none_for_malformed_camera_yaml() -> None:
@@ -509,6 +677,72 @@ def test_get_status_drops_stale_backend_payload_when_disconnected() -> None:
 
         assert status["handeye"]["last_status"] is None
         assert status["handeye"]["current_waypoint"]["name"] is None
+
+
+def test_get_waypoints_shapes_record_quality_from_trajectory_file() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        trajectory_path = root / "trajectory.yaml"
+        trajectory_path.write_text(
+            yaml.safe_dump(
+                {
+                    "version": 1,
+                    "tool_id": 0,
+                    "user_id": 0,
+                    "defaults": {"motion": "movej", "vel": 10.0, "acc": 10.0, "dwell_s": 0.5},
+                    "waypoints": [
+                        {
+                            "name": "waypoint_001",
+                            "motion": "movej",
+                            "joint_deg": [0, 0, 0, 0, 0, 0],
+                            "expected_tcp_pose_mmdeg": [10, 20, 30, 40, 50, 60],
+                            "vel": 10.0,
+                            "acc": 10.0,
+                            "dwell_s": 0.5,
+                            "capture": True,
+                            "record_quality": {"accepted": True, "status": "accepted", "reprojection_error_px": 0.2, "board_margin_px": 50.0},
+                        },
+                        {
+                            "name": "waypoint_002",
+                            "motion": "movej",
+                            "joint_deg": [1, 1, 1, 1, 1, 1],
+                            "expected_tcp_pose_mmdeg": [11, 21, 31, 41, 51, 61],
+                            "vel": 10.0,
+                            "acc": 10.0,
+                            "dwell_s": 0.5,
+                            "capture": True,
+                            "record_quality": {"accepted": False, "status": "rejected", "reject_reason": "chessboard_not_found"},
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        bridge = UiRosBridge.__new__(UiRosBridge)
+        bridge._last_status_lock = threading.Lock()
+        bridge._last_status = None
+        bridge.session_store = SessionStore(session_root_path=root / "sessions", trajectory_path=trajectory_path)
+        bridge._sync_backend_state = lambda *_args: {
+            "backend_connected": True,
+            "status_recent": False,
+            "run_active": False,
+            "trajectory_path": trajectory_path,
+            "session_root_path": root / "sessions",
+            "execute_motion": False,
+            "motion_state_known": False,
+            "config_source": "backend_service_ready",
+            "max_reprojection_error_px": 2.5,
+            "min_board_margin_px": 10.0,
+        }
+
+        waypoints = UiRosBridge.get_waypoints(bridge)["waypoints"]
+
+        assert waypoints[0]["status"] == "accepted"
+        assert waypoints[0]["result"] == "OK"
+        assert waypoints[0]["reprojection_error_px"] == pytest.approx(0.2)
+        assert waypoints[1]["status"] == "skipped"
+        assert waypoints[1]["result"] == "FAIL"
+        assert waypoints[1]["reason"] == "chessboard_not_found"
 
 
 def test_get_waypoints_prefers_live_recorded_trajectory() -> None:

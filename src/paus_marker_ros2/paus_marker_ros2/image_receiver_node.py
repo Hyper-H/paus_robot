@@ -10,7 +10,7 @@ from cv_bridge import CvBridge
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from sensor_msgs.msg import CameraInfo, Image
+from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 
 from paus_perception import camera_info_payload_summary, decompress_payload, recv_frame_packet
 
@@ -31,6 +31,7 @@ class ImageReceiverNode(Node):
         self.declare_parameter("image_topic", "/camera/image_bridge")
         self.declare_parameter("camera_info_topic", "/camera/camera_info")
         self.declare_parameter("depth_topic", "/camera/depth_aligned")
+        self.declare_parameter("preview_topic", "/camera/preview_jpeg")
         self.declare_parameter("frame_id", "camera")
 
         self.listen_host = self.get_parameter("listen_host").get_parameter_value().string_value
@@ -38,12 +39,14 @@ class ImageReceiverNode(Node):
         self.image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
         self.camera_info_topic = self.get_parameter("camera_info_topic").get_parameter_value().string_value
         self.depth_topic = self.get_parameter("depth_topic").get_parameter_value().string_value
+        self.preview_topic = self.get_parameter("preview_topic").get_parameter_value().string_value
         self.default_frame_id = self.get_parameter("frame_id").get_parameter_value().string_value
 
         self.bridge = CvBridge()
         self.image_publisher = self.create_publisher(Image, self.image_topic, 10)
         self.camera_info_publisher = self.create_publisher(CameraInfo, self.camera_info_topic, 10)
         self.depth_publisher = self.create_publisher(Image, self.depth_topic, 10)
+        self.preview_publisher = self.create_publisher(CompressedImage, self.preview_topic, 10)
 
         self._latest_rgb_frame: tuple[dict[str, object], np.ndarray] | None = None
         self._latest_depth_frame: tuple[dict[str, object], np.ndarray] | None = None
@@ -64,6 +67,7 @@ class ImageReceiverNode(Node):
                     "image_topic": self.image_topic,
                     "camera_info_topic": self.camera_info_topic,
                     "depth_topic": self.depth_topic,
+                    "preview_topic": self.preview_topic,
                 },
                 ensure_ascii=False,
             )
@@ -105,6 +109,10 @@ class ImageReceiverNode(Node):
                                 self._latest_rgb_frame = (header, image_bgr)
                             continue
 
+                        if frame_type == "preview_jpeg" and encoding == "jpeg":
+                            self._publish_preview_frame(header, payload)
+                            continue
+
                         if frame_type == "aligned_depth" and encoding == "32FC1":
                             compression = str(header.get("compression", ""))
                             depth_payload = decompress_payload(payload) if compression == "zlib" else payload
@@ -119,7 +127,7 @@ class ImageReceiverNode(Node):
                             with self._frame_lock:
                                 self._latest_depth_frame = (header, depth_map)
 
-    def _publish_common_header(self, message: Image | CameraInfo, header: dict[str, object]) -> bool:
+    def _publish_common_header(self, message: Image | CameraInfo | CompressedImage, header: dict[str, object]) -> bool:
         message.header.frame_id = str(header.get("frame_id", self.default_frame_id))
         timestamp_ns = timestamp_ns_from_header(header)
         if timestamp_ns is None:
@@ -127,6 +135,15 @@ class ImageReceiverNode(Node):
         message.header.stamp.sec = int(timestamp_ns // 1_000_000_000)
         message.header.stamp.nanosec = int(timestamp_ns % 1_000_000_000)
         return True
+
+    def _publish_preview_frame(self, header: dict[str, object], payload: bytes) -> None:
+        message = CompressedImage()
+        if not self._publish_common_header(message, header):
+            self.get_logger().warning(json.dumps({"event": "frame_timestamp_invalid", "frame_type": "preview_jpeg"}, ensure_ascii=False))
+            return
+        message.format = "jpeg"
+        message.data = payload
+        self.preview_publisher.publish(message)
 
     def _camera_info_from_header(self, header: dict[str, object], image_bgr: np.ndarray) -> CameraInfo | None:
         payload = header.get("camera_info")

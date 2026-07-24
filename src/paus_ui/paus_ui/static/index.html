@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PAUS Robot UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260506" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260724" />
   </head>
   <body>
     <div class="app-shell">
@@ -48,6 +48,7 @@
                 <span id="node-chip" class="chip neutral">机器人 --</span>
                 <span id="extrinsics-chip" class="chip neutral">外参 --</span>
                 <span id="motion-chip" class="chip neutral">execute_motion: --</span>
+                <span id="mode-chip" class="chip neutral">模式 --</span>
               </div>
             </div>
           </div>
@@ -76,6 +77,16 @@
           </section>
 
           <section class="panel current-panel">
+            <div class="panel-header compact">
+              <div>
+                <h2>&#24403;&#21069;&#26631;&#23450;</h2>
+                <p>&#37319;&#38598; RGB PnP / Depth Align &#35266;&#27979;</p>
+              </div>
+              <div id="observation-mode-toggle" class="segmented">
+                <button class="seg-button active" data-observation-mode="rgb_pnp" type="button">RGB PnP</button>
+                <button class="seg-button" data-observation-mode="depth_aligned" type="button">Depth Align</button>
+              </div>
+            </div>
             <div class="split-panel">
               <div class="waypoint-now">
                 <div class="section-label">当前位姿点</div>
@@ -95,12 +106,17 @@
               </div>
               <div class="control-stack">
                 <div class="section-label">控制操作</div>
-                <button id="record-btn" class="action primary" type="button">📷 记录当前点</button>
-                <button id="delete-btn" class="action" type="button">🗑 删除上一个</button>
-                <button id="save-trajectory-btn" class="action" type="button">💾 保存轨迹</button>
-                <button id="dry-run-btn" class="action" type="button">▶ Dry-run</button>
-                <button id="run-btn" class="action danger" type="button">▶ 开始标定</button>
-                <button id="stop-btn" class="action stop" type="button">■ 停止</button>
+                <div id="trajectory-controls" class="control-group">
+                  <button id="record-btn" class="action primary" type="button">记录当前点</button>
+                  <button id="delete-btn" class="action" type="button" disabled>&#21024;&#38500;&#36873;&#20013;</button>
+                  <button id="new-trajectory-btn" class="action" type="button">新建轨迹</button>
+                  <button id="save-trajectory-btn" class="action" type="button">保存轨迹</button>
+                </div>
+                <div id="run-controls" class="control-group">
+                  <button id="dry-run-btn" class="action" type="button">Dry-run</button>
+                  <button id="run-btn" class="action danger" type="button">开始标定</button>
+                  <button id="stop-btn" class="action stop" type="button">停止</button>
+                </div>
                 <div id="command-result" class="notice">等待操作</div>
               </div>
             </div>
@@ -112,11 +128,14 @@
                 <h2>Waypoints</h2>
                 <p id="trajectory-path">trajectory YAML</p>
               </div>
-              <div class="table-stats" id="waypoint-stats">共 0 个点</div>
+              <div class="waypoint-actions">
+                <button id="load-session-trajectory-btn" class="load-current-button" type="button" disabled>&#36733;&#20837;&#36873;&#20013; session &#20026;&#24403;&#21069;&#36712;&#36857;</button>
+                <div class="table-stats" id="waypoint-stats">共 0 个点</div>
+              </div>
             </div>
             <div class="table-wrap">
               <table>
-                <thead>
+                <thead id="waypoint-head">
                   <tr>
                     <th>#</th>
                     <th>waypoint</th>
@@ -129,7 +148,7 @@
                     <th>rot resid (deg)</th>
                     <th>capture</th>
                     <th>reason</th>
-                    <th>thumbnail</th>
+                    <th>抓图</th>
                   </tr>
                 </thead>
                 <tbody id="waypoint-body"></tbody>
@@ -162,12 +181,15 @@
                 <h2>标定结果</h2>
                 <p id="report-path">尚未选择 session</p>
               </div>
-              <select id="session-select" class="session-select" aria-label="session"></select>
+              <div class="session-actions">
+                <select id="session-select" class="session-select" aria-label="session"></select>
+              </div>
             </div>
             <div class="summary-grid">
               <div class="summary-cell"><span>sample_count</span><strong id="sample-count">--</strong></div>
               <div class="summary-cell"><span>accepted</span><strong id="accepted-count">--</strong></div>
               <div class="summary-cell"><span>skipped</span><strong id="skipped-count">--</strong></div>
+              <div class="summary-cell"><span>failed</span><strong id="failed-count">--</strong></div>
               <div class="summary-cell"><span>pending</span><strong id="pending-count">--</strong></div>
             </div>
             <div id="residual-grid" class="residual-grid"></div>
@@ -194,6 +216,6 @@
         <button id="modal-close" class="action primary" type="button">关闭</button>
       </div>
     </div>
-    <script src="/static/app.js?v=20260506"></script>
+    <script src="/static/app.js?v=20260724"></script>
   </body>
 </html>

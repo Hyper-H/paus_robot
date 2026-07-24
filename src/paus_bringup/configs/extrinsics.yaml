@@ -1,76 +1,111 @@
 extrinsic:
   base_to_camera:
     translation_m:
-    - 0.646752118077876
-    - 0.05317384415781412
-    - 0.6577259982108331
+    - 0.6491553457273955
+    - 0.30379181858865356
+    - 0.6739831448732759
     rotation_matrix:
-    - - -0.9997872645234406
-      - -0.010407278105074844
-      - -0.017807702243110977
-    - - -0.011072743973727955
-      - 0.9992281939119234
-      - 0.03768833814866952
-    - - 0.0174017251336736
-      - 0.03787750062979062
-      - -0.9991308597518204
+    - - -0.999942709223611
+      - 0.005209569305410968
+      - 0.009350864034770406
+    - - -0.00935378575224913
+      - -0.0005367539428543658
+      - -0.9999561083304136
+    - - -0.005204321535576553
+      - -0.9999862860473924
+      - 0.0005854523869485745
     rotation_quaternion_xyzw:
-    - -0.005371250237534012
-    - 0.9997682629223614
-    - 0.018895838561022695
-    - -0.00880439714946193
+    - 0.0014656340176404936
+    - -0.7068982428351708
+    - 0.7072950083864253
+    - -0.005147553314028026
+    rotation_rpy_deg:
+    - -89.96645559292813
+    - 0.29818700529189346
+    - -179.46405248021492
+    parent_frame: robot_base
+    child_frame: camera
 calibration:
-  sample_count: 16
+  sample_count: 15
   method: ax_xb_park
-  observation_mode: depth_aligned
+  observation_mode: rgb_pnp
   tool_to_board:
     translation_m:
-    - -0.13753006029001694
-    - -0.21169387030585565
-    - 0.021036577832621486
+    - 0.0
+    - 0.0
+    - 0.0
     rotation_rpy_deg:
-    - 0.7349787492637659
-    - 2.721616897607372
-    - -10.06506436980651
+    - 0.0
+    - 0.0
+    - 0.0
   residuals:
-    translation_rms_mm: 46.276187281089435
-    translation_mean_mm: 46.228299195236275
-    translation_max_mm: 49.06412627633003
-    rotation_rms_deg: 10.458543121262467
-    rotation_mean_deg: 10.45844087492446
-    rotation_max_deg: 10.539101819509831
-    sample_count: 16
+    translation_rms_mm: 1.64773684731468
+    translation_mean_mm: 1.206474670311077
+    translation_max_mm: 5.0770047148987025
+    rotation_rms_deg: 0.16924619229399854
+    rotation_mean_deg: 0.15181657375635033
+    rotation_max_deg: 0.3704842483263809
+    sample_count: 15
+  raw_residuals:
+    translation_rms_mm: 258.0034460455038
+    translation_mean_mm: 257.99978052867567
+    translation_max_mm: 262.9969234759422
+    rotation_rms_deg: 0.6226863025000403
+    rotation_mean_deg: 0.6185596504226045
+    rotation_max_deg: 0.7265614431322461
+    sample_count: 15
+  corrected_residuals:
+    translation_rms_mm: 1.64773684731468
+    translation_mean_mm: 1.206474670311077
+    translation_max_mm: 5.0770047148987025
+    rotation_rms_deg: 0.16924619229399854
+    rotation_mean_deg: 0.15181657375635033
+    rotation_max_deg: 0.3704842483263809
+    sample_count: 15
+  estimated_tool_to_board:
+    translation_m:
+    - -0.10803887362123368
+    - -0.23420028505958393
+    - -0.006394638324556478
+    rotation_matrix:
+    - - 0.9999465808078041
+      - 0.01033590710540128
+      - -6.74914138073746e-05
+    - - -0.01033578623013251
+      - 0.9999453101949787
+      - 0.0015962900966680774
+    - - 8.398682886742102e-05
+      - -0.0015955072473150002
+      - 0.9999987236506037
+    rotation_quaternion_xyzw:
+    - -0.0007979602467151334
+    - -3.787007847619651e-05
+    - -0.005167993997218382
+    - 0.9999863267381943
+    rotation_rpy_deg:
+    - -0.09141587056149489
+    - -0.004812090834447977
+    - -0.5922074754476594
+    parent_frame: tool
+    child_frame: board
+  quality_status: ok
+  quality_warnings: []
+  generated_at: '2026-05-21T02:53:33.740446+00:00'
+  session_dir: /home/chen_lab/worktrees/paus_robot_handeye_waypoint_clean_rlcr/calibration_sessions/2026-05-21_104426
+  trajectory_path: /mnt/data/projects/paus_robot/repo/src/paus_bringup/configs/eye_to_hand_trajectory.yaml
+  git_branch: codex/handeye-waypoint-clean-rlcr
+  git_commit: 1e1a01a
+  git_dirty: true
   session_diagnostics:
-    translation_z_mean_mm: 11.441031673998744
-    translation_z_max_mm: 27.439198604982533
-    board_normal_error_mean_deg: 3.035850282529281
-    board_normal_error_max_deg: 3.10137969962621
+    translation_z_mean_mm: 0.4465853899940771
+    translation_z_max_mm: 2.3149791548459087
+    board_normal_error_mean_deg: 0.13193579463241858
+    board_normal_error_max_deg: 0.35848455157396675
     sample_quality_summary: &id001
-      observation_mode: depth_aligned
-      accepted_sample_count: 16
-      valid_corner_patch_ratio:
-        mean: 0.7940340909090909
-        min: 0.6363636363636364
-        max: 0.9090909090909091
-      plane_residual_std_mm_median:
-        mean: 0.08057966142155179
-        min: 0.05012356060921039
-        max: 0.14578586361772033
-      plane_residual_std_mm_p95:
-        mean: 0.28110378558046356
-        min: 0.17900172395447475
-        max: 0.4463052761902433
-      board_model_fit_rmse_mm:
-        mean: 1.7556321498838705
-        min: 0.09386681959043507
-        max: 2.9237098425862285
-      board_model_fit_max_mm:
-        mean: 3.0450071438507136
-        min: 0.26912387712898056
-        max: 4.977386883003773
-    solver_cross_check:
-      opencv_translation_rms_mm: 46.32640331407002
-      opencv_rotation_rms_deg: 10.458543121277172
-      ax_xb_vs_opencv_translation_mm: 0.46570645989846254
-      ax_xb_vs_opencv_rotation_deg: 1.8271553931657168e-05
+      observation_mode: rgb_pnp
+      accepted_sample_count: 15
+      reprojection_rms_px:
+        mean: 0.09413032640484194
+        min: 0.06430078830216243
+        max: 0.20628162477739503
   sample_quality_summary: *id001

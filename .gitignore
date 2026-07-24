@@ -36,6 +36,8 @@ tmp_pose_smoke_ros/
 Thumbs.db
 .vscode/
 .idea/
-# Agent/runtime state
+# Agent/runtime metadata
 .humanize/
 .codex/
+# Local RLCR plans
+docs/handeye_waypoint_bugfix_plan.md

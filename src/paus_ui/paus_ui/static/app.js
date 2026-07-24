@@ -3,8 +3,11 @@ const state = {
   selectedSession: "",
   selectedWaypointName: "",
   selectedSampleRow: null,
+  selectionVersion: 0,
   status: null,
   quality: null,
+  observationMode: "rgb_pnp",
+  qualitySchema: null,
   sessions: [],
   waypoints: [],
   waypointsDirty: false,
@@ -16,6 +19,8 @@ const state = {
   wsConnected: false,
   imageWsConnected: false,
   liveImageObjectUrl: "",
+  liveImagePendingUrl: "",
+  liveImageLoading: false,
   liveImageFallbackTimer: null,
   liveImageWatchdogTimer: null,
   liveImageReconnectTimer: null,
@@ -23,6 +28,8 @@ const state = {
   liveImageFrameCount: 0,
   liveImageLastFrameAt: 0,
   thumbObserver: null,
+  refreshInFlight: null,
+  fullRefreshTimer: null,
   eventReconnectTimer: null,
   eventReconnectDelay: 5000,
   eventDedupe: new Map(),
@@ -37,6 +44,9 @@ const els = {
   extrinsicsChip: document.getElementById("extrinsics-chip"),
   motionChip: document.getElementById("motion-chip"),
   imageChip: document.getElementById("image-chip"),
+  modeChip: document.getElementById("mode-chip"),
+  observationModeToggle: document.getElementById("observation-mode-toggle"),
+  waypointHead: document.getElementById("waypoint-head"),
   currentWaypoint: document.getElementById("current-waypoint"),
   workflowFlow: document.getElementById("workflow-flow"),
   tcpPoseGrid: document.getElementById("tcp-pose-grid"),
@@ -48,6 +58,7 @@ const els = {
   sampleCount: document.getElementById("sample-count"),
   acceptedCount: document.getElementById("accepted-count"),
   skippedCount: document.getElementById("skipped-count"),
+  failedCount: document.getElementById("failed-count"),
   pendingCount: document.getElementById("pending-count"),
   residualGrid: document.getElementById("residual-grid"),
   residualBars: document.getElementById("residual-bars"),
@@ -62,7 +73,175 @@ const els = {
   previewDetails: document.getElementById("preview-details"),
   eventLog: document.getElementById("event-log"),
   eventMode: document.getElementById("event-mode"),
+  deleteBtn: document.getElementById("delete-btn"),
+  newTrajectoryBtn: document.getElementById("new-trajectory-btn"),
+  trajectoryControls: document.getElementById("trajectory-controls"),
+  runControls: document.getElementById("run-controls"),
+  loadSessionTrajectoryBtn: document.getElementById("load-session-trajectory-btn"),
 };
+
+const QUALITY_SCHEMAS = {
+  rgb_pnp: {
+    label: "RGB PnP",
+    liveMetrics: [
+      { key: "detected", label: "\u68c0\u6d4b", kind: "bool" },
+      { path: "reprojection_error_px", label: "\u91cd\u6295\u5f71 px", digits: 3 },
+      { path: "board_margin_px", label: "\u8fb9\u8ddd px", digits: 1 },
+      { path: "camera_to_board_translation_m.2", label: "Tz", digits: 3, suffix: " m" },
+      { path: "board_angle_deg", label: "\u68cb\u76d8\u89d2\u5ea6", digits: 2, suffix: " deg" },
+    ],
+    tableColumns: [
+      { key: "index", label: "#", kind: "index" },
+      { key: "name", label: "waypoint" },
+      { key: "status", label: "\u72b6\u6001", kind: "pill" },
+      { key: "result", label: "result", kind: "pill" },
+      { path: "reprojection_error_px", label: "\u91cd\u6295\u5f71 px", digits: 3 },
+      { path: "board_margin_px", label: "\u8fb9\u8ddd px", digits: 1 },
+      { path: "camera_to_board_translation_m.2", label: "Tz (m)", digits: 3, suffix: " m" },
+      { path: "translation_residual_mm", label: "trans resid mm", digits: 3, suffix: " mm" },
+      { path: "rotation_residual_deg", label: "rot resid deg", digits: 4, suffix: " deg" },
+      { key: "capture", label: "capture", kind: "bool" },
+      { key: "reason_display", label: "reason" },
+      { key: "thumbnail", label: "抓图", kind: "thumb" },
+    ],
+    previewFields: [
+      { path: "reprojection_error_px", label: "reprojection_error_px", digits: 3 },
+      { path: "board_margin_px", label: "board_margin_px", digits: 1 },
+      { path: "board_angle_deg", label: "board_angle_deg", digits: 2, suffix: " deg" },
+      { path: "camera_to_board_translation_m.0", label: "T_camera_board x", digits: 3, suffix: " m" },
+      { path: "camera_to_board_translation_m.1", label: "T_camera_board y", digits: 3, suffix: " m" },
+      { path: "camera_to_board_translation_m.2", label: "T_camera_board z", digits: 3, suffix: " m" },
+      { path: "camera_to_board_rotation_rpy_deg.0", label: "board rx", digits: 2, suffix: " deg" },
+      { path: "camera_to_board_rotation_rpy_deg.1", label: "board ry", digits: 2, suffix: " deg" },
+      { path: "camera_to_board_rotation_rpy_deg.2", label: "board rz", digits: 2, suffix: " deg" },
+      { path: "image_sequence", label: "image_sequence" },
+      { path: "capture_time_s", label: "capture_time" },
+      { path: "translation_residual_mm", label: "translation_residual_mm", digits: 3, suffix: " mm" },
+      { path: "rotation_residual_deg", label: "rotation_residual_deg", digits: 4, suffix: " deg" },
+    ],
+  },
+  depth_aligned: {
+    label: "Depth Align",
+    liveMetrics: [
+      { path: "quality_payload.valid_depth_ratio", label: "\u6df1\u5ea6\u6709\u6548\u7387", digits: 2 },
+      { path: "quality_payload.board_model_fit_rmse_mm", label: "\u5e73\u9762\u5bf9\u9f50\u8bef\u5dee", digits: 2, suffix: " mm" },
+      { path: "quality_payload.plane_residual_std_mm_median", label: "\u6df1\u5ea6\u6b8b\u5dee", digits: 2, suffix: " mm" },
+      { path: "quality_payload.global_plane_point_count", label: "\u6709\u6548\u70b9\u6570", digits: 0 },
+      { path: "board_angle_deg", label: "\u68cb\u76d8\u89d2\u5ea6", digits: 2, suffix: " deg" },
+    ],
+    tableColumns: [
+      { key: "index", label: "#", kind: "index" },
+      { key: "name", label: "waypoint" },
+      { key: "status", label: "\u72b6\u6001", kind: "pill" },
+      { key: "result", label: "result", kind: "pill" },
+      { path: "quality_payload.valid_depth_ratio", label: "\u6df1\u5ea6\u6709\u6548\u7387", digits: 2 },
+      { path: "quality_payload.board_model_fit_rmse_mm", label: "\u5e73\u9762\u5bf9\u9f50\u8bef\u5dee", digits: 2, suffix: " mm" },
+      { path: "quality_payload.plane_residual_std_mm_median", label: "\u6df1\u5ea6\u6b8b\u5dee", digits: 2, suffix: " mm" },
+      { path: "quality_payload.global_plane_point_count", label: "\u6709\u6548\u70b9\u6570", digits: 0 },
+      { path: "board_angle_deg", label: "\u68cb\u76d8\u89d2\u5ea6", digits: 2, suffix: " deg" },
+      { key: "capture", label: "capture", kind: "bool" },
+      { key: "reason_display", label: "reason" },
+      { key: "thumbnail", label: "抓图", kind: "thumb" },
+    ],
+    previewFields: [
+      { path: "quality_payload.valid_depth_ratio", label: "valid_depth_ratio", digits: 2 },
+      { path: "quality_payload.board_model_fit_rmse_mm", label: "board_model_fit_rmse_mm", digits: 2, suffix: " mm" },
+      { path: "quality_payload.plane_residual_std_mm_median", label: "plane_residual_std_mm_median", digits: 2, suffix: " mm" },
+      { path: "quality_payload.plane_residual_std_mm_p95", label: "plane_residual_std_mm_p95", digits: 2, suffix: " mm" },
+      { path: "quality_payload.global_plane_point_count", label: "global_plane_point_count" },
+      { path: "quality_payload.board_model_fit_mean_mm", label: "board_model_fit_mean_mm", digits: 2, suffix: " mm" },
+      { path: "quality_payload.board_center_z_m", label: "board_center_z_m", digits: 3, suffix: " m" },
+      { path: "quality_payload.rgb_depth_delta_ms", label: "rgb_depth_delta_ms", digits: 1, suffix: " ms" },
+      { path: "board_angle_deg", label: "board_angle_deg", digits: 2, suffix: " deg" },
+      { path: "image_sequence", label: "image_sequence" },
+      { path: "capture_time_s", label: "capture_time" },
+    ],
+  },
+};
+
+const WAYPOINT_STATUS_LABELS = {
+  accepted: "\u5df2\u63a5\u53d7",
+  skipped: "\u5df2\u8df3\u8fc7",
+  failed: "\u5931\u8d25",
+  running: "\u8fdb\u884c\u4e2d",
+  pending: "\u5f85\u91c7\u96c6",
+};
+
+function waypointStatusLabel(status) {
+  return WAYPOINT_STATUS_LABELS[status] || text(status, "-");
+}
+
+function getValueByPath(source, path) {
+  if (!path) return source;
+  return String(path).split('.').reduce((value, part) => {
+    if (value === null || value === undefined) return undefined;
+    if (Array.isArray(value) && /^\d+$/.test(part)) return value[Number(part)];
+    return value[part];
+  }, source);
+}
+
+function activeSchema() {
+  return state.qualitySchema || QUALITY_SCHEMAS[state.observationMode] || QUALITY_SCHEMAS.rgb_pnp;
+}
+
+function setModeToggleActive(mode) {
+  document.querySelectorAll('[data-observation-mode]').forEach((button) => {
+    button.classList.toggle('active', button.dataset.observationMode === mode);
+  });
+}
+
+function renderMetricValue(metric, source) {
+  const resolved = getValueByPath(source, metric.path || metric.key);
+  if (metric.kind === 'bool') {
+    return resolved === true ? 'OK' : (resolved === false ? 'NO' : '--');
+  }
+  if (resolved === null || resolved === undefined || resolved === '') return '--';
+  if (typeof resolved === 'string' && Number.isNaN(Number(resolved))) {
+    return `${resolved}${metric.suffix || ''}`;
+  }
+  if (metric.digits === undefined) {
+    return `${text(resolved)}${metric.suffix || ''}`;
+  }
+  return fmt(resolved, metric.digits, metric.suffix || '');
+}
+
+function renderColumnValue(column, item, displayIndex) {
+  const raw = column.key === 'index' ? displayIndex : (column.kind === 'thumb' ? null : getValueByPath(item, column.path || column.key));
+  if (column.kind === 'index') return escapeHtml(displayIndex);
+  if (column.kind === 'pill') {
+    if (column.key === 'status') return `<span class="status-pill ${escapeHtml(text(raw, '-'))}">${escapeHtml(waypointStatusLabel(text(raw, '-')))}</span>`;
+    if (column.key === 'result') return `<span class="result-pill ${escapeHtml(String(text(raw, '-')).toLowerCase())}">${escapeHtml(text(raw, '-'))}</span>`;
+    return `<span>${escapeHtml(text(raw, '-'))}</span>`;
+  }
+  if (column.kind === 'bool') return escapeHtml(raw === false ? 'no' : (raw === true ? 'OK' : '--'));
+  if (column.kind === 'thumb') {
+    const row = item.sample_row_index || item.row_index || item.index;
+    const src = item.thumbnail_url || (state.selectedSession && row ? `/api/sessions/${encodeURIComponent(state.selectedSession)}/sample-image/${row}.jpg?mode=raw&axes=false` : "");
+    if (item.has_image && src) {
+      return `<button class="thumb-button" type="button" data-row="${row}"><img class="thumb-image" data-src="${src}" alt="sample ${row}" loading="lazy" decoding="async" /></button>`;
+    }
+    return '-';
+  }
+  if (raw === null || raw === undefined || raw === '') return '--';
+  if (typeof raw === 'string' && Number.isNaN(Number(raw))) return escapeHtml(raw);
+  if (column.digits === undefined) return escapeHtml(text(raw));
+  return escapeHtml(fmt(raw, column.digits, column.suffix || ''));
+}
+
+function renderTableHeader() {
+  const schema = activeSchema();
+  els.waypointHead.innerHTML = `<tr>${schema.tableColumns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join('')}</tr>`;
+}
+
+function renderWaypointCells(item, index) {
+  const schema = activeSchema();
+  return schema.tableColumns.map((column) => `<td>${renderColumnValue(column, item, index)}</td>`).join('');
+}
+
+function renderDetailCards(source) {
+  const schema = activeSchema();
+  return schema.previewFields.map((field) => `<div class="kv"><span>${escapeHtml(field.label)}</span><strong>${escapeHtml(renderMetricValue(field, source))}</strong></div>`).join('');
+}
 
 function fmt(value, digits = 2, suffix = "") {
   if (value === null || value === undefined || value === "" || Number.isNaN(Number(value))) {
@@ -139,6 +318,10 @@ function clearLiveImageObjectUrl() {
     URL.revokeObjectURL(state.liveImageObjectUrl);
     state.liveImageObjectUrl = "";
   }
+  if (state.liveImagePendingUrl) {
+    URL.revokeObjectURL(state.liveImagePendingUrl);
+    state.liveImagePendingUrl = "";
+  }
 }
 
 function showLivePlaceholder(message) {
@@ -158,7 +341,31 @@ function markLiveImageFrameReceived() {
 
 function refreshLiveImageHttp(force = false) {
   if (state.imageWsConnected && !force) return;
+  state.liveImageLoading = false;
   els.liveImage.src = `/api/image/latest.jpg?mode=raw&axes=false&t=${Date.now()}`;
+}
+
+function displayLiveImageUrl(nextUrl) {
+  if (state.liveImageLoading) {
+    if (state.liveImagePendingUrl) URL.revokeObjectURL(state.liveImagePendingUrl);
+    state.liveImagePendingUrl = nextUrl;
+    return;
+  }
+  const previousUrl = state.liveImageObjectUrl;
+  state.liveImageObjectUrl = nextUrl;
+  state.liveImageLoading = true;
+  els.liveImage.src = nextUrl;
+  if (previousUrl) {
+    window.setTimeout(() => URL.revokeObjectURL(previousUrl), 0);
+  }
+}
+
+function flushPendingLiveImage() {
+  state.liveImageLoading = false;
+  if (!state.liveImagePendingUrl) return;
+  const nextUrl = state.liveImagePendingUrl;
+  state.liveImagePendingUrl = "";
+  displayLiveImageUrl(nextUrl);
 }
 
 function startLiveImageFallback() {
@@ -241,13 +448,8 @@ function connectLiveImageStream() {
     if (!(payload instanceof ArrayBuffer)) return;
     const blob = new Blob([payload], { type: "image/jpeg" });
     const nextUrl = URL.createObjectURL(blob);
-    const previousUrl = state.liveImageObjectUrl;
-    state.liveImageObjectUrl = nextUrl;
-    els.liveImage.src = nextUrl;
+    displayLiveImageUrl(nextUrl);
     markLiveImageFrameReceived();
-    if (previousUrl) {
-      window.setTimeout(() => URL.revokeObjectURL(previousUrl), 0);
-    }
   });
   socket.addEventListener("error", () => {
     // error is followed by close; handled there.
@@ -271,6 +473,11 @@ async function refreshStatus() {
   const current = handeye.current_waypoint || {};
   const session = handeye.session || {};
   const motion = handeye.motion || {};
+  const observationMode = handeye.observation_mode || workflow.observation_mode || current.observation_mode || state.observationMode || 'rgb_pnp';
+  state.observationMode = observationMode;
+  state.qualitySchema = QUALITY_SCHEMAS[observationMode] || QUALITY_SCHEMAS.rgb_pnp;
+  renderTableHeader();
+  setModeToggleActive(state.observationMode);
   if (handeye.trajectory_dirty !== null && handeye.trajectory_dirty !== undefined) {
     state.waypointsDirty = Boolean(handeye.trajectory_dirty);
   }
@@ -282,14 +489,26 @@ async function refreshStatus() {
   setChip(els.motionChip, motionLabel, motionTone);
   const runBtn = document.getElementById("run-btn");
   const dryRunBtn = document.getElementById("dry-run-btn");
+  const stopBtn = document.getElementById("stop-btn");
+  const runActive = Boolean(handeye.run_active);
   if (handeye.execute_motion) {
-    runBtn.textContent = "▶ 开始标定（真机）";
+    runBtn.textContent = "开始标定（真机）";
     runBtn.title = "机械臂将真实运动！确认工作空间安全后操作。";
     dryRunBtn.style.display = "none";
   } else {
-    runBtn.textContent = "▶ 开始标定";
+    runBtn.textContent = "开始标定";
     runBtn.title = "当前为 dry-run 模式，机械臂不会真实运动。";
     dryRunBtn.style.display = "";
+  }
+  if (runActive) {
+    els.trajectoryControls?.classList.add("hidden");
+    dryRunBtn.style.display = "none";
+    runBtn.style.display = "none";
+    stopBtn.style.display = "";
+  } else {
+    els.trajectoryControls?.classList.remove("hidden");
+    runBtn.style.display = "";
+    stopBtn.style.display = "none";
   }
   if (!handeye.motion_state_known && handeye.calibration_node_connected) {
     setChip(els.motionChip, "运动状态未知 — 请确认", "warn");
@@ -317,7 +536,7 @@ async function refreshStatus() {
   } else {
     els.boardAngle.textContent = "--";
   }
-  renderQualityMetrics(current);
+  renderQualityMetrics(current.quality_payload || current.sample_quality || current.record_quality || current);
   if (session.session_id && handeye.run_active && !state.userSelectedSession && state.selectedSession !== session.session_id) {
     state.selectedSession = session.session_id;
     state.autoSelectedSession = true;
@@ -351,17 +570,22 @@ async function refreshStatus() {
 }
 
 function renderQualityMetrics(quality = {}) {
-  const t = quality.camera_to_board_translation_m || [];
-  const thresholds = quality.thresholds || {};
-  const detected = quality.quality_detected ?? quality.detected;
-  const metrics = [
-    { label: "检测", value: detected === true ? "ok" : (detected === false ? "no" : "--"), tone: detected === false ? "warn" : "" },
-    { label: "重投影 px", value: fmt(quality.reprojection_error_px, 3), tone: thresholds.reprojection_ok === false ? "bad" : "" },
-    { label: "边距 px", value: fmt(quality.board_margin_px, 1), tone: thresholds.margin_ok === false ? "bad" : "" },
-    { label: "Z m", value: fmt(t[2], 3), tone: "" },
-    { label: "棋盘角度", value: fmt(quality.board_angle_deg, 2, " deg"), tone: "" },
-  ];
-  els.qualityMetrics.innerHTML = metrics.map((item) => `<div class="metric ${item.tone}"><span>${item.label}</span><strong>${item.value}</strong></div>`).join("");
+  const schema = activeSchema();
+  const metrics = (schema.liveMetrics || []).map((metric) => {
+    const value = renderMetricValue(metric, quality);
+    let tone = metric.tone || '';
+    const threshold = metric.threshold;
+    if (typeof threshold === 'number') {
+      const numeric = Number(getValueByPath(quality, metric.path || metric.key));
+      if (Number.isFinite(numeric) && numeric > threshold) tone = 'bad';
+    }
+    if (metric.key === 'detected') {
+      const detected = getValueByPath(quality, 'detected');
+      tone = detected === false ? 'warn' : '';
+    }
+    return { label: metric.label, value, tone };
+  });
+  els.qualityMetrics.innerHTML = metrics.map((item) => `<div class="metric ${item.tone}"><span>${escapeHtml(item.label)}</span><strong>${escapeHtml(item.value)}</strong></div>`).join('');
 }
 
 async function refreshSessions() {
@@ -372,6 +596,8 @@ async function refreshSessions() {
     state.selectedSession = "";
     state.autoSelectedSession = false;
     state.userSelectedSession = false;
+    state.currentTrajectorySelected = true;
+    state.selectionVersion += 1;
   }
   const handeye = (state.status && state.status.handeye) || {};
   const latestReportSession = sessions.find((session) => session.has_solution || (session.has_report && !session.is_invalid));
@@ -380,34 +606,40 @@ async function refreshSessions() {
     state.autoSelectedSession = true;
     state.selectedWaypointName = "";
     state.selectedSampleRow = null;
+    state.selectionVersion += 1;
   }
-  const options = ['<option value="">当前示教轨迹</option>'];
+  const options = ['<option value="">\u5f53\u524d\u5c06\u8fd0\u884c\u7684\u8f68\u8ff9</option>'];
   options.push(...sessions.map((session) => {
-    const label = `${session.id} (${session.sample_count || 0})${session.has_solution ? "" : session.has_report ? " unsolved" : " no report"}`;
+    const suffix = session.has_solution ? "" : session.has_report ? " / unsolved" : " / no report";
+    const label = `\u5386\u53f2 session ${session.id} (${session.sample_count || 0})${suffix}`;
     return `<option value="${escapeHtml(session.id)}">${escapeHtml(label)}</option>`;
   }));
   els.sessionSelect.innerHTML = options.join("");
   els.sessionSelect.value = state.selectedSession || "";
+  updateLoadSessionTrajectoryButton();
 }
-
 async function refreshReport() {
-  if (!state.selectedSession) {
-    renderEmptyReport("暂无 session");
+  const sessionId = state.selectedSession || "";
+  const selectionVersion = state.selectionVersion;
+  if (!sessionId) {
+    renderEmptyReport("\u6682\u65e0 session");
     return;
   }
-  const report = await getJson(`/api/sessions/${encodeURIComponent(state.selectedSession)}/report`, {});
+  const report = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/report`, {});
+  if (state.selectionVersion !== selectionVersion || state.selectedSession !== sessionId) return;
   if (!report.has_report) {
-    renderEmptyReport(report.empty_reason || "该 session 暂无 report.yaml。");
+    renderEmptyReport(report.empty_reason || "\u8be5 session \u6682\u65e0 report.yaml\u3002");
     return;
   }
-  els.reportPath.textContent = report.report_path || `calibration_sessions/${state.selectedSession}/report.yaml`;
+  els.reportPath.textContent = report.report_path || `calibration_sessions/${sessionId}/report.yaml`;
   els.sampleCount.textContent = report.sample_count ?? "--";
   els.acceptedCount.textContent = report.accepted_count ?? "--";
   els.skippedCount.textContent = report.skipped_count ?? "--";
+  els.failedCount.textContent = report.failed_count ?? "--";
   els.pendingCount.textContent = report.pending_count ?? "--";
   if (!report.has_solution) {
     const message = report.is_invalid
-      ? (report.empty_reason || report.report_error || "该 session 无效。")
+      ? (report.empty_reason || report.report_error || "\u8be5 session \u65e0\u6548\u3002")
       : "report.yaml exists, but this session has not produced a solved calibration result yet.";
     els.residualGrid.innerHTML = `<div class="empty-card">${escapeHtml(message)}</div>`;
     els.residualBars.innerHTML = "";
@@ -428,12 +660,12 @@ async function refreshReport() {
     return `<div class="bar-row" title="${escapeHtml(row.target_note || "")}"><span>${escapeHtml(row.label)}</span><div class="bar-track"><div class="bar-fill ${tone}" style="width:${pct}%"></div></div><strong>${fmt(row.value, 2, ` ${row.unit}`)}</strong></div>`;
   }).join("");
 }
-
 function renderEmptyReport(message) {
   els.reportPath.textContent = message;
   els.sampleCount.textContent = "--";
   els.acceptedCount.textContent = "--";
   els.skippedCount.textContent = "--";
+  els.failedCount.textContent = "--";
   els.pendingCount.textContent = "--";
   els.residualGrid.innerHTML = "";
   els.residualBars.innerHTML = "";
@@ -446,23 +678,42 @@ function renderWaypointLoadError(message) {
   els.waypointBody.innerHTML = `<tr class="empty-row"><td colspan="12">${escapeHtml(error)}</td></tr>`;
   state.selectedWaypointName = "";
   state.selectedSampleRow = null;
+  updateDeleteButtonState();
   renderPreview(null);
   els.previewEmpty.textContent = error;
 }
 
+function clearWaypointView(message = "正在加载 waypoints...") {
+  clearThumbnailObserver();
+  state.waypoints = [];
+  state.selectedWaypointName = "";
+  state.selectedSampleRow = null;
+  els.waypointStats.textContent = "加载中";
+  els.tableFooter.textContent = message;
+  const colspan = (activeSchema().tableColumns || []).length || 12;
+  els.waypointBody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">${escapeHtml(message)}</td></tr>`;
+  updateDeleteButtonState();
+  renderPreview(null);
+}
+
 async function refreshWaypoints() {
+  const sessionId = state.selectedSession || "";
+  const selectionVersion = state.selectionVersion;
   let waypoints = [];
-  state.waypointsDirty = false;
-  state.trajectoryLoadError = "";
-  if (state.selectedSession) {
-    waypoints = await getJson(`/api/sessions/${encodeURIComponent(state.selectedSession)}/waypoints`, []);
+  let trajectoryLoadError = "";
+  if (sessionId) {
+    waypoints = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/waypoints`, []);
+    if (state.selectionVersion !== selectionVersion || state.selectedSession !== sessionId) return;
+    state.waypointsDirty = false;
+    state.trajectoryLoadError = "";
     const sessionRoot = text(state.status?.handeye?.session_root_path, "calibration_sessions").replace(/[\\/]+$/, "");
-    els.trajectoryPath.textContent = `${sessionRoot}/${state.selectedSession}/trajectory_used.yaml`;
+    els.trajectoryPath.textContent = `${sessionRoot}/${sessionId}/trajectory_used.yaml`;
   } else {
     const trajectory = await getJson("/api/handeye/waypoints", { waypoints: [] });
+    if (state.selectionVersion !== selectionVersion || state.selectedSession !== sessionId) return;
     state.waypointsDirty = Boolean(trajectory.dirty);
     if (trajectory.error) {
-      state.trajectoryLoadError = trajectory.error;
+      trajectoryLoadError = trajectory.error;
       if (trajectory.trajectory_path) els.trajectoryPath.textContent = trajectory.trajectory_path;
       waypoints = [];
     } else {
@@ -484,63 +735,104 @@ async function refreshWaypoints() {
         has_image: waypoint.has_image || false,
         sample_row_index: waypoint.sample_row_index || null,
         thumbnail_url: waypoint.thumbnail_url || null,
+        observation_mode: waypoint.observation_mode || state.observationMode,
+        quality_payload: waypoint.quality_payload || waypoint.record_quality || {},
       }));
       if (trajectory.trajectory_path) els.trajectoryPath.textContent = trajectory.trajectory_path;
     }
+    state.trajectoryLoadError = trajectoryLoadError;
   }
   state.waypoints = Array.isArray(waypoints) ? waypoints : [];
-  if (state.trajectoryLoadError && !state.selectedSession) {
+  if (state.trajectoryLoadError && !sessionId) {
     renderWaypointLoadError(state.trajectoryLoadError);
     return;
   }
   const accepted = state.waypoints.filter((item) => item.status === "accepted").length;
   const skipped = state.waypoints.filter((item) => item.status === "skipped").length;
+  const failed = state.waypoints.filter((item) => item.status === "failed").length;
+  const running = state.waypoints.filter((item) => item.status === "running").length;
   const pending = state.waypoints.filter((item) => item.status === "pending").length;
-  els.waypointStats.textContent = `共 ${state.waypoints.length} 个点`;
-  els.tableFooter.textContent = `已接受 ${accepted}　跳过 ${skipped}　待采集 ${pending}`;
+  els.waypointStats.textContent = `\u5171 ${state.waypoints.length} \u4e2a\u70b9`;
+  els.tableFooter.textContent = `\u5df2\u63a5\u53d7 ${accepted}\u3000\u8df3\u8fc7 ${skipped}\u3000\u5931\u8d25 ${failed}\u3000\u8fdb\u884c\u4e2d ${running}\u3000\u5f85\u91c7\u96c6 ${pending}`;
   els.waypointBody.innerHTML = state.waypoints.map(renderWaypointRow).join("");
   hydrateWaypointThumbnails();
   if (!state.waypoints.length) {
     state.selectedWaypointName = "";
     state.selectedSampleRow = null;
     renderPreview(null);
-  } else if (!state.selectedWaypointName && state.waypoints.length) {
+  } else if (!state.waypoints.some((item) => item.name === state.selectedWaypointName)) {
     selectWaypoint(state.waypoints.find((item) => item.has_image) || state.waypoints[0]);
   } else {
     markSelectedRow();
+    updateDeleteButtonState();
   }
 }
-
 function renderWaypointRow(item, index) {
   const waypoint = item.waypoint || item;
   const status = item.status || "pending";
-  const thresholds = item.thresholds || {};
-  const t = item.camera_to_board_translation_m || [];
   const displayIndex = item.index ?? item.display_index ?? index + 1;
-  const reprojClass = thresholds.reprojection_ok === false ? "quality-bad" : "";
-  const marginClass = thresholds.margin_ok === false ? "quality-bad" : "";
-  const transResid = item.translation_residual_mm;
-  const rotResid = item.rotation_residual_deg;
-  const transResidClass = transResid !== null && transResid !== undefined && transResid > 10 ? "quality-bad" : (transResid !== null && transResid !== undefined && transResid > 5 ? "quality-warn" : "");
-  const rotResidClass = rotResid !== null && rotResid !== undefined && rotResid > 2 ? "quality-bad" : (rotResid !== null && rotResid !== undefined && rotResid > 1 ? "quality-warn" : "");
-  const thumb = item.has_image && item.sample_row_index
-    ? `<button class="thumb-button" type="button" data-row="${item.sample_row_index}"><img class="thumb-image" data-src="/api/sessions/${encodeURIComponent(state.selectedSession)}/sample-image/${item.sample_row_index}.jpg?mode=raw&axes=false" alt="sample ${item.sample_row_index}" loading="lazy" decoding="async" /></button>`
-    : "-";
-  return `
-    <tr data-name="${escapeHtml(item.name || waypoint.name || "")}" data-row="${item.sample_row_index || ""}">
-      <td>${escapeHtml(displayIndex)}</td>
-      <td title="${escapeHtml(item.name || waypoint.name || "")}">${escapeHtml(item.name || waypoint.name || "--")}</td>
-      <td><span class="status-pill ${escapeHtml(status)}">${escapeHtml(status)}</span></td>
-      <td><span class="result-pill ${escapeHtml(String(item.result || "-").toLowerCase())}">${escapeHtml(item.result || "-")}</span></td>
-      <td class="${reprojClass}">${fmt(item.reprojection_error_px, 3)}</td>
-      <td class="${marginClass}">${fmt(item.board_margin_px, 1)}</td>
-      <td>${fmt(t[2], 3)}</td>
-      <td class="${transResidClass}">${fmt(transResid, 3)}</td>
-      <td class="${rotResidClass}">${fmt(rotResid, 4)}</td>
-      <td>${item.capture === false ? "no" : "OK"}</td>
-      <td title="${escapeHtml(item.reason_display || item.reason || "")}">${escapeHtml(item.reason_display || item.reason || "-")}</td>
-      <td>${thumb}</td>
-    </tr>`;
+  const rowClass = status === 'accepted' ? 'quality-good' : status === 'skipped' ? 'quality-warn' : status === 'failed' ? 'quality-bad' : '';
+  return `<tr data-name="${escapeHtml(item.name || waypoint.name || '')}" data-row="${item.sample_row_index || ''}" class="${rowClass}">${renderWaypointCells(item, displayIndex)}</tr>`;
+}
+
+function selectWaypoint(item) {
+  if (!item) return;
+  state.selectedWaypointName = item.name || item.waypoint?.name || '';
+  state.selectedSampleRow = item.sample_row_index || null;
+  markSelectedRow();
+  renderPreview(item);
+}
+
+function markSelectedRow() {
+  [...els.waypointBody.querySelectorAll('tr')].forEach((row) => {
+    row.classList.toggle('selected', row.dataset.name === state.selectedWaypointName);
+  });
+}
+
+function renderPreview(item) {
+  if (!item) {
+    els.previewTitle.textContent = '样本预览';
+    els.previewSubtitle.textContent = '选择 waypoint 查看图像和质量指标';
+    els.samplePreview.removeAttribute('src');
+    els.samplePreview.style.display = 'none';
+    els.previewEmpty.classList.remove('hidden');
+    els.previewEmpty.textContent = '当前没有 waypoint';
+    els.previewDetails.innerHTML = '';
+    return;
+  }
+  const name = item.name || item.waypoint?.name || '未命名';
+  els.previewTitle.textContent = `${name} 预览`;
+  const rowIndex = item.sample_row_index || item.row_index;
+  els.previewSubtitle.textContent = item.status ? `${waypointStatusLabel(item.status)} / ${item.result || '-'}` : '选择 waypoint 查看图像和质量指标';
+  const schema = activeSchema();
+  const source = { ...item, quality_payload: item.quality_payload || item.sample_quality || item.record_quality || {} };
+  if (state.previewMode === 'raw') {
+    els.previewDetails.innerHTML = '';
+    if (state.selectedSession && rowIndex && item.has_image) {
+      els.previewEmpty.classList.add('hidden');
+      els.samplePreview.style.display = 'block';
+      els.samplePreview.src = `/api/sessions/${encodeURIComponent(state.selectedSession)}/sample-image/${rowIndex}.jpg?mode=raw&axes=false`;
+    } else {
+      els.samplePreview.removeAttribute('src');
+      els.samplePreview.style.display = 'none';
+      els.previewEmpty.classList.remove('hidden');
+      els.previewEmpty.textContent = item.reason_display || '该 waypoint 暂无预览图像';
+    }
+    return;
+  }
+  els.samplePreview.removeAttribute('src');
+  els.samplePreview.style.display = 'none';
+  els.previewEmpty.classList.add('hidden');
+  els.previewDetails.innerHTML = renderDetailCards(source);
+}
+
+function initPreviewErrorHandler() {
+  els.samplePreview.addEventListener('error', () => {
+    els.samplePreview.removeAttribute('src');
+    els.samplePreview.style.display = 'none';
+    els.previewEmpty.classList.remove('hidden');
+    els.previewEmpty.textContent = '图像加载失败，请刷新后重试';
+  });
 }
 
 function clearThumbnailObserver() {
@@ -585,6 +877,7 @@ function selectWaypoint(item) {
   state.selectedWaypointName = item.name || item.waypoint?.name || "";
   state.selectedSampleRow = item.sample_row_index || null;
   markSelectedRow();
+  updateDeleteButtonState();
   renderPreview(item);
 }
 
@@ -592,7 +885,29 @@ function markSelectedRow() {
   [...els.waypointBody.querySelectorAll("tr")].forEach((row) => {
     row.classList.toggle("selected", row.dataset.name === state.selectedWaypointName);
   });
+  updateDeleteButtonState();
 }
+
+function updateDeleteButtonState() {
+  if (!els.deleteBtn) return;
+  const selected = state.waypoints.find((item) => item.name === state.selectedWaypointName);
+  const canDelete = Boolean(!state.selectedSession && selected?.name);
+  els.deleteBtn.disabled = !canDelete;
+  els.deleteBtn.textContent = canDelete ? `\u5220\u9664\u9009\u4e2d ${selected.name}` : "\u5220\u9664\u9009\u4e2d";
+  els.deleteBtn.title = state.selectedSession ? "\u5386\u53f2 session \u4e0d\u5141\u8bb8\u5220\u9664 waypoint" : (canDelete ? `\u5220\u9664 ${selected.name}` : "\u5148\u5728\u5f53\u524d\u8f68\u8ff9\u5217\u8868\u4e2d\u9009\u62e9 waypoint");
+}
+
+function updateLoadSessionTrajectoryButton() {
+  if (!els.loadSessionTrajectoryBtn) return;
+  const sessionId = state.selectedSession || "";
+  const selected = state.sessions.find((session) => session.id === sessionId);
+  const canLoad = Boolean(sessionId && selected && !selected.trajectory_error);
+  els.loadSessionTrajectoryBtn.disabled = !canLoad;
+  els.loadSessionTrajectoryBtn.title = canLoad
+    ? `\u5c06 session ${sessionId} \u7684 trajectory_used.yaml \u8f7d\u5165\u4e3a\u5f53\u524d\u5c06\u8fd0\u884c\u7684\u8f68\u8ff9`
+    : "\u5148\u9009\u62e9\u4e00\u4e2a\u5305\u542b trajectory_used.yaml \u7684\u5386\u53f2 session";
+}
+
 
 function renderPreview(item) {
   if (!item) {
@@ -608,7 +923,7 @@ function renderPreview(item) {
   const name = item.name || item.waypoint?.name || "样本预览";
   els.previewTitle.textContent = `${name} 预览`;
   const rowIndex = item.sample_row_index;
-  els.previewSubtitle.textContent = item.status ? `${item.status} / ${item.result || "-"}` : "选择 waypoint 查看图像和质量指标";
+  els.previewSubtitle.textContent = item.status ? `${waypointStatusLabel(item.status)} / ${item.result || "-"}` : "选择 waypoint 查看图像和质量指标";
   const t = item.camera_to_board_translation_m || [];
   const r = item.camera_to_board_rotation_rpy_deg || [];
   if (state.previewMode === "raw") {
@@ -616,7 +931,7 @@ function renderPreview(item) {
     if (state.selectedSession && rowIndex && item.has_image) {
       els.previewEmpty.classList.add("hidden");
       els.samplePreview.style.display = "block";
-      els.samplePreview.src = `/api/sessions/${encodeURIComponent(state.selectedSession)}/sample-image/${rowIndex}.jpg?mode=raw&axes=false`;
+      els.samplePreview.src = item.thumbnail_url || `/api/sessions/${encodeURIComponent(state.selectedSession)}/sample-image/${rowIndex}.jpg?mode=raw&axes=false`;
     } else {
       els.samplePreview.removeAttribute("src");
       els.samplePreview.style.display = "none";
@@ -722,11 +1037,41 @@ function normalizeWorkflowStage(stage) {
 }
 
 async function refreshAll() {
-  await refreshStatus();
-  await refreshSessions();
-  await refreshReport();
-  await refreshWaypoints();
+  if (state.refreshInFlight) return state.refreshInFlight;
+  state.refreshInFlight = (async () => {
+    await refreshStatus();
+    await refreshSessions();
+    await refreshReport();
+    await refreshWaypoints();
+  })();
+  try {
+    await state.refreshInFlight;
+  } finally {
+    state.refreshInFlight = null;
+  }
 }
+
+function scheduleFullRefresh(reason = "refresh") {
+  if (state.fullRefreshTimer) window.clearTimeout(state.fullRefreshTimer);
+  state.fullRefreshTimer = window.setTimeout(() => {
+    state.fullRefreshTimer = null;
+    refreshAll();
+  }, 80);
+}
+
+function isTerminalStatusEvent(event) {
+  const payload = event?.payload || {};
+  const status = payload.status || event?.status || event?.result?.status || "";
+  return [
+    "solved",
+    "semi_auto_finished",
+    "semi_auto_finished_with_skips",
+    "semi_auto_stopped",
+    "semi_auto_failed",
+    "semi_auto_insufficient_samples",
+  ].includes(String(status));
+}
+
 
 async function runCommand(label, url, body = {}) {
   try {
@@ -745,6 +1090,19 @@ async function runCommand(label, url, body = {}) {
   }
 }
 
+async function deleteSelectedWaypoint() {
+  const selected = state.waypoints.find((item) => item.name === state.selectedWaypointName);
+  if (state.selectedSession) {
+    setNotice("历史 session 不允许删除 waypoint。", "bad");
+    return;
+  }
+  if (!selected?.name) {
+    setNotice("请先选择要删除的 waypoint。", "bad");
+    return;
+  }
+  await runCommand("删除选中", "/api/handeye/delete_waypoint", { waypoint_name: selected.name });
+}
+
 async function saveTrajectoryIfDirty() {
   const dirty = Boolean(state.waypointsDirty || state.status?.handeye?.trajectory_dirty);
   if (!dirty) return true;
@@ -752,6 +1110,49 @@ async function saveTrajectoryIfDirty() {
   const result = await runCommand("保存轨迹", "/api/handeye/save_trajectory");
   return Boolean(result?.success);
 }
+
+async function loadSelectedSessionTrajectory() {
+  const sessionId = state.selectedSession || "";
+  if (!sessionId) {
+    setNotice("\u8bf7\u5148\u9009\u62e9\u4e00\u4e2a\u5386\u53f2 session\u3002", "bad");
+    return;
+  }
+  const confirmed = window.confirm(
+    [
+      `\u5c06\u628a session ${sessionId} \u7684 waypoints \u8f7d\u5165\u4e3a\u5f53\u524d\u5c06\u8fd0\u884c\u7684\u8f68\u8ff9\u3002`,
+      "\u4e0b\u4e00\u6b21\u5f00\u59cb\u6807\u5b9a\u4f1a\u6267\u884c\u8fd9\u7ec4\u70b9\u3002",
+      "\u5386\u53f2 session \u672c\u8eab\u4e0d\u4f1a\u88ab\u4fee\u6539\u3002",
+    ].join("\n")
+  );
+  if (!confirmed) return;
+  const result = await runCommand("\u8f7d\u5165\u4e3a\u5f53\u524d\u8f68\u8ff9", `/api/sessions/${encodeURIComponent(sessionId)}/load_trajectory`);
+  if (!result?.success) return;
+  state.selectedSession = "";
+  state.userSelectedSession = false;
+  state.currentTrajectorySelected = true;
+  state.autoSelectedSession = false;
+  state.selectedWaypointName = "";
+  state.selectedSampleRow = null;
+  state.selectionVersion += 1;
+  setNotice(result.operator_message || `\u5df2\u8f7d\u5165 session ${sessionId} \u7684 ${result.waypoint_count || ""} \u4e2a waypoints\u3002`, "good");
+  await refreshAll();
+}
+
+async function newTrajectory() {
+  const confirmed = window.confirm("新建轨迹会清空当前将运行的 waypoints，并删除 current 轨迹文件；历史 sessions 不会被删除。");
+  if (!confirmed) return;
+  clearWaypointView("正在新建空轨迹...");
+  const result = await runCommand("新建轨迹", "/api/handeye/new_trajectory");
+  if (result?.success) {
+    state.selectedSession = "";
+    state.userSelectedSession = false;
+    state.currentTrajectorySelected = true;
+    state.autoSelectedSession = false;
+    state.selectionVersion += 1;
+  }
+  await refreshAll();
+}
+
 
 function addEvent(event) {
   const key = event.dedupe_key || `${event.type}:${event.operator_message || event.message || ""}`;
@@ -783,12 +1184,13 @@ function showCompletionDialog(handeye, report) {
   const sampleCount = report?.sample_count ?? workflow.sample_count ?? "--";
   const accepted = report?.accepted_count ?? "--";
   const skipped = report?.skipped_count ?? "--";
+  const failed = report?.failed_count ?? "--";
   const isSuccess = stage === "finished";
   const title = isSuccess ? "标定完成" : "标定异常";
   const body = [
     `<div class="kv"><span>状态</span><strong>${escapeHtml(workflow.label || stage)}</strong></div>`,
     `<div class="kv"><span>采集样本数</span><strong>${sampleCount}</strong></div>`,
-    `<div class="kv"><span>已接受 / 已跳过</span><strong>${accepted} / ${skipped}</strong></div>`,
+    `<div class="kv"><span>已接受 / 已跳过 / 失败</span><strong>${accepted} / ${skipped} / ${failed}</strong></div>`,
     `<div class="kv"><span>报告路径</span><strong>${escapeHtml(reportPath || "暂无")}</strong></div>`,
     `<div class="kv"><span>extrinsics 写入</span><strong>${report?.has_solution ? "已写入" : "未写入"}</strong></div>`,
     `<div class="kv"><span>session ID</span><strong>${escapeHtml(session.session_id || "--")}</strong></div>`,
@@ -808,9 +1210,13 @@ async function pollEvents() {
   const events = payload.events || [];
   events.forEach(addEvent);
   if (events.some((event) => event.type === "eye_to_hand_status" || event.type === "ui_command_result")) {
-    refreshStatus();
-    refreshWaypoints();
-    refreshReport();
+    if (events.some(isTerminalStatusEvent)) {
+      scheduleFullRefresh("terminal-poll-event");
+    } else {
+      refreshStatus();
+      refreshWaypoints();
+      refreshReport();
+    }
   }
 }
 
@@ -830,6 +1236,7 @@ function connectEvents() {
     state.wsConnected = true;
     state.eventReconnectDelay = 5000;
     els.eventMode.textContent = "WebSocket connected";
+    scheduleFullRefresh("events-ws-open");
   });
   socket.addEventListener("message", (event) => {
     try {
@@ -837,9 +1244,13 @@ function connectEvents() {
       state.lastEventId = Math.max(state.lastEventId, Number(payload.id || 0));
       addEvent(payload);
       if (payload.type === "eye_to_hand_status" || payload.type === "ui_command_result") {
-        refreshStatus();
-        refreshWaypoints();
-        refreshReport();
+        if (isTerminalStatusEvent(payload)) {
+          scheduleFullRefresh("terminal-ws-event");
+        } else {
+          refreshStatus();
+          refreshWaypoints();
+          refreshReport();
+        }
       }
     } catch (parseError) {
       // ignore malformed messages
@@ -856,9 +1267,28 @@ function connectEvents() {
 }
 
 function bindUi() {
-  els.liveImage.addEventListener("load", hideLivePlaceholder);
+  els.liveImage.addEventListener("load", () => {
+    hideLivePlaceholder();
+    flushPendingLiveImage();
+  });
   els.liveImage.addEventListener("error", () => {
+    state.liveImageLoading = false;
     showLivePlaceholder(state.imageWsConnected ? "图像加载失败" : "等待相机图像");
+    flushPendingLiveImage();
+  });
+  document.querySelectorAll('[data-observation-mode]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const mode = button.dataset.observationMode;
+      if (!mode || mode === state.observationMode) return;
+      setNotice(`正在切换观测模式到 ${mode}...`);
+      const result = await runCommand('切换观测模式', '/api/handeye/observation-mode', { mode });
+      if (result?.success) {
+        state.observationMode = result.observation_mode || result.mode || mode;
+        setModeToggleActive(state.observationMode);
+        renderTableHeader();
+        refreshWaypoints();
+      }
+    });
   });
   document.querySelectorAll("[data-preview-mode]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -869,7 +1299,11 @@ function bindUi() {
     });
   });
   document.getElementById("record-btn").addEventListener("click", () => runCommand("记录当前点", "/api/handeye/record_waypoint"));
-  document.getElementById("delete-btn").addEventListener("click", () => runCommand("删除上一个", "/api/handeye/delete_last_waypoint"));
+  els.deleteBtn.addEventListener("click", deleteSelectedWaypoint);
+  els.newTrajectoryBtn?.addEventListener("click", newTrajectory);
+  els.loadSessionTrajectoryBtn?.addEventListener("click", loadSelectedSessionTrajectory);
+  updateDeleteButtonState();
+  updateLoadSessionTrajectoryButton();
   document.getElementById("save-trajectory-btn").addEventListener("click", () => runCommand("保存轨迹", "/api/handeye/save_trajectory"));
   document.getElementById("dry-run-btn").addEventListener("click", async () => {
     const handeye = state.status?.handeye || {};
@@ -922,9 +1356,17 @@ function bindUi() {
     state.selectedSession = selectedSession;
     state.selectedWaypointName = "";
     state.selectedSampleRow = null;
+    state.selectionVersion += 1;
+    clearWaypointView(selectedSession ? "正在加载历史 session waypoints..." : "正在加载当前轨迹 waypoints...");
+    updateDeleteButtonState();
+    updateLoadSessionTrajectoryButton();
     refreshReport();
     refreshWaypoints();
   });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) scheduleFullRefresh("visible");
+  });
+  window.addEventListener("focus", () => scheduleFullRefresh("focus"));
   document.getElementById("modal-close").addEventListener("click", hideCompletionDialog);
   els.waypointBody.addEventListener("click", (event) => {
     const row = event.target.closest("tr");
@@ -936,6 +1378,7 @@ function bindUi() {
 
 bindUi();
 initPreviewErrorHandler();
+renderTableHeader();
 showLivePlaceholder("等待相机图像");
 refreshLiveImageHttp();
 connectLiveImageStream();

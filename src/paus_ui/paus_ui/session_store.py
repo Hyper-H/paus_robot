@@ -33,7 +33,7 @@ class SessionStore:
         if not self.session_root_path.exists():
             return []
         sessions: list[dict[str, Any]] = []
-        for path in sorted((item for item in self.session_root_path.iterdir() if item.is_dir()), reverse=True):
+        for session_id, path in self._session_entries():
             report_path = path / "report.yaml"
             samples_path = path / "samples.jsonl"
             report = self._read_yaml(report_path)
@@ -47,12 +47,13 @@ class SessionStore:
             has_solution = bool(report.get("base_to_camera") or report.get("residuals")) and not invalid_reason
             sessions.append(
                 {
-                    "id": path.name,
+                    "id": session_id,
                     "path": str(path),
                     "report_path": str(report_path),
                     "sample_count": counts["sample_count"],
                     "accepted_count": counts["accepted"],
                     "skipped_count": counts["skipped"],
+                    "failed_count": counts["failed"],
                     "pending_count": counts["pending"],
                     "has_report": has_report,
                     "has_solution": has_solution,
@@ -84,7 +85,9 @@ class SessionStore:
         samples = self._read_samples_without_report_fallback(session_path)
         events = self._read_jsonl(session_path / "run.log")
         counts = self._counts_for_session(path=session_path, report=report, samples=samples, events=events)
-        residuals = report.get("residuals", {}) if isinstance(report.get("residuals"), dict) else {}
+        raw_residuals = report.get("raw_residuals", {}) if isinstance(report.get("raw_residuals"), dict) else {}
+        corrected_residuals = report.get("corrected_residuals", {}) if isinstance(report.get("corrected_residuals"), dict) else {}
+        residuals = corrected_residuals or (report.get("residuals", {}) if isinstance(report.get("residuals"), dict) else {})
         report_error = report.get("error")
         trajectory_error = counts.get("trajectory_error")
         invalid_reason = report_error or trajectory_error
@@ -109,8 +112,11 @@ class SessionStore:
                 "sample_count": int(report.get("sample_count", counts["sample_count"]) or counts["sample_count"]),
                 "accepted_count": counts["accepted"],
                 "skipped_count": counts["skipped"],
+                "failed_count": counts["failed"],
                 "pending_count": counts["pending"],
                 "residuals": residuals,
+                "raw_residuals": raw_residuals,
+                "corrected_residuals": corrected_residuals,
                 "residual_comparison": self._residual_comparison(residuals),
                 "empty_reason": invalid_reason or (None if has_solution else ("report.yaml 存在，但该 session 尚未完成求解。" if has_report else "该 session 暂无 report.yaml。")),
             }
@@ -142,13 +148,15 @@ class SessionStore:
             sample["board_angle_deg"] = sample.get("board_angle_deg") if sample.get("board_angle_deg") is not None else _matrix_board_angle_deg(sample.get("camera_to_board_matrix"))
             sample["capture_time_s"] = sample.get("image_header_time_s") or sample.get("image_received_time_s")
             sample["thresholds"] = self._quality_flags(sample.get("reprojection_error_px"), sample.get("board_margin_px"))
+            sample["observation_mode"] = sample.get("observation_mode") or _sample_observation_mode(sample)
+            sample["quality_payload"] = sample.get("sample_quality") or sample.get("record_quality") or sample.get("quality")
         return samples
 
     def per_sample_residuals(self, session_id: str) -> list[dict[str, Any]]:
         session_path = self._session_path(session_id)
         report = self._read_yaml(session_path / "report.yaml")
         base_to_camera = report.get("base_to_camera")
-        tool_to_board_cfg = report.get("tool_to_board")
+        tool_to_board_cfg = report.get("estimated_tool_to_board") or report.get("tool_to_board")
         if not base_to_camera or not tool_to_board_cfg:
             return []
         if isinstance(base_to_camera, dict):
@@ -228,17 +236,33 @@ class SessionStore:
             )
 
         events = self.read_run_events(session_id)
+        active_waypoint_name: str | None = None
+        terminal_session_event: dict[str, Any] | None = None
+        session_terminal_events = {
+            "semi_auto_finished",
+            "semi_auto_dry_run_complete",
+            "semi_auto_stopped",
+            "semi_auto_failed",
+            "semi_auto_insufficient_samples",
+        }
         for event in events:
+            event_name = str(event.get("event", ""))
+            if event_name in session_terminal_events:
+                terminal_session_event = event
+                continue
             waypoint = event.get("waypoint")
             waypoint_name = event.get("waypoint_name")
             if isinstance(waypoint, dict):
                 waypoint_name = waypoint.get("name", waypoint_name)
+            if not waypoint_name and event_name == "sample_captured":
+                waypoint_name = active_waypoint_name
             if not waypoint_name:
                 continue
             name = str(waypoint_name)
-            event_name = str(event.get("event", ""))
             if event_name == "waypoint_deleted":
                 records.pop(name, None)
+                if active_waypoint_name == name:
+                    active_waypoint_name = None
                 continue
             record_quality = waypoint.get("record_quality") if isinstance(waypoint, dict) and isinstance(waypoint.get("record_quality"), dict) else {}
             record = records.setdefault(
@@ -269,13 +293,15 @@ class SessionStore:
                         name=name,
                         waypoint=record.get("waypoint", {"name": name}),
                         status="skipped",
-                        result="DRY" if event_name == "waypoint_dry_run_complete" else ("SKIP" if event_name == "waypoint_capture_disabled" else "FAIL"),
+                        result="DRY" if event_name == "waypoint_dry_run_complete" else "SKIP",
                         reason=reason,
-                        sample=None,
+                        sample=self._rejected_sample_from_event(event, session_path),
                         reprojection_error_px=event.get("reprojection_error_px", record.get("reprojection_error_px")),
                         board_margin_px=event.get("board_margin_px", record.get("board_margin_px")),
                     )
                 )
+                if active_waypoint_name == name:
+                    active_waypoint_name = None
             elif event_name in {"waypoint_sample_captured", "sample_captured"}:
                 try:
                     event_sample_index = int(event.get("sample_index"))
@@ -300,9 +326,87 @@ class SessionStore:
                         residuals=residuals,
                     )
                 )
+                if active_waypoint_name == name:
+                    active_waypoint_name = None
+            elif event_name in {"waypoint_failed", "waypoint_stopped"}:
+                reason = str(event.get("reason") or event.get("error") or event_name)
+                record.update(
+                    self._waypoint_record(
+                        session_id=session_id,
+                        display_index=record.get("index"),
+                        name=name,
+                        waypoint=record.get("waypoint", {"name": name}),
+                        status="failed",
+                        result="STOP" if event_name == "waypoint_stopped" else "FAIL",
+                        reason=reason,
+                        sample=self._rejected_sample_from_event(event, session_path),
+                        reprojection_error_px=event.get("reprojection_error_px", record.get("reprojection_error_px")),
+                        board_margin_px=event.get("board_margin_px", record.get("board_margin_px")),
+                    )
+                )
+                if active_waypoint_name == name:
+                    active_waypoint_name = None
             elif event_name in {"waypoint_motion_started", "waypoint_reached", "waypoint_capture_started"} and record.get("status") == "pending":
+                if active_waypoint_name and active_waypoint_name != name:
+                    previous = records.get(active_waypoint_name)
+                    if previous and previous.get("status") == "running":
+                        previous.update(
+                            self._waypoint_record(
+                                session_id=session_id,
+                                display_index=previous.get("index"),
+                                name=active_waypoint_name,
+                                waypoint=previous.get("waypoint", {"name": active_waypoint_name}),
+                                status="failed",
+                                result="FAIL",
+                                reason=f"missing terminal event before {name} started",
+                                sample=None,
+                                reprojection_error_px=previous.get("reprojection_error_px"),
+                                board_margin_px=previous.get("board_margin_px"),
+                            )
+                        )
+                active_waypoint_name = name
                 record["status"] = "running"
                 record["result"] = "..."
+
+        if terminal_session_event is not None:
+            terminal_name = str(terminal_session_event.get("event", "semi_auto_failed"))
+            terminal_reason = str(
+                terminal_session_event.get("error")
+                or terminal_session_event.get("reason")
+                or terminal_session_event.get("message")
+                or terminal_name
+            )
+            normalized_reason = terminal_reason.lower()
+            quality_rejection = terminal_name == "semi_auto_failed" and any(
+                token in normalized_reason
+                for token in (
+                    "samplerejectederror",
+                    "sample_quality_rejected",
+                    "chessboard_not_found",
+                    "chessboard_not_detected",
+                    "reprojection_error",
+                    "board_margin",
+                )
+            )
+            terminal_status = "skipped" if quality_rejection else "failed"
+            terminal_result = "SKIP" if quality_rejection else ("STOP" if terminal_name == "semi_auto_stopped" else "FAIL")
+            for name, record in records.items():
+                if record.get("status") != "running":
+                    continue
+                record.update(
+                    self._waypoint_record(
+                        session_id=session_id,
+                        display_index=record.get("index"),
+                        name=name,
+                        waypoint=record.get("waypoint", {"name": name}),
+                        status=terminal_status,
+                        result=terminal_result,
+                        reason=terminal_reason,
+                        sample=None,
+                        reprojection_error_px=record.get("reprojection_error_px"),
+                        board_margin_px=record.get("board_margin_px"),
+                    )
+                )
 
         if not events and samples and records:
             for record, sample in zip(records.values(), samples):
@@ -333,6 +437,113 @@ class SessionStore:
     def read_waypoints(self) -> dict[str, Any]:
         return self._read_waypoints_from_path(self.trajectory_path)
 
+    def load_session_trajectory(self, session_id: str) -> dict[str, Any]:
+        session_path = self._session_path(session_id)
+        source_path = self._trajectory_path_for_session(session_path)
+        source_label: str
+        if source_path is not None and source_path.exists():
+            try:
+                trajectory = load_trajectory(source_path)
+            except (TrajectoryValidationError, yaml.YAMLError, OSError, ValueError) as exc:
+                raise ValueError(f"Session trajectory is invalid: {exc}") from exc
+            payload = self._motion_only_trajectory_payload(trajectory.to_payload())
+            source_label = str(source_path)
+        else:
+            payload = self._motion_only_trajectory_payload(self._trajectory_payload_from_run_log(session_path))
+            if not payload["waypoints"]:
+                raise FileNotFoundError(f"Session has no trajectory_used.yaml or recorded waypoints: {session_id}")
+            source_label = str(session_path / "run.log")
+        self.trajectory_path.parent.mkdir(parents=True, exist_ok=True)
+        payload_text = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
+        self.trajectory_path.write_text(payload_text, encoding="utf-8")
+        return {
+            "session_id": session_id,
+            "source_trajectory_path": source_label,
+            "trajectory_path": str(self.trajectory_path),
+            "waypoint_count": len(payload["waypoints"]),
+            "operator_message": f"\u5df2\u8f7d\u5165 session {session_id} \u7684 {len(payload['waypoints'])} \u4e2a waypoints\u3002",
+        }
+
+    def _trajectory_payload_from_run_log(self, session_path: Path) -> dict[str, Any]:
+        waypoints: dict[str, dict[str, Any]] = {}
+        for event in self._read_jsonl(session_path / "run.log"):
+            event_name = str(event.get("event", ""))
+            waypoint = event.get("waypoint")
+            waypoint_name = event.get("waypoint_name")
+            if isinstance(waypoint, dict):
+                waypoint_name = waypoint.get("name", waypoint_name)
+            if not waypoint_name:
+                continue
+            name = str(waypoint_name)
+            if event_name == "waypoint_deleted":
+                waypoints.pop(name, None)
+                continue
+            if event_name != "waypoint_recorded" or not isinstance(waypoint, dict):
+                continue
+            candidate = dict(waypoint)
+            candidate["name"] = str(candidate.get("name", name))
+            waypoints[name] = candidate
+        return {
+            "version": 1,
+            "tool_id": 0,
+            "user_id": 0,
+            "defaults": {"motion": "movej", "vel": 10.0, "acc": 10.0, "dwell_s": 0.5},
+            "waypoints": list(waypoints.values()),
+        }
+
+    def _motion_only_trajectory_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        allowed_keys = {
+            "name",
+            "motion",
+            "joint_deg",
+            "expected_tcp_pose_mmdeg",
+            "vel",
+            "acc",
+            "dwell_s",
+            "capture",
+        }
+        shaped: dict[str, Any] = {
+            "version": int(payload.get("version", 1) or 1),
+            "tool_id": int(payload.get("tool_id", 0) or 0),
+            "user_id": int(payload.get("user_id", 0) or 0),
+            "defaults": payload.get("defaults", {"motion": "movej", "vel": 10.0, "acc": 10.0, "dwell_s": 0.5}),
+            "waypoints": [],
+        }
+        for waypoint in payload.get("waypoints", []):
+            if not isinstance(waypoint, dict):
+                continue
+            shaped["waypoints"].append({key: waypoint[key] for key in allowed_keys if key in waypoint})
+        return shaped
+
+    def _rejected_sample_from_event(self, event: dict[str, Any], session_path: Path) -> dict[str, Any] | None:
+        candidates: list[dict[str, Any]] = []
+        attempts = event.get("capture_attempts")
+        if isinstance(attempts, list):
+            candidates.extend(item for item in attempts if isinstance(item, dict))
+        candidates.append(event)
+        for candidate in reversed(candidates):
+            image_path_value = candidate.get("image_path")
+            if not image_path_value:
+                continue
+            image_path = Path(str(image_path_value))
+            if not image_path.is_absolute():
+                image_path = session_path / image_path
+            if not image_path.exists():
+                continue
+            quality = candidate.get("sample_quality") if isinstance(candidate.get("sample_quality"), dict) else {}
+            return {
+                "row_index": f"capture/{image_path.name}",
+                "image_path": str(image_path),
+                "has_image": True,
+                "sample_quality": quality,
+                "reprojection_error_px": candidate.get("reprojection_error_px", quality.get("reprojection_error_px")),
+                "board_margin_px": candidate.get("board_margin_px", quality.get("board_margin_px")),
+                "image_sequence": quality.get("image_sequence"),
+                "capture_time_s": quality.get("image_header_time_s"),
+                "observation_mode": _sample_observation_mode({"sample_quality": quality}),
+            }
+        return None
+
     def sample_image_path(self, session_id: str, row_index: int) -> Path | None:
         sample = self.sample_for_row(session_id, row_index)
         if sample is None:
@@ -344,6 +555,12 @@ class SessionStore:
                 return candidate
         fallback = self._session_path(session_id) / "images" / f"sample_{row_index:03d}.png"
         return fallback if fallback.exists() else None
+
+    def capture_image_path(self, session_id: str, image_name: str) -> Path | None:
+        if "/" in image_name or "\\" in image_name or image_name in {"", ".", ".."}:
+            raise ValueError(f"Invalid capture image name: {image_name!r}")
+        candidate = self._session_path(session_id) / "images" / image_name
+        return candidate if candidate.exists() and candidate.is_file() else None
 
     def _read_waypoints_from_path(self, path: Path | None) -> dict[str, Any]:
         if path is None:
@@ -389,8 +606,15 @@ class SessionStore:
         image_path = sample.get("image_path") if sample else None
         has_image = bool(sample and sample.get("has_image"))
         camera_to_board_translation_m = sample.get("camera_to_board_translation_m") if sample else None
+        quality_payload = sample.get("sample_quality") if sample else None
+        observation_mode = (sample.get("observation_mode") if sample else None) or _sample_observation_mode(sample or {})
         flags = self._quality_flags(reprojection_error_px, board_margin_px)
-        thumbnail_url = f"/api/sessions/{session_id}/sample-image/{row_index}.jpg?mode=overlay" if row_index and has_image else None
+        thumbnail_url = None
+        if row_index and has_image:
+            if isinstance(row_index, str) and row_index.startswith("capture/"):
+                thumbnail_url = f"/api/sessions/{session_id}/capture-image/{Path(row_index).name}.jpg"
+            else:
+                thumbnail_url = f"/api/sessions/{session_id}/sample-image/{row_index}.jpg?mode=overlay"
         return {
             "waypoint": waypoint,
             "index": display_index,
@@ -413,6 +637,8 @@ class SessionStore:
             "camera_to_board_rotation_rpy_deg": sample.get("camera_to_board_rotation_rpy_deg") if sample else None,
             "board_angle_deg": sample.get("board_angle_deg") if sample else None,
             "tcp_pose_mmdeg": sample.get("tcp_pose_mmdeg") if sample else None,
+            "observation_mode": observation_mode,
+            "quality_payload": quality_payload or sample.get("record_quality") if sample else None,
             "image_sequence": sample.get("image_sequence") if sample else None,
             "capture_time_s": sample.get("capture_time_s") if sample else None,
             "translation_residual_mm": residuals.get("translation_residual_mm") if residuals else None,
@@ -420,19 +646,28 @@ class SessionStore:
         }
 
     def _counts_for_session(self, *, path: Path, report: dict[str, Any], samples: list[dict[str, Any]], events: list[dict[str, Any]]) -> dict[str, int]:
-        accepted = sum(1 for event in events if event.get("event") == "waypoint_sample_captured")
-        skipped = sum(1 for event in events if event.get("event") in {"waypoint_capture_skipped", "waypoint_capture_disabled", "waypoint_dry_run_complete"})
+        waypoint_records = self.read_session_waypoints(path.name)
+        accepted = sum(1 for record in waypoint_records if record.get("status") == "accepted")
+        skipped = sum(1 for record in waypoint_records if record.get("status") == "skipped")
+        failed = sum(1 for record in waypoint_records if record.get("status") == "failed")
         if not accepted:
             accepted = int(report.get("sample_count", 0) or len(samples))
         trajectory = self._read_waypoints_from_path(self._trajectory_path_for_session(path))
-        waypoint_count = len(self.read_session_waypoints(path.name))
+        waypoint_count = len(waypoint_records)
         if not waypoint_count:
             waypoint_count = len(trajectory.get("waypoints", []))
         if not waypoint_count:
             waypoint_count = self._waypoint_count_from_events(events)
-        pending = max(waypoint_count - accepted - skipped, 0) if waypoint_count else 0
+        pending = max(waypoint_count - accepted - skipped - failed, 0) if waypoint_count else 0
         sample_count = int(report.get("sample_count", 0) or len(samples) or accepted)
-        return {"sample_count": sample_count, "accepted": accepted, "skipped": skipped, "pending": pending, "trajectory_error": trajectory.get("error")}
+        return {
+            "sample_count": sample_count,
+            "accepted": accepted,
+            "skipped": skipped,
+            "failed": failed,
+            "pending": pending,
+            "trajectory_error": trajectory.get("error"),
+        }
 
     def _waypoint_count_from_events(self, events: list[dict[str, Any]]) -> int:
         names: set[str] = set()
@@ -499,6 +734,7 @@ class SessionStore:
         normalized["camera_to_board_translation_m"] = normalized.get("camera_to_board_translation_m") or _matrix_translation(normalized.get("camera_to_board_matrix"))
         normalized["camera_to_board_rotation_rpy_deg"] = normalized.get("camera_to_board_rotation_rpy_deg") or _matrix_rotation_rpy_deg(normalized.get("camera_to_board_matrix"))
         normalized["board_angle_deg"] = normalized.get("board_angle_deg") if normalized.get("board_angle_deg") is not None else _matrix_board_angle_deg(normalized.get("camera_to_board_matrix"))
+        normalized["observation_mode"] = normalized.get("observation_mode") or _sample_observation_mode(normalized)
         return normalized
 
     def _session_path(self, session_id: str) -> Path:
@@ -506,8 +742,48 @@ class SessionStore:
             raise ValueError(f"Invalid session id: {session_id!r}")
         path = self.session_root_path / session_id
         if not path.exists() or not path.is_dir():
+            for entry_id, entry_path in self._session_entries():
+                if entry_id == session_id:
+                    return entry_path
             raise FileNotFoundError(f"Session does not exist: {path}")
         return path
+
+    def _session_entries(self) -> list[tuple[str, Path]]:
+        paths = list(self._iter_session_paths())
+        name_counts: dict[str, int] = {}
+        for path in paths:
+            name_counts[path.name] = name_counts.get(path.name, 0) + 1
+        entries: list[tuple[str, Path]] = []
+        for path in paths:
+            session_id = path.name
+            if name_counts[path.name] > 1 and path.parent != self.session_root_path:
+                session_id = f"{path.parent.name}__{path.name}"
+            entries.append((session_id, path))
+        return entries
+
+    def _iter_session_paths(self) -> list[Path]:
+        if not self.session_root_path.exists():
+            return []
+        paths: list[Path] = []
+        for path in sorted((item for item in self.session_root_path.iterdir() if item.is_dir()), reverse=True):
+            if self._is_legacy_wrapper_dir(path):
+                paths.extend(sorted((item for item in path.iterdir() if item.is_dir() and self._looks_like_session_dir(item)), reverse=True))
+            else:
+                paths.append(path)
+        return paths
+
+    def _is_legacy_wrapper_dir(self, path: Path) -> bool:
+        if not path.name.startswith("legacy_"):
+            return False
+        if self._looks_like_session_dir(path):
+            return False
+        return any(item.is_dir() and self._looks_like_session_dir(item) for item in path.iterdir())
+
+    def _looks_like_session_dir(self, path: Path) -> bool:
+        return any(
+            (path / name).exists()
+            for name in ("report.yaml", "samples.jsonl", "run.log", "trajectory_used.yaml", "images")
+        )
 
     def _read_yaml(self, path: Path) -> dict[str, Any]:
         if not path.exists():
@@ -546,6 +822,11 @@ def _first_present(primary: dict[str, Any] | None, fallback: dict[str, Any], key
     if primary and primary.get(key) is not None:
         return primary.get(key)
     return fallback.get(key)
+
+def _sample_observation_mode(sample: dict[str, Any]) -> str | None:
+    quality = sample.get("sample_quality") if isinstance(sample.get("sample_quality"), dict) else {}
+    record_quality = sample.get("record_quality") if isinstance(sample.get("record_quality"), dict) else {}
+    return sample.get("observation_mode") or quality.get("observation_mode") or record_quality.get("observation_mode") or sample.get("quality_payload", {}).get("observation_mode") if isinstance(sample.get("quality_payload"), dict) else None
 
 
 def _matrix_translation(matrix: Any) -> list[float] | None:
