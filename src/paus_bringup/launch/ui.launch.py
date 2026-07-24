@@ -53,6 +53,7 @@ def _launch_setup(context, *args, **kwargs):
     camera_ip = LaunchConfiguration("camera_ip").perform(context).strip()
     camera_index = LaunchConfiguration("camera_index").perform(context).strip()
     image_topic = LaunchConfiguration("image_topic").perform(context)
+    preview_image_topic = LaunchConfiguration("preview_image_topic").perform(context)
     status_topic = LaunchConfiguration("status_topic").perform(context)
     camera_config_wait_timeout_s = float(LaunchConfiguration("camera_config_wait_timeout_s").perform(context))
     ui_host = LaunchConfiguration("ui_host").perform(context)
@@ -87,6 +88,9 @@ def _launch_setup(context, *args, **kwargs):
     start_calibration_node = _as_bool(LaunchConfiguration("start_calibration_node").perform(context))
     image_receiver_host = LaunchConfiguration("image_receiver_host").perform(context)
     image_receiver_port = LaunchConfiguration("image_receiver_port").perform(context)
+    preview_max_fps = LaunchConfiguration("preview_max_fps").perform(context)
+    preview_width = LaunchConfiguration("preview_width").perform(context)
+    preview_jpeg_quality = LaunchConfiguration("preview_jpeg_quality").perform(context)
 
     camera_bridge_cmd = [
         python_exec,
@@ -97,6 +101,12 @@ def _launch_setup(context, *args, **kwargs):
         image_receiver_port,
         "--camera-config-output",
         camera_config_output,
+        "--preview-max-fps",
+        preview_max_fps,
+        "--preview-width",
+        preview_width,
+        "--preview-jpeg-quality",
+        preview_jpeg_quality,
     ]
     if camera_ip:
         camera_bridge_cmd += ["--camera-ip", camera_ip]
@@ -116,6 +126,7 @@ def _launch_setup(context, *args, **kwargs):
                     {
                         "image_topic": image_topic,
                         "depth_topic": depth_topic,
+                        "preview_topic": preview_image_topic,
                     }
                 ],
             )
@@ -198,6 +209,8 @@ def _launch_setup(context, *args, **kwargs):
                 "-p",
                 f"image_topic:={image_topic}",
                 "-p",
+                f"preview_image_topic:={preview_image_topic}",
+                "-p",
                 f"status_topic:={status_topic}",
                 "-p",
                 f"observation_mode:={observation_mode}",
@@ -245,7 +258,11 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("camera_index", default_value="", description="Optional camera index. Leave empty to use auto-selection."),
             DeclareLaunchArgument("image_receiver_host", default_value="127.0.0.1", description="TCP host where camera_bridge.py sends frames."),
             DeclareLaunchArgument("image_receiver_port", default_value="5001", description="TCP port where camera_bridge.py sends frames."),
-            DeclareLaunchArgument("image_topic", default_value="/camera/image_bridge", description="Image topic used by the UI preview."),
+            DeclareLaunchArgument("preview_max_fps", default_value="8.0", description="Max FPS for UI preview JPEG stream."),
+            DeclareLaunchArgument("preview_width", default_value="1280", description="Max width for UI preview JPEG stream. 0 keeps source width."),
+            DeclareLaunchArgument("preview_jpeg_quality", default_value="80", description="JPEG quality for UI preview stream."),
+            DeclareLaunchArgument("image_topic", default_value="/camera/image_bridge", description="Raw image topic used by calibration."),
+            DeclareLaunchArgument("preview_image_topic", default_value="/camera/preview_jpeg", description="Compressed JPEG topic used by the UI live preview."),
             DeclareLaunchArgument("status_topic", default_value="/eye_to_hand/status", description="Eye-to-hand JSON status topic."),
             DeclareLaunchArgument("camera_config_wait_timeout_s", default_value="15.0", description="How long the calibration node waits for camera.yaml to be written."),
             DeclareLaunchArgument("ui_host", default_value="0.0.0.0", description="UI bind host."),

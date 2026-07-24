@@ -14,12 +14,11 @@ from cv_bridge import CvBridge
 import numpy as np
 import rclpy
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
-from rcl_interfaces.srv import SetParameters
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rcl_interfaces.srv import SetParameters
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
@@ -40,6 +39,14 @@ CAMERA_FRESHNESS_S = 3.0
 @dataclass
 class CachedImage:
     image_bgr: np.ndarray
+    sequence: int
+    header_time_s: float | None
+    received_time_s: float
+
+
+@dataclass
+class CachedJpeg:
+    data: bytes
     sequence: int
     header_time_s: float | None
     received_time_s: float
@@ -76,6 +83,7 @@ class UiRosBridge(Node):
         self.declare_parameter("config_path", str(default_config_path))
         self.declare_parameter("camera_config_path", "/tmp/paus_robot/camera.yaml")
         self.declare_parameter("image_topic", "/camera/image_bridge")
+        self.declare_parameter("preview_image_topic", "/camera/preview_jpeg")
         self.declare_parameter("status_topic", "/eye_to_hand/status")
         self.config_path = self.get_parameter("config_path").get_parameter_value().string_value
         self.config = load_config(self.config_path)
@@ -98,6 +106,7 @@ class UiRosBridge(Node):
         self.ui_port = int(self.get_parameter("ui_port").get_parameter_value().integer_value)
         self.camera_config_path = Path(self.get_parameter("camera_config_path").get_parameter_value().string_value)
         self.image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
+        self.preview_image_topic = self.get_parameter("preview_image_topic").get_parameter_value().string_value
         self.status_topic = self.get_parameter("status_topic").get_parameter_value().string_value
         self.observation_mode = normalize_observation_mode(self.get_parameter("observation_mode").get_parameter_value().string_value)
         self.depth_topic = self.get_parameter("depth_topic").get_parameter_value().string_value
@@ -136,6 +145,9 @@ class UiRosBridge(Node):
         self._image_lock = threading.Lock()
         self._latest_image: CachedImage | None = None
         self._image_sequence = 0
+        self._preview_lock = threading.Lock()
+        self._latest_preview_jpeg: CachedJpeg | None = None
+        self._preview_sequence = 0
         self._last_status_lock = threading.Lock()
         self._last_status: dict[str, Any] | None = None
         self._last_status_time_s: float | None = None
@@ -152,6 +164,7 @@ class UiRosBridge(Node):
         self._overlay_cache_lock = threading.Lock()
 
         self.create_subscription(Image, self.image_topic, self._image_callback, 10)
+        self.create_subscription(CompressedImage, self.preview_image_topic, self._preview_image_callback, 10)
         self.create_subscription(String, self.status_topic, self._status_callback, STATUS_QOS)
         self._parameter_clients = {
             "eye_to_hand": self.create_client(SetParameters, "/eye_to_hand_calibration_node/set_parameters"),
@@ -161,6 +174,7 @@ class UiRosBridge(Node):
             "delete_last_waypoint": self.create_client(Trigger, "/eye_to_hand/delete_last_waypoint"),
             "delete_selected_waypoint": self.create_client(Trigger, "/eye_to_hand/delete_selected_waypoint"),
             "save_trajectory": self.create_client(Trigger, "/eye_to_hand/save_trajectory"),
+            "new_trajectory": self.create_client(Trigger, "/eye_to_hand/new_trajectory"),
             "run_semi_auto": self.create_client(Trigger, "/eye_to_hand/run_semi_auto_calibration"),
             "stop": self.create_client(Trigger, "/eye_to_hand/stop"),
         }
@@ -182,6 +196,19 @@ class UiRosBridge(Node):
             self._latest_image = CachedImage(
                 image_bgr=image_bgr,
                 sequence=self._image_sequence,
+                header_time_s=header_time_s,
+                received_time_s=time.monotonic(),
+            )
+
+    def _preview_image_callback(self, message: CompressedImage) -> None:
+        header_time_s = None
+        if message.header.stamp.sec != 0 or message.header.stamp.nanosec != 0:
+            header_time_s = float(message.header.stamp.sec) + float(message.header.stamp.nanosec) * 1e-9
+        with self._preview_lock:
+            self._preview_sequence += 1
+            self._latest_preview_jpeg = CachedJpeg(
+                data=bytes(message.data),
+                sequence=self._preview_sequence,
                 header_time_s=header_time_s,
                 received_time_s=time.monotonic(),
             )
@@ -343,15 +370,21 @@ class UiRosBridge(Node):
 
     def get_status(self) -> dict[str, Any]:
         latest_meta = self._latest_image_meta()
+        preview_meta = self._latest_preview_meta()
         with self._last_status_lock:
             last_status = dict(self._last_status) if self._last_status else None
             last_status_age_s = (time.monotonic() - self._last_status_time_s) if self._last_status_time_s else None
         camera_age_s = self._image_age_s_from_meta(latest_meta)
+        preview_age_s = self._preview_age_s_from_meta(preview_meta)
         backend_state = self._sync_backend_state(last_status, last_status_age_s)
         live_status = last_status if (backend_state.get("status_recent") or backend_state.get("run_active")) and last_status is not None else None
         shaped_status = self._shape_status_payload(live_status)
         current_waypoint = dict(shaped_status["current_waypoint"])
         status_payload = live_status or {}
+        observation_mode = getattr(self, "observation_mode", RGB_PNP_MODE)
+        preview_image_topic = getattr(self, "preview_image_topic", "/camera/preview_jpeg")
+        depth_topic = getattr(self, "depth_topic", "/camera/depth_aligned")
+        supported_observation_modes = getattr(self, "supported_observation_modes", [RGB_PNP_MODE, DEPTH_ALIGNED_MODE])
         reprojection = _to_float(status_payload.get("reprojection_error_px"))
         board_margin = _to_float(status_payload.get("board_margin_px"))
         quality_payload = status_payload.get("sample_quality") or status_payload.get("record_quality") or status_payload.get("quality") or status_payload.get("quality_payload")
@@ -367,7 +400,7 @@ class UiRosBridge(Node):
                 "quality_reason_code": status_payload.get("quality_reason_code", status_payload.get("reason_code")),
                 "empty_reason": status_payload.get("empty_reason"),
                 "image_sequence": status_payload.get("image_sequence"),
-                "observation_mode": status_payload.get("observation_mode", self.observation_mode),
+                "observation_mode": status_payload.get("observation_mode", observation_mode),
                 "quality_payload": quality_payload,
             }
         )
@@ -380,10 +413,14 @@ class UiRosBridge(Node):
                 "url": f"http://{ui_host}:{self.ui_port}",
             },
             "camera": {
-                "connected": camera_age_s is not None and camera_age_s < CAMERA_FRESHNESS_S,
+                "connected": (camera_age_s is not None and camera_age_s < CAMERA_FRESHNESS_S) or (preview_age_s is not None and preview_age_s < CAMERA_FRESHNESS_S),
                 "image_sequence": latest_meta[0] if latest_meta else 0,
                 "age_s": camera_age_s,
                 "topic": self.image_topic,
+                "preview_topic": preview_image_topic,
+                "preview_sequence": preview_meta[0] if preview_meta else 0,
+                "preview_age_s": preview_age_s,
+                "stream_source": "preview_jpeg" if preview_age_s is not None and preview_age_s < CAMERA_FRESHNESS_S else "raw_image",
                 "camera_config_path": str(self.camera_config_path),
                 "camera_config_exists": self.camera_config_path.exists(),
             },
@@ -405,10 +442,10 @@ class UiRosBridge(Node):
                 "run_active": bool(self._run_thread and self._run_thread.is_alive()),
                 "workflow": shaped_status["workflow"],
                 "current_waypoint": current_waypoint,
-                "observation_mode": self.observation_mode,
-                "depth_topic": self.depth_topic,
-                "supported_observation_modes": self.supported_observation_modes,
-                "quality_schema": self._quality_schema(self.observation_mode),
+                "observation_mode": observation_mode,
+                "depth_topic": depth_topic,
+                "supported_observation_modes": supported_observation_modes,
+                "quality_schema": self._quality_schema(observation_mode),
                 "session": shaped_status["session"] | {"latest_valid_session_id": latest_session},
                 "motion": self._motion_summary(),
                 "stop": self._stop_status(),
@@ -510,6 +547,22 @@ class UiRosBridge(Node):
             self._overlay_cache[cache_key] = jpeg_bytes
         return jpeg_bytes
 
+    def get_latest_preview_jpeg(self) -> tuple[int, bytes, float] | None:
+        with self._preview_lock:
+            preview = self._latest_preview_jpeg
+            if preview is None:
+                return None
+            cached = CachedJpeg(
+                data=preview.data,
+                sequence=preview.sequence,
+                header_time_s=preview.header_time_s,
+                received_time_s=preview.received_time_s,
+            )
+        age_s = time.monotonic() - cached.received_time_s
+        if age_s >= CAMERA_FRESHNESS_S:
+            return None
+        return cached.sequence, cached.data, cached.received_time_s
+
     def get_sample_jpeg(self, *, session_id: str, row_index: int, mode: str = "overlay", show_axes: bool = True) -> bytes:
         self._sync_backend_state()
         sample = self.session_store.sample_for_row(session_id, row_index)
@@ -526,6 +579,16 @@ class UiRosBridge(Node):
             return encode_jpeg(image_bgr)
         rendered = self._render_archived_sample_overlay(image_bgr, sample, mode=mode, row_index=row_index, show_axes=show_axes)
         return encode_jpeg(rendered)
+
+    def get_capture_jpeg(self, *, session_id: str, image_name: str) -> bytes:
+        self._sync_backend_state()
+        image_path = self.session_store.capture_image_path(session_id, image_name)
+        if image_path is None:
+            raise FileNotFoundError(f"Capture image is not available in session {session_id}: {image_name}")
+        image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        if image_bgr is None:
+            raise ValueError(f"Failed to read capture image: {image_path}")
+        return encode_jpeg(image_bgr)
 
     def record_waypoint(self) -> dict[str, Any]:
         return self._call_trigger("record_waypoint", timeout_s=15.0)
@@ -548,6 +611,9 @@ class UiRosBridge(Node):
 
     def save_trajectory(self) -> dict[str, Any]:
         return self._call_trigger("save_trajectory", timeout_s=5.0)
+
+    def new_trajectory(self) -> dict[str, Any]:
+        return self._call_trigger("new_trajectory", timeout_s=5.0)
 
     def get_waypoints(self) -> dict[str, Any]:
         backend_state = self._sync_backend_state()
@@ -613,7 +679,7 @@ class UiRosBridge(Node):
             "camera_to_board_translation_m": record_quality.get("camera_to_board_translation_m"),
             "camera_to_board_rotation_rpy_deg": record_quality.get("camera_to_board_rotation_rpy_deg"),
             "board_angle_deg": _to_float(record_quality.get("board_angle_deg")),
-            "observation_mode": record_quality.get("observation_mode", self.observation_mode),
+            "observation_mode": record_quality.get("observation_mode", getattr(self, "observation_mode", RGB_PNP_MODE)),
             "quality_payload": record_quality,
             "has_image": False,
             "sample_row_index": None,
@@ -837,7 +903,19 @@ class UiRosBridge(Node):
             latest = self._latest_image
             return latest.sequence, latest.header_time_s, latest.received_time_s
 
+    def _latest_preview_meta(self) -> tuple[int, float | None, float] | None:
+        if not hasattr(self, "_preview_lock"):
+            return None
+        with self._preview_lock:
+            if self._latest_preview_jpeg is None:
+                return None
+            latest = self._latest_preview_jpeg
+            return latest.sequence, latest.header_time_s, latest.received_time_s
+
     def _image_age_s_from_meta(self, meta: tuple[int, float | None, float] | None) -> float | None:
+        return (time.monotonic() - meta[2]) if meta is not None else None
+
+    def _preview_age_s_from_meta(self, meta: tuple[int, float | None, float] | None) -> float | None:
         return (time.monotonic() - meta[2]) if meta is not None else None
 
     def _image_age_s(self, image: CachedImage | None) -> float | None:
@@ -889,6 +967,7 @@ class UiRosBridge(Node):
         workflow = self._workflow_for_status(status)
         session_dir = payload.get("session_dir")
         quality_payload = payload.get("sample_quality") or payload.get("record_quality") or payload.get("quality") or payload.get("quality_payload")
+        observation_mode = getattr(self, "observation_mode", RGB_PNP_MODE)
         return {
             "workflow": {
                 "status": status,
@@ -898,7 +977,7 @@ class UiRosBridge(Node):
                 "progress_count": payload.get("waypoint_count"),
                 "sample_count": payload.get("sample_count"),
                 "min_sample_count": payload.get("min_sample_count"),
-                "observation_mode": payload.get("observation_mode", self.observation_mode),
+                "observation_mode": payload.get("observation_mode", observation_mode),
             },
             "current_waypoint": {
                 "name": waypoint_name,
@@ -910,7 +989,7 @@ class UiRosBridge(Node):
                 "dwell_s": waypoint.get("dwell_s"),
                 "stable_tcp_pose_mmdeg": payload.get("stable_tcp_pose_mmdeg"),
                 "tcp_pose_mmdeg": payload.get("tcp_pose_mmdeg"),
-                "observation_mode": payload.get("observation_mode", self.observation_mode),
+                "observation_mode": payload.get("observation_mode", observation_mode),
                 "quality_payload": quality_payload,
             },
             "session": {
@@ -944,12 +1023,15 @@ class UiRosBridge(Node):
             "waypoint_capture_skipped": ("skipped", "该点已跳过"),
             "waypoint_sample_captured": ("accepted", "样本已接受"),
             "sample_captured": ("accepted", "样本已接受"),
+            "waypoint_failed": ("error", "当前点执行失败"),
+            "waypoint_stopped": ("error", "当前点已停止"),
             "capture_failed": ("error", "采样失败"),
             "semi_auto_insufficient_samples": ("error", "有效样本不足"),
             "solving": ("solve", "正在求解手眼标定"),
             "solved": ("solve", "标定已求解"),
             "semi_auto_finished": ("finished", "半自动标定完成"),
             "semi_auto_finished_with_skips": ("finished", "半自动标定完成，存在跳过点"),
+            "semi_auto_stopped": ("error", "半自动标定已停止"),
             "semi_auto_failed": ("error", "半自动标定失败"),
         }
         stage, label = mapping.get(status, ("idle", status or "等待状态"))

@@ -169,6 +169,121 @@ def test_session_store_accepts_legacy_sample_captured_events(tmp_path: Path) -> 
     assert waypoints[0]["sample_index"] == 1
 
 
+def test_session_store_recovers_legacy_quality_rejection_as_skipped_without_running_rows(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
+    waypoints = [
+        {
+            "name": f"waypoint_{index:03d}",
+            "motion": "movej",
+            "joint_deg": [index] * 6,
+            "expected_tcp_pose_mmdeg": [index] * 6,
+            "vel": 10.0,
+            "acc": 10.0,
+            "dwell_s": 0.5,
+            "capture": True,
+        }
+        for index in range(1, 6)
+    ]
+    trajectory_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "tool_id": 0,
+                "user_id": 0,
+                "defaults": {"motion": "movej", "vel": 10.0, "acc": 10.0, "dwell_s": 0.5},
+                "waypoints": waypoints,
+            }
+        ),
+        encoding="utf-8",
+    )
+    session_root = tmp_path / "calibration_sessions"
+    session_path = session_root / "2026-07-24_193630"
+    session_path.mkdir(parents=True)
+    (session_path / "trajectory_used.yaml").write_text(trajectory_path.read_text(encoding="utf-8"), encoding="utf-8")
+    _write_jsonl(
+        session_path / "samples.jsonl",
+        [
+            {"sample_index": index, "reprojection_error_px": 0.2, "board_margin_px": 40.0}
+            for index in range(1, 4)
+        ],
+    )
+    events: list[dict[str, object]] = []
+    for index in range(1, 4):
+        events.extend(
+            [
+                {"event": "waypoint_reached", "waypoint": waypoints[index - 1], "waypoint_index": index},
+                {"event": "sample_captured", "sample_index": index},
+            ]
+        )
+    events.extend(
+        [
+            {"event": "waypoint_reached", "waypoint": waypoints[3], "waypoint_index": 4},
+            {"event": "semi_auto_failed", "error": "SampleRejectedError('chessboard_not_found')"},
+        ]
+    )
+    _write_jsonl(session_path / "run.log", events)
+
+    store = SessionStore(session_root_path=session_root, trajectory_path=trajectory_path)
+
+    rows = store.read_session_waypoints("2026-07-24_193630")
+    assert [row["status"] for row in rows] == ["accepted", "accepted", "accepted", "skipped", "pending"]
+    assert all(row["status"] != "running" for row in rows)
+    assert "chessboard_not_found" in rows[3]["reason"]
+    report = store.read_report("2026-07-24_193630")
+    assert report["accepted_count"] == 3
+    assert report["skipped_count"] == 1
+    assert report["failed_count"] == 0
+    assert report["pending_count"] == 1
+
+
+def test_session_store_keeps_explicit_motion_failure_separate_from_skips(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
+    waypoint = {
+        "name": "waypoint_001",
+        "motion": "movej",
+        "joint_deg": [1, 2, 3, 4, 5, 6],
+        "expected_tcp_pose_mmdeg": [100, 200, 300, 10, 20, 30],
+        "vel": 10.0,
+        "acc": 10.0,
+        "dwell_s": 0.5,
+        "capture": True,
+    }
+    trajectory_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "tool_id": 0,
+                "user_id": 0,
+                "defaults": {"motion": "movej", "vel": 10.0, "acc": 10.0, "dwell_s": 0.5},
+                "waypoints": [waypoint],
+            }
+        ),
+        encoding="utf-8",
+    )
+    session_root = tmp_path / "calibration_sessions"
+    session_path = session_root / "2026-07-24_200000"
+    session_path.mkdir(parents=True)
+    (session_path / "trajectory_used.yaml").write_text(trajectory_path.read_text(encoding="utf-8"), encoding="utf-8")
+    _write_jsonl(
+        session_path / "run.log",
+        [
+            {"event": "waypoint_motion_started", "waypoint": waypoint, "waypoint_index": 1},
+            {"event": "waypoint_failed", "waypoint": waypoint, "waypoint_index": 1, "reason": "MoveJ failed with code 14"},
+            {"event": "semi_auto_failed", "error": "RuntimeError('MoveJ failed with code 14')"},
+        ],
+    )
+
+    store = SessionStore(session_root_path=session_root, trajectory_path=trajectory_path)
+
+    rows = store.read_session_waypoints("2026-07-24_200000")
+    assert rows[0]["status"] == "failed"
+    assert rows[0]["result"] == "FAIL"
+    report = store.read_report("2026-07-24_200000")
+    assert report["failed_count"] == 1
+    assert report["skipped_count"] == 0
+    assert report["pending_count"] == 0
+
+
 def test_session_store_marks_capture_disabled_waypoints_terminal(tmp_path: Path) -> None:
     trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
     trajectory_path.write_text(

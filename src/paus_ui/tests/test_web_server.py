@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import sys
 from pathlib import Path
 
@@ -34,7 +35,14 @@ def test_frontend_bundle_contains_live_ws_and_cache_bust() -> None:
     assert "startLiveImageWatchdog" in app_js
     assert "visibilitychange" in app_js
     assert "load-session-trajectory-btn" in index_html
-    assert "/static/app.js?v=20260521" in index_html
+    assert "/static/app.js?v=20260724" in index_html
+    assert "/static/styles.css?v=20260724" in index_html
+    decoded_html = html.unescape(index_html)
+    assert "当前标定" in decoded_html
+    assert "采集 RGB PnP / Depth Align 观测" in decoded_html
+    assert "????" not in decoded_html
+    assert 'id="failed-count"' in index_html
+    assert "WAYPOINT_STATUS_LABELS" in app_js
 
 
 def test_frontend_avoids_live_http_resync_and_lazy_loads_thumbnails() -> None:
@@ -65,6 +73,12 @@ def test_websocket_routes_accept_connections() -> None:
             return None
 
     client = TestClient(create_app(FakeBridge()))
+
+    response = client.get("/")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "charset=utf-8" in response.headers["content-type"].lower()
+    assert response.headers["cache-control"] == "no-store"
 
     with client.websocket_connect("/ws/events") as websocket:
         assert websocket.receive_json()["type"] == "test"

@@ -132,10 +132,11 @@ class CapturedDepth:
 
 
 class SampleRejectedError(RuntimeError):
-    def __init__(self, reject_reason: str, sample_quality: dict[str, object]) -> None:
+    def __init__(self, reject_reason: str, sample_quality: dict[str, object], image_bgr: np.ndarray | None = None) -> None:
         super().__init__(reject_reason)
         self.reject_reason = reject_reason
         self.sample_quality = sample_quality
+        self.image_bgr = image_bgr
 
 
 # 这个节点负责采集 eye-to-hand 标定样本，并求解 `base -> camera` 外参。
@@ -310,6 +311,7 @@ class EyeToHandCalibrationNode(Node):
         self.delete_waypoint_service = self.create_service(Trigger, "/eye_to_hand/delete_last_waypoint", self._delete_last_waypoint_callback, callback_group=self.callback_group)
         self.delete_selected_waypoint_service = self.create_service(Trigger, "/eye_to_hand/delete_selected_waypoint", self._delete_selected_waypoint_callback, callback_group=self.callback_group)
         self.save_trajectory_service = self.create_service(Trigger, "/eye_to_hand/save_trajectory", self._save_trajectory_callback, callback_group=self.callback_group)
+        self.new_trajectory_service = self.create_service(Trigger, "/eye_to_hand/new_trajectory", self._new_trajectory_callback, callback_group=self.callback_group)
         self.run_semi_auto_service = self.create_service(Trigger, "/eye_to_hand/run_semi_auto_calibration", self._run_semi_auto_callback, callback_group=self.callback_group)
         self.stop_service = self.create_service(Trigger, "/eye_to_hand/stop", self._stop_callback, callback_group=self.callback_group)
 
@@ -599,6 +601,14 @@ class EyeToHandCalibrationNode(Node):
         if not bool(getattr(self, "save_sample_images", False)) or getattr(self, "session_dir", None) is None:
             return None
         image_path = self.session_dir / "images" / f"sample_{sample_index:03d}.png"
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(image_path), image_bgr)
+        return str(image_path)
+
+    def _save_rejected_capture_image(self, image_bgr: np.ndarray | None, *, waypoint_index: int, attempt_index: int) -> str | None:
+        if image_bgr is None or not bool(getattr(self, "save_sample_images", False)) or getattr(self, "session_dir", None) is None:
+            return None
+        image_path = self.session_dir / "images" / f"rejected_waypoint_{waypoint_index:03d}_attempt_{attempt_index:02d}.png"
         image_path.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(image_path), image_bgr)
         return str(image_path)
@@ -960,7 +970,7 @@ class EyeToHandCalibrationNode(Node):
             rejected_quality["capture_attempt_index"] = int(attempt_index)
             rejected_quality["image_sequence"] = captured_image.sequence
             rejected_quality["image_header_time_s"] = captured_image.header_time_s
-            raise SampleRejectedError(reject_reason, rejected_quality)
+            raise SampleRejectedError(reject_reason, rejected_quality, captured_image.image_bgr)
         rgb_matrix = None
         depth_matrix = None
         hybrid_comparison = None
@@ -1050,11 +1060,18 @@ class EyeToHandCalibrationNode(Node):
                 candidate, attempt_payload = self._capture_sample_candidate(owner=owner, attempt_index=attempt_index)
             except SampleRejectedError as exc:
                 last_rejection = exc
+                image_path = self._save_rejected_capture_image(
+                    exc.image_bgr,
+                    waypoint_index=waypoint_index,
+                    attempt_index=attempt_index,
+                )
                 attempt_payload = {
                     "attempt_index": attempt_index,
                     "accepted": False,
                     "reason": exc.reject_reason,
                     "sample_quality": exc.sample_quality,
+                    "image_path": image_path,
+                    "has_image": image_path is not None,
                     "reprojection_error_px": exc.sample_quality.get("reprojection_error_px") if isinstance(exc.sample_quality, dict) else None,
                     "board_margin_px": exc.sample_quality.get("board_margin_px") if isinstance(exc.sample_quality, dict) else None,
                     "waypoint_name": waypoint_name,
@@ -1084,7 +1101,7 @@ class EyeToHandCalibrationNode(Node):
                 quality = dict(last_rejection.sample_quality)
                 quality["capture_attempts"] = attempts
                 quality["capture_attempt_count"] = len(attempts)
-                raise SampleRejectedError(last_rejection.reject_reason, quality)
+                raise SampleRejectedError(last_rejection.reject_reason, quality, last_rejection.image_bgr)
             raise SampleRejectedError("sample_quality_rejected", {"accepted": False, "capture_attempts": attempts, "capture_attempt_count": len(attempts)})
         selected, selected_payload = min(accepted, key=self._attempt_sort_key)
         selected.sample_quality["capture_attempt_count"] = len(attempts)
@@ -1507,6 +1524,32 @@ class EyeToHandCalibrationNode(Node):
             self._publish_status("save_trajectory_failed", response.message, {"session_dir": str(self.session_dir) if self.session_dir else None})
         return response
 
+    def _new_trajectory_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+        del request
+        if self._reject_manual_service_if_semi_auto_active(response):
+            return response
+        try:
+            self.recorded_trajectory.waypoints.clear()
+            if self.trajectory_path.exists():
+                self.trajectory_path.unlink()
+            payload = {
+                "trajectory_path": str(self.trajectory_path),
+                "waypoint_count": 0,
+                "recorded_trajectory": self.recorded_trajectory.to_payload(),
+                "trajectory_dirty": False,
+                "session_dir": str(self.session_dir) if self.session_dir else None,
+            }
+            if self.session_dir is not None:
+                self._append_run_log("new_trajectory_started", payload)
+            response.success = True
+            response.message = f"Started a new empty trajectory at {self.trajectory_path}."
+            self._publish_status("new_trajectory_started", response.message, payload)
+        except Exception as exc:
+            response.success = False
+            response.message = repr(exc)
+            self._publish_status("new_trajectory_failed", response.message, {"session_dir": str(self.session_dir) if self.session_dir else None})
+        return response
+
     def _wait_until_tcp_stable(self) -> list[float]:
         deadline = time.monotonic() + self.stable_timeout_s
         stable_since: float | None = None
@@ -1552,55 +1595,80 @@ class EyeToHandCalibrationNode(Node):
             created_session = True
             self._archive_current_trajectory()
             self._append_run_log("semi_auto_started", {"trajectory_path": str(self.trajectory_path), "execute_motion": self.execute_motion, "waypoint_count": len(trajectory.waypoints)})
+            waypoint_count = len(trajectory.waypoints)
             if not self.execute_motion:
-                for waypoint in trajectory.waypoints:
-                    self._publish_status("semi_auto_dry_run_waypoint", f"Dry-run waypoint {waypoint.name}.", {"waypoint": waypoint.to_payload(), "session_dir": str(self.session_dir)})
+                for index, waypoint in enumerate(trajectory.waypoints, start=1):
+                    dry_run_payload = {
+                        "waypoint": waypoint.to_payload(),
+                        "waypoint_name": waypoint.name,
+                        "waypoint_index": index,
+                        "waypoint_count": waypoint_count,
+                        "reason": "dry-run",
+                        "session_dir": str(self.session_dir),
+                    }
+                    self._append_run_log("waypoint_dry_run_complete", dry_run_payload)
+                    self._publish_status("waypoint_dry_run_complete", f"Dry-run waypoint {waypoint.name}.", dry_run_payload)
                 response.success = True
-                response.message = f"Dry-run complete for {len(trajectory.waypoints)} waypoints. No motion, capture, solve, or save was executed."
-                self._append_run_log("semi_auto_dry_run_complete", {"waypoint_count": len(trajectory.waypoints), "session_dir": str(self.session_dir)})
+                response.message = f"Dry-run complete for {waypoint_count} waypoints. No motion, capture, solve, or save was executed."
+                self._append_run_log("semi_auto_dry_run_complete", {"waypoint_count": waypoint_count, "session_dir": str(self.session_dir)})
                 self._publish_status("semi_auto_dry_run_complete", response.message, {"session_dir": str(self.session_dir), "trajectory_path": str(self.trajectory_path)})
                 return response
 
             captured_count = 0
             for index, waypoint in enumerate(trajectory.waypoints, start=1):
-                self._raise_if_stop_requested(waypoint_name=waypoint.name, waypoint_index=index)
-                if waypoint.motion != "movej":
-                    raise RuntimeError(f"Unsupported waypoint motion: {waypoint.motion}")
-                move_error = self.linux_client.move_j(
-                    waypoint.joint_deg,
-                    tool_id=trajectory.tool_id,
-                    user_id=trajectory.user_id,
-                    vel=waypoint.vel,
-                )
-                if move_error != 0:
-                    raise RuntimeError(f"MoveJ failed at {waypoint.name} with code {move_error}.")
-                self._raise_if_stop_requested(waypoint_name=waypoint.name, waypoint_index=index)
-                stable_pose = self._wait_until_tcp_stable()
-                self._raise_if_stop_requested(waypoint_name=waypoint.name, waypoint_index=index)
-                self._sleep_with_stop_checks(waypoint.dwell_s, waypoint_name=waypoint.name, waypoint_index=index)
-                self._sleep_with_stop_checks(
-                    self.post_motion_capture_delay_s,
-                    waypoint_name=waypoint.name,
-                    waypoint_index=index,
-                )
-                self._append_run_log("waypoint_reached", {"waypoint": waypoint.to_payload(), "stable_tcp_pose_mmdeg": stable_pose, "waypoint_index": index, "session_dir": str(self.session_dir)})
-                self._publish_status("semi_auto_waypoint_reached", f"Reached {waypoint.name}.", {"waypoint": waypoint.to_payload(), "session_dir": str(self.session_dir)})
-                if waypoint.capture:
+                waypoint_payload = {
+                    "waypoint": waypoint.to_payload(),
+                    "waypoint_name": waypoint.name,
+                    "waypoint_index": index,
+                    "waypoint_count": waypoint_count,
+                    "session_dir": str(self.session_dir),
+                }
+                self._append_run_log("waypoint_motion_started", waypoint_payload)
+                self._publish_status("waypoint_motion_started", f"Moving to {waypoint.name}.", waypoint_payload)
+                try:
+                    self._raise_if_stop_requested(waypoint_name=waypoint.name, waypoint_index=index)
+                    if waypoint.motion != "movej":
+                        raise RuntimeError(f"Unsupported waypoint motion: {waypoint.motion}")
+                    move_error = self.linux_client.move_j(
+                        waypoint.joint_deg,
+                        tool_id=trajectory.tool_id,
+                        user_id=trajectory.user_id,
+                        vel=waypoint.vel,
+                    )
+                    if move_error != 0:
+                        raise RuntimeError(f"MoveJ failed at {waypoint.name} with code {move_error}.")
+                    self._raise_if_stop_requested(waypoint_name=waypoint.name, waypoint_index=index)
+                    stable_pose = self._wait_until_tcp_stable()
+                    self._raise_if_stop_requested(waypoint_name=waypoint.name, waypoint_index=index)
+                    self._sleep_with_stop_checks(waypoint.dwell_s, waypoint_name=waypoint.name, waypoint_index=index)
+                    self._sleep_with_stop_checks(
+                        self.post_motion_capture_delay_s,
+                        waypoint_name=waypoint.name,
+                        waypoint_index=index,
+                    )
+                    reached_payload = {**waypoint_payload, "stable_tcp_pose_mmdeg": stable_pose}
+                    self._append_run_log("waypoint_reached", reached_payload)
+                    self._publish_status("waypoint_reached", f"Reached {waypoint.name}.", reached_payload)
+                    if not waypoint.capture:
+                        disabled_payload = {**waypoint_payload, "reason": "capture=false"}
+                        self._append_run_log("waypoint_capture_disabled", disabled_payload)
+                        self._publish_status("waypoint_capture_disabled", f"Skipped capture at {waypoint.name}.", disabled_payload)
+                        continue
+
+                    self._append_run_log("waypoint_capture_started", waypoint_payload)
+                    self._publish_status("waypoint_capture_started", f"Capturing at {waypoint.name}.", waypoint_payload)
                     try:
                         sample, capture_attempts, selected_attempt_index = self._capture_best_sample_with_retries(
                             owner="semi_auto",
                             waypoint_name=waypoint.name,
                             waypoint_index=index,
-                            waypoint_count=len(trajectory.waypoints),
+                            waypoint_count=waypoint_count,
                         )
                     except SampleRejectedError as exc:
                         capture_attempts = exc.sample_quality.get("capture_attempts") if isinstance(exc.sample_quality, dict) else None
                         capture_attempt_list = capture_attempts if isinstance(capture_attempts, list) else []
                         skipped_payload = {
-                            "waypoint": waypoint.to_payload(),
-                            "waypoint_name": waypoint.name,
-                            "waypoint_index": index,
-                            "waypoint_count": len(trajectory.waypoints),
+                            **waypoint_payload,
                             "reason": exc.reject_reason,
                             "sample_quality": exc.sample_quality,
                             "capture_attempts": capture_attempt_list,
@@ -1612,7 +1680,6 @@ class EyeToHandCalibrationNode(Node):
                             ],
                             "reprojection_error_px": exc.sample_quality.get("reprojection_error_px") if isinstance(exc.sample_quality, dict) else None,
                             "board_margin_px": exc.sample_quality.get("board_margin_px") if isinstance(exc.sample_quality, dict) else None,
-                            "session_dir": str(self.session_dir),
                         }
                         self._append_run_log("waypoint_capture_skipped", skipped_payload)
                         self._publish_status("waypoint_capture_skipped", f"Skipped {waypoint.name}: {exc.reject_reason}.", skipped_payload)
@@ -1626,10 +1693,7 @@ class EyeToHandCalibrationNode(Node):
                         if isinstance(item, dict) and bool(item.get("accepted"))
                     )
                     captured_payload = {
-                        "waypoint": waypoint.to_payload(),
-                        "waypoint_name": waypoint.name,
-                        "waypoint_index": index,
-                        "waypoint_count": len(trajectory.waypoints),
+                        **waypoint_payload,
                         "sample_index": sample_index,
                         "sample_quality": sample.sample_quality,
                         "capture_timing": sample_record,
@@ -1640,7 +1704,6 @@ class EyeToHandCalibrationNode(Node):
                         "sample_log_path": str(self.sample_log_path) if self.sample_log_path else None,
                         "reprojection_error_px": sample.sample_quality.get("reprojection_error_px"),
                         "board_margin_px": sample.sample_quality.get("board_margin_px"),
-                        "session_dir": str(self.session_dir),
                     }
                     self._append_run_log("waypoint_sample_captured", captured_payload)
                     self._publish_status(
@@ -1648,6 +1711,16 @@ class EyeToHandCalibrationNode(Node):
                         f"Captured sample #{len(self.samples)} at {waypoint.name}.",
                         captured_payload,
                     )
+                except SemiAutoStopped:
+                    stopped_payload = {**waypoint_payload, "reason": "operator_stop"}
+                    self._append_run_log("waypoint_stopped", stopped_payload)
+                    self._publish_status("waypoint_stopped", f"Stopped at {waypoint.name}.", stopped_payload)
+                    raise
+                except Exception as exc:
+                    failed_payload = {**waypoint_payload, "reason": repr(exc), "error": repr(exc)}
+                    self._append_run_log("waypoint_failed", failed_payload)
+                    self._publish_status("waypoint_failed", f"Failed at {waypoint.name}: {exc!r}", failed_payload)
+                    raise
 
             self._raise_if_stop_requested()
             solve_response = self._solve_callback(Trigger.Request(), Trigger.Response())
@@ -1656,7 +1729,7 @@ class EyeToHandCalibrationNode(Node):
                 response.message = solve_response.message
                 insufficient_payload = {
                     "captured_count": captured_count,
-                    "waypoint_count": len(trajectory.waypoints),
+                    "waypoint_count": waypoint_count,
                     "session_dir": str(self.session_dir),
                 }
                 self._append_run_log("semi_auto_insufficient_samples", {**insufficient_payload, "error": solve_response.message})

@@ -633,13 +633,22 @@ class EyeToHandSessionTests(unittest.TestCase):
             self.assertEqual(len(node.linux_client.moves), 2)
             self.assertIn("Need at least", response.message)
             statuses = [item["status"] for item in published]
+            terminal_statuses = [
+                status
+                for status in statuses
+                if status in {"waypoint_capture_skipped", "waypoint_sample_captured", "waypoint_failed", "waypoint_stopped"}
+            ]
+            self.assertEqual(terminal_statuses, ["waypoint_capture_skipped", "waypoint_sample_captured"])
+            self.assertEqual(statuses.count("waypoint_motion_started"), 2)
             self.assertIn("waypoint_capture_skipped", statuses)
             self.assertIn("waypoint_sample_captured", statuses)
             self.assertEqual(published[-1]["status"], "semi_auto_insufficient_samples")
             assert node.run_log_path is not None
             run_log = node.run_log_path.read_text(encoding="utf-8")
+            self.assertEqual(run_log.count('"event": "waypoint_motion_started"'), 2)
             self.assertIn('"event": "waypoint_capture_skipped"', run_log)
             self.assertIn('"event": "waypoint_sample_captured"', run_log)
+            self.assertNotIn('"event": "semi_auto_failed"', run_log)
 
     def test_save_trajectory_archives_saved_trajectory(self) -> None:
         class FakeTrajectory:

@@ -38,7 +38,11 @@ def create_app(bridge: "UiRosBridge"):
 
     @app.get("/")
     async def index():
-        return FileResponse(str(static_root / "index.html"))
+        return FileResponse(
+            str(static_root / "index.html"),
+            media_type="text/html",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/api/status")
     async def status() -> dict[str, Any]:
@@ -80,12 +84,22 @@ def create_app(bridge: "UiRosBridge"):
     @app.websocket("/ws/image")
     async def websocket_image(websocket: WebSocket) -> None:
         await websocket.accept()
-        last_sequence = -1
+        last_preview_sequence = -1
+        last_raw_sequence = -1
         try:
             while True:
+                preview_getter = getattr(bridge, "get_latest_preview_jpeg", None)
+                preview = await asyncio.to_thread(preview_getter) if preview_getter is not None else None
+                if preview is not None:
+                    sequence, jpeg_bytes, _ = preview
+                    if sequence != last_preview_sequence:
+                        await websocket.send_bytes(jpeg_bytes)
+                        last_preview_sequence = sequence
+                    await asyncio.sleep(0.04)
+                    continue
                 latest_meta = await asyncio.to_thread(bridge._latest_image_meta)
                 if latest_meta is None:
-                    last_sequence = -1
+                    last_raw_sequence = -1
                     await asyncio.sleep(0.2)
                     continue
                 sequence, _, received_time_s = latest_meta
@@ -93,9 +107,9 @@ def create_app(bridge: "UiRosBridge"):
                 if image_age_s >= 3.0:
                     await asyncio.sleep(0.2)
                     continue
-                if sequence != last_sequence:
+                if sequence != last_raw_sequence:
                     await websocket.send_bytes(await asyncio.to_thread(bridge.get_latest_jpeg, mode="raw", show_axes=False))
-                    last_sequence = sequence
+                    last_raw_sequence = sequence
                 await asyncio.sleep(0.1)
         except WebSocketDisconnect:
             return
@@ -136,6 +150,10 @@ def create_app(bridge: "UiRosBridge"):
     @app.post("/api/handeye/save_trajectory")
     async def save_trajectory() -> dict[str, Any]:
         return await asyncio.to_thread(bridge.save_trajectory)
+
+    @app.post("/api/handeye/new_trajectory")
+    async def new_trajectory() -> dict[str, Any]:
+        return await asyncio.to_thread(bridge.new_trajectory)
 
     @app.post("/api/handeye/run")
     async def run_handeye(body: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
@@ -196,6 +214,14 @@ def create_app(bridge: "UiRosBridge"):
     async def session_sample_image(session_id: str, row_index: int, mode: str = "overlay", axes: bool = True) -> Response:
         try:
             image = await asyncio.to_thread(bridge.get_sample_jpeg, session_id=session_id, row_index=row_index, mode=mode, show_axes=axes)
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return Response(content=image, media_type="image/jpeg")
+
+    @app.get("/api/sessions/{session_id}/capture-image/{image_name}.jpg")
+    async def session_capture_image(session_id: str, image_name: str) -> Response:
+        try:
+            image = await asyncio.to_thread(bridge.get_capture_jpeg, session_id=session_id, image_name=image_name)
         except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return Response(content=image, media_type="image/jpeg")

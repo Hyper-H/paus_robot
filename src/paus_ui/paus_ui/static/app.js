@@ -19,6 +19,8 @@ const state = {
   wsConnected: false,
   imageWsConnected: false,
   liveImageObjectUrl: "",
+  liveImagePendingUrl: "",
+  liveImageLoading: false,
   liveImageFallbackTimer: null,
   liveImageWatchdogTimer: null,
   liveImageReconnectTimer: null,
@@ -56,6 +58,7 @@ const els = {
   sampleCount: document.getElementById("sample-count"),
   acceptedCount: document.getElementById("accepted-count"),
   skippedCount: document.getElementById("skipped-count"),
+  failedCount: document.getElementById("failed-count"),
   pendingCount: document.getElementById("pending-count"),
   residualGrid: document.getElementById("residual-grid"),
   residualBars: document.getElementById("residual-bars"),
@@ -71,6 +74,9 @@ const els = {
   eventLog: document.getElementById("event-log"),
   eventMode: document.getElementById("event-mode"),
   deleteBtn: document.getElementById("delete-btn"),
+  newTrajectoryBtn: document.getElementById("new-trajectory-btn"),
+  trajectoryControls: document.getElementById("trajectory-controls"),
+  runControls: document.getElementById("run-controls"),
   loadSessionTrajectoryBtn: document.getElementById("load-session-trajectory-btn"),
 };
 
@@ -96,7 +102,7 @@ const QUALITY_SCHEMAS = {
       { path: "rotation_residual_deg", label: "rot resid deg", digits: 4, suffix: " deg" },
       { key: "capture", label: "capture", kind: "bool" },
       { key: "reason_display", label: "reason" },
-      { key: "thumbnail", label: "thumbnail", kind: "thumb" },
+      { key: "thumbnail", label: "抓图", kind: "thumb" },
     ],
     previewFields: [
       { path: "reprojection_error_px", label: "reprojection_error_px", digits: 3 },
@@ -135,7 +141,7 @@ const QUALITY_SCHEMAS = {
       { path: "board_angle_deg", label: "\u68cb\u76d8\u89d2\u5ea6", digits: 2, suffix: " deg" },
       { key: "capture", label: "capture", kind: "bool" },
       { key: "reason_display", label: "reason" },
-      { key: "thumbnail", label: "thumbnail", kind: "thumb" },
+      { key: "thumbnail", label: "抓图", kind: "thumb" },
     ],
     previewFields: [
       { path: "quality_payload.valid_depth_ratio", label: "valid_depth_ratio", digits: 2 },
@@ -152,6 +158,18 @@ const QUALITY_SCHEMAS = {
     ],
   },
 };
+
+const WAYPOINT_STATUS_LABELS = {
+  accepted: "\u5df2\u63a5\u53d7",
+  skipped: "\u5df2\u8df3\u8fc7",
+  failed: "\u5931\u8d25",
+  running: "\u8fdb\u884c\u4e2d",
+  pending: "\u5f85\u91c7\u96c6",
+};
+
+function waypointStatusLabel(status) {
+  return WAYPOINT_STATUS_LABELS[status] || text(status, "-");
+}
 
 function getValueByPath(source, path) {
   if (!path) return source;
@@ -191,15 +209,15 @@ function renderColumnValue(column, item, displayIndex) {
   const raw = column.key === 'index' ? displayIndex : (column.kind === 'thumb' ? null : getValueByPath(item, column.path || column.key));
   if (column.kind === 'index') return escapeHtml(displayIndex);
   if (column.kind === 'pill') {
-    if (column.key === 'status') return `<span class="status-pill ${escapeHtml(text(raw, '-'))}">${escapeHtml(text(raw, '-'))}</span>`;
+    if (column.key === 'status') return `<span class="status-pill ${escapeHtml(text(raw, '-'))}">${escapeHtml(waypointStatusLabel(text(raw, '-')))}</span>`;
     if (column.key === 'result') return `<span class="result-pill ${escapeHtml(String(text(raw, '-')).toLowerCase())}">${escapeHtml(text(raw, '-'))}</span>`;
     return `<span>${escapeHtml(text(raw, '-'))}</span>`;
   }
   if (column.kind === 'bool') return escapeHtml(raw === false ? 'no' : (raw === true ? 'OK' : '--'));
   if (column.kind === 'thumb') {
     const row = item.sample_row_index || item.row_index || item.index;
-    if (item.has_image && row) {
-      const src = `/api/sessions/${encodeURIComponent(state.selectedSession)}/sample-image/${row}.jpg?mode=raw&axes=false`;
+    const src = item.thumbnail_url || (state.selectedSession && row ? `/api/sessions/${encodeURIComponent(state.selectedSession)}/sample-image/${row}.jpg?mode=raw&axes=false` : "");
+    if (item.has_image && src) {
       return `<button class="thumb-button" type="button" data-row="${row}"><img class="thumb-image" data-src="${src}" alt="sample ${row}" loading="lazy" decoding="async" /></button>`;
     }
     return '-';
@@ -300,6 +318,10 @@ function clearLiveImageObjectUrl() {
     URL.revokeObjectURL(state.liveImageObjectUrl);
     state.liveImageObjectUrl = "";
   }
+  if (state.liveImagePendingUrl) {
+    URL.revokeObjectURL(state.liveImagePendingUrl);
+    state.liveImagePendingUrl = "";
+  }
 }
 
 function showLivePlaceholder(message) {
@@ -319,7 +341,31 @@ function markLiveImageFrameReceived() {
 
 function refreshLiveImageHttp(force = false) {
   if (state.imageWsConnected && !force) return;
+  state.liveImageLoading = false;
   els.liveImage.src = `/api/image/latest.jpg?mode=raw&axes=false&t=${Date.now()}`;
+}
+
+function displayLiveImageUrl(nextUrl) {
+  if (state.liveImageLoading) {
+    if (state.liveImagePendingUrl) URL.revokeObjectURL(state.liveImagePendingUrl);
+    state.liveImagePendingUrl = nextUrl;
+    return;
+  }
+  const previousUrl = state.liveImageObjectUrl;
+  state.liveImageObjectUrl = nextUrl;
+  state.liveImageLoading = true;
+  els.liveImage.src = nextUrl;
+  if (previousUrl) {
+    window.setTimeout(() => URL.revokeObjectURL(previousUrl), 0);
+  }
+}
+
+function flushPendingLiveImage() {
+  state.liveImageLoading = false;
+  if (!state.liveImagePendingUrl) return;
+  const nextUrl = state.liveImagePendingUrl;
+  state.liveImagePendingUrl = "";
+  displayLiveImageUrl(nextUrl);
 }
 
 function startLiveImageFallback() {
@@ -402,13 +448,8 @@ function connectLiveImageStream() {
     if (!(payload instanceof ArrayBuffer)) return;
     const blob = new Blob([payload], { type: "image/jpeg" });
     const nextUrl = URL.createObjectURL(blob);
-    const previousUrl = state.liveImageObjectUrl;
-    state.liveImageObjectUrl = nextUrl;
-    els.liveImage.src = nextUrl;
+    displayLiveImageUrl(nextUrl);
     markLiveImageFrameReceived();
-    if (previousUrl) {
-      window.setTimeout(() => URL.revokeObjectURL(previousUrl), 0);
-    }
   });
   socket.addEventListener("error", () => {
     // error is followed by close; handled there.
@@ -435,6 +476,8 @@ async function refreshStatus() {
   const observationMode = handeye.observation_mode || workflow.observation_mode || current.observation_mode || state.observationMode || 'rgb_pnp';
   state.observationMode = observationMode;
   state.qualitySchema = QUALITY_SCHEMAS[observationMode] || QUALITY_SCHEMAS.rgb_pnp;
+  renderTableHeader();
+  setModeToggleActive(state.observationMode);
   if (handeye.trajectory_dirty !== null && handeye.trajectory_dirty !== undefined) {
     state.waypointsDirty = Boolean(handeye.trajectory_dirty);
   }
@@ -446,14 +489,26 @@ async function refreshStatus() {
   setChip(els.motionChip, motionLabel, motionTone);
   const runBtn = document.getElementById("run-btn");
   const dryRunBtn = document.getElementById("dry-run-btn");
+  const stopBtn = document.getElementById("stop-btn");
+  const runActive = Boolean(handeye.run_active);
   if (handeye.execute_motion) {
-    runBtn.textContent = "▶ 开始标定（真机）";
+    runBtn.textContent = "开始标定（真机）";
     runBtn.title = "机械臂将真实运动！确认工作空间安全后操作。";
     dryRunBtn.style.display = "none";
   } else {
-    runBtn.textContent = "▶ 开始标定";
+    runBtn.textContent = "开始标定";
     runBtn.title = "当前为 dry-run 模式，机械臂不会真实运动。";
     dryRunBtn.style.display = "";
+  }
+  if (runActive) {
+    els.trajectoryControls?.classList.add("hidden");
+    dryRunBtn.style.display = "none";
+    runBtn.style.display = "none";
+    stopBtn.style.display = "";
+  } else {
+    els.trajectoryControls?.classList.remove("hidden");
+    runBtn.style.display = "";
+    stopBtn.style.display = "none";
   }
   if (!handeye.motion_state_known && handeye.calibration_node_connected) {
     setChip(els.motionChip, "运动状态未知 — 请确认", "warn");
@@ -580,6 +635,7 @@ async function refreshReport() {
   els.sampleCount.textContent = report.sample_count ?? "--";
   els.acceptedCount.textContent = report.accepted_count ?? "--";
   els.skippedCount.textContent = report.skipped_count ?? "--";
+  els.failedCount.textContent = report.failed_count ?? "--";
   els.pendingCount.textContent = report.pending_count ?? "--";
   if (!report.has_solution) {
     const message = report.is_invalid
@@ -609,6 +665,7 @@ function renderEmptyReport(message) {
   els.sampleCount.textContent = "--";
   els.acceptedCount.textContent = "--";
   els.skippedCount.textContent = "--";
+  els.failedCount.textContent = "--";
   els.pendingCount.textContent = "--";
   els.residualGrid.innerHTML = "";
   els.residualBars.innerHTML = "";
@@ -624,6 +681,19 @@ function renderWaypointLoadError(message) {
   updateDeleteButtonState();
   renderPreview(null);
   els.previewEmpty.textContent = error;
+}
+
+function clearWaypointView(message = "正在加载 waypoints...") {
+  clearThumbnailObserver();
+  state.waypoints = [];
+  state.selectedWaypointName = "";
+  state.selectedSampleRow = null;
+  els.waypointStats.textContent = "加载中";
+  els.tableFooter.textContent = message;
+  const colspan = (activeSchema().tableColumns || []).length || 12;
+  els.waypointBody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">${escapeHtml(message)}</td></tr>`;
+  updateDeleteButtonState();
+  renderPreview(null);
 }
 
 async function refreshWaypoints() {
@@ -679,9 +749,11 @@ async function refreshWaypoints() {
   }
   const accepted = state.waypoints.filter((item) => item.status === "accepted").length;
   const skipped = state.waypoints.filter((item) => item.status === "skipped").length;
+  const failed = state.waypoints.filter((item) => item.status === "failed").length;
+  const running = state.waypoints.filter((item) => item.status === "running").length;
   const pending = state.waypoints.filter((item) => item.status === "pending").length;
   els.waypointStats.textContent = `\u5171 ${state.waypoints.length} \u4e2a\u70b9`;
-  els.tableFooter.textContent = `\u5df2\u63a5\u53d7 ${accepted}\u3000\u8df3\u8fc7 ${skipped}\u3000\u5f85\u91c7\u96c6 ${pending}`;
+  els.tableFooter.textContent = `\u5df2\u63a5\u53d7 ${accepted}\u3000\u8df3\u8fc7 ${skipped}\u3000\u5931\u8d25 ${failed}\u3000\u8fdb\u884c\u4e2d ${running}\u3000\u5f85\u91c7\u96c6 ${pending}`;
   els.waypointBody.innerHTML = state.waypoints.map(renderWaypointRow).join("");
   hydrateWaypointThumbnails();
   if (!state.waypoints.length) {
@@ -699,7 +771,7 @@ function renderWaypointRow(item, index) {
   const waypoint = item.waypoint || item;
   const status = item.status || "pending";
   const displayIndex = item.index ?? item.display_index ?? index + 1;
-  const rowClass = status === 'accepted' ? 'quality-good' : status === 'skipped' ? 'quality-warn' : '';
+  const rowClass = status === 'accepted' ? 'quality-good' : status === 'skipped' ? 'quality-warn' : status === 'failed' ? 'quality-bad' : '';
   return `<tr data-name="${escapeHtml(item.name || waypoint.name || '')}" data-row="${item.sample_row_index || ''}" class="${rowClass}">${renderWaypointCells(item, displayIndex)}</tr>`;
 }
 
@@ -731,7 +803,7 @@ function renderPreview(item) {
   const name = item.name || item.waypoint?.name || '未命名';
   els.previewTitle.textContent = `${name} 预览`;
   const rowIndex = item.sample_row_index || item.row_index;
-  els.previewSubtitle.textContent = item.status ? `${item.status} / ${item.result || '-'}` : '选择 waypoint 查看图像和质量指标';
+  els.previewSubtitle.textContent = item.status ? `${waypointStatusLabel(item.status)} / ${item.result || '-'}` : '选择 waypoint 查看图像和质量指标';
   const schema = activeSchema();
   const source = { ...item, quality_payload: item.quality_payload || item.sample_quality || item.record_quality || {} };
   if (state.previewMode === 'raw') {
@@ -851,7 +923,7 @@ function renderPreview(item) {
   const name = item.name || item.waypoint?.name || "样本预览";
   els.previewTitle.textContent = `${name} 预览`;
   const rowIndex = item.sample_row_index;
-  els.previewSubtitle.textContent = item.status ? `${item.status} / ${item.result || "-"}` : "选择 waypoint 查看图像和质量指标";
+  els.previewSubtitle.textContent = item.status ? `${waypointStatusLabel(item.status)} / ${item.result || "-"}` : "选择 waypoint 查看图像和质量指标";
   const t = item.camera_to_board_translation_m || [];
   const r = item.camera_to_board_rotation_rpy_deg || [];
   if (state.previewMode === "raw") {
@@ -859,7 +931,7 @@ function renderPreview(item) {
     if (state.selectedSession && rowIndex && item.has_image) {
       els.previewEmpty.classList.add("hidden");
       els.samplePreview.style.display = "block";
-      els.samplePreview.src = `/api/sessions/${encodeURIComponent(state.selectedSession)}/sample-image/${rowIndex}.jpg?mode=raw&axes=false`;
+      els.samplePreview.src = item.thumbnail_url || `/api/sessions/${encodeURIComponent(state.selectedSession)}/sample-image/${rowIndex}.jpg?mode=raw&axes=false`;
     } else {
       els.samplePreview.removeAttribute("src");
       els.samplePreview.style.display = "none";
@@ -1066,6 +1138,21 @@ async function loadSelectedSessionTrajectory() {
   await refreshAll();
 }
 
+async function newTrajectory() {
+  const confirmed = window.confirm("新建轨迹会清空当前将运行的 waypoints，并删除 current 轨迹文件；历史 sessions 不会被删除。");
+  if (!confirmed) return;
+  clearWaypointView("正在新建空轨迹...");
+  const result = await runCommand("新建轨迹", "/api/handeye/new_trajectory");
+  if (result?.success) {
+    state.selectedSession = "";
+    state.userSelectedSession = false;
+    state.currentTrajectorySelected = true;
+    state.autoSelectedSession = false;
+    state.selectionVersion += 1;
+  }
+  await refreshAll();
+}
+
 
 function addEvent(event) {
   const key = event.dedupe_key || `${event.type}:${event.operator_message || event.message || ""}`;
@@ -1097,12 +1184,13 @@ function showCompletionDialog(handeye, report) {
   const sampleCount = report?.sample_count ?? workflow.sample_count ?? "--";
   const accepted = report?.accepted_count ?? "--";
   const skipped = report?.skipped_count ?? "--";
+  const failed = report?.failed_count ?? "--";
   const isSuccess = stage === "finished";
   const title = isSuccess ? "标定完成" : "标定异常";
   const body = [
     `<div class="kv"><span>状态</span><strong>${escapeHtml(workflow.label || stage)}</strong></div>`,
     `<div class="kv"><span>采集样本数</span><strong>${sampleCount}</strong></div>`,
-    `<div class="kv"><span>已接受 / 已跳过</span><strong>${accepted} / ${skipped}</strong></div>`,
+    `<div class="kv"><span>已接受 / 已跳过 / 失败</span><strong>${accepted} / ${skipped} / ${failed}</strong></div>`,
     `<div class="kv"><span>报告路径</span><strong>${escapeHtml(reportPath || "暂无")}</strong></div>`,
     `<div class="kv"><span>extrinsics 写入</span><strong>${report?.has_solution ? "已写入" : "未写入"}</strong></div>`,
     `<div class="kv"><span>session ID</span><strong>${escapeHtml(session.session_id || "--")}</strong></div>`,
@@ -1179,9 +1267,14 @@ function connectEvents() {
 }
 
 function bindUi() {
-  els.liveImage.addEventListener("load", hideLivePlaceholder);
+  els.liveImage.addEventListener("load", () => {
+    hideLivePlaceholder();
+    flushPendingLiveImage();
+  });
   els.liveImage.addEventListener("error", () => {
+    state.liveImageLoading = false;
     showLivePlaceholder(state.imageWsConnected ? "图像加载失败" : "等待相机图像");
+    flushPendingLiveImage();
   });
   document.querySelectorAll('[data-observation-mode]').forEach((button) => {
     button.addEventListener('click', async () => {
@@ -1192,6 +1285,8 @@ function bindUi() {
       if (result?.success) {
         state.observationMode = result.observation_mode || result.mode || mode;
         setModeToggleActive(state.observationMode);
+        renderTableHeader();
+        refreshWaypoints();
       }
     });
   });
@@ -1205,6 +1300,7 @@ function bindUi() {
   });
   document.getElementById("record-btn").addEventListener("click", () => runCommand("记录当前点", "/api/handeye/record_waypoint"));
   els.deleteBtn.addEventListener("click", deleteSelectedWaypoint);
+  els.newTrajectoryBtn?.addEventListener("click", newTrajectory);
   els.loadSessionTrajectoryBtn?.addEventListener("click", loadSelectedSessionTrajectory);
   updateDeleteButtonState();
   updateLoadSessionTrajectoryButton();
@@ -1261,6 +1357,7 @@ function bindUi() {
     state.selectedWaypointName = "";
     state.selectedSampleRow = null;
     state.selectionVersion += 1;
+    clearWaypointView(selectedSession ? "正在加载历史 session waypoints..." : "正在加载当前轨迹 waypoints...");
     updateDeleteButtonState();
     updateLoadSessionTrajectoryButton();
     refreshReport();
@@ -1281,6 +1378,7 @@ function bindUi() {
 
 bindUi();
 initPreviewErrorHandler();
+renderTableHeader();
 showLivePlaceholder("等待相机图像");
 refreshLiveImageHttp();
 connectLiveImageStream();
