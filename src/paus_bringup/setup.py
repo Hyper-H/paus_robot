@@ -25,6 +25,7 @@ setup(
     entry_points={
         "console_scripts": [
             "stop_paus_runtime = paus_bringup.stop_paus_runtime:main",
+            "static_locked_target_publisher = paus_bringup.static_locked_target_publisher:main",
         ],
     },
 )
