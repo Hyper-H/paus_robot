@@ -17,6 +17,7 @@ if str(PERCEPTION_PACKAGE_ROOT) not in sys.path:
 
 from paus_perception.neck_surface import (
     REASON_INSUFFICIENT_CENTER_DEPTH_POINTS,
+    REASON_INSUFFICIENT_REFINEMENT_POINTS,
     REASON_INSUFFICIENT_PATCH_POINTS,
     REASON_LOW_KEYPOINT_CONFIDENCE,
     REASON_NECK_WINDOW_OUT_OF_BOUNDS,
@@ -24,14 +25,18 @@ from paus_perception.neck_surface import (
     REASON_TANGENT_DIRECTION_DEGENERATE,
     STATUS_FAILED,
     STATUS_OK,
+    TARGET_MODE_SHOULDER_CENTER,
     ImageWindow,
     NeckSurfaceConfig,
     PoseKeypoint,
     build_neck_windows,
+    build_side_approach_rotation,
     build_surface_rotation,
     compute_target_point_from_anchor,
     depth_to_meters,
     draw_debug_overlay,
+    draw_eval_overlay,
+    draw_surface_overlay,
     estimate_neck_surface_pose,
     estimate_pca_normal,
     extract_local_patch,
@@ -144,6 +149,17 @@ class NeckSurfaceGeometryTests(unittest.TestCase):
         np.testing.assert_allclose(rotation.T @ rotation, np.eye(3), atol=1e-9)
         self.assertTrue(math.isclose(float(np.linalg.det(rotation)), 1.0, rel_tol=1e-9))
 
+    def test_side_approach_rotation_uses_patient_left_outward_as_z_axis(self) -> None:
+        patient_left_outward = np.array([-1.0, 0.0, 0.0], dtype=np.float64)
+        shoulder_vec = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        fallback_tangent = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+
+        rotation = build_side_approach_rotation(patient_left_outward, shoulder_vec, fallback_tangent)
+
+        np.testing.assert_allclose(rotation[:, 2], patient_left_outward, atol=1e-9)
+        np.testing.assert_allclose(rotation.T @ rotation, np.eye(3), atol=1e-9)
+        self.assertTrue(math.isclose(float(np.linalg.det(rotation)), 1.0, rel_tol=1e-9))
+
     def test_degenerate_tangent_raises(self) -> None:
         with self.assertRaises(ValueError):
             project_tangent_to_plane(np.array([0.0, 0.0, 1.0]), np.array([0.0, 0.0, 1.0]))
@@ -174,11 +190,11 @@ class NeckSurfaceEstimatorTests(unittest.TestCase):
         np.testing.assert_allclose(rotation.T @ rotation, np.eye(3), atol=1e-9)
         self.assertTrue(math.isclose(float(np.linalg.det(rotation)), 1.0, rel_tol=1e-9))
 
-    def test_estimator_applies_patient_left_target_offset(self) -> None:
+    def test_estimator_refines_patient_left_target_without_second_offset(self) -> None:
         cfg = NeckSurfaceConfig(
             min_center_points=10,
             min_patch_points=8,
-            patch_radius_mm=80.0,
+            patch_radius_mm=35.0,
             target_region="patient_left",
             lateral_offset_mm=30.0,
             inferior_offset_mm=10.0,
@@ -187,14 +203,86 @@ class NeckSurfaceEstimatorTests(unittest.TestCase):
         self.assertEqual(estimate.status, STATUS_OK, msg=estimate.message)
         assert estimate.surface_point_camera_m is not None
         assert estimate.target_point_camera_m is not None
+        assert estimate.coarse_surface_point_camera_m is not None
+        assert estimate.coarse_target_point_camera_m is not None
         self.assertEqual(estimate.target_region, "patient_left")
+        self.assertEqual(estimate.refinement_status, STATUS_OK)
+        np.testing.assert_allclose(estimate.target_point_camera_m, estimate.surface_point_camera_m, atol=1e-9)
         self.assertGreater(
-            float(np.linalg.norm(np.asarray(estimate.target_point_camera_m) - np.asarray(estimate.surface_point_camera_m))),
-            0.02,
+            float(np.linalg.norm(np.asarray(estimate.coarse_target_point_camera_m) - np.asarray(estimate.coarse_surface_point_camera_m))),
+            0.025,
+        )
+        self.assertLess(
+            float(np.linalg.norm(np.asarray(estimate.target_point_camera_m) - np.asarray(estimate.coarse_target_point_camera_m))),
+            0.025,
         )
         payload = estimate.status_payload()
         self.assertEqual(payload["neck_anchor_camera_m"], estimate.surface_point_camera_m)
         self.assertEqual(payload["target_point_camera_m"], estimate.target_point_camera_m)
+        self.assertEqual(payload["coarse_target_point_camera_m"], estimate.coarse_target_point_camera_m)
+        self.assertEqual(payload["refinement_status"], STATUS_OK)
+        assert estimate.motion_normal_camera is not None
+        assert estimate.patient_left_outward_normal_camera is not None
+        assert estimate.pca_surface_normal_camera is not None
+        np.testing.assert_allclose(np.asarray(estimate.rotation_matrix_camera, dtype=np.float64)[:, 2], estimate.motion_normal_camera, atol=1e-9)
+        np.testing.assert_allclose(estimate.pca_surface_normal_camera, estimate.surface_normal_camera, atol=1e-9)
+        np.testing.assert_allclose(estimate.motion_normal_camera, estimate.pca_surface_normal_camera, atol=1e-9)
+        self.assertTrue(math.isclose(float(np.linalg.norm(estimate.patient_left_outward_normal_camera)), 1.0, rel_tol=1e-9))
+        self.assertEqual(payload["motion_normal_camera"], estimate.motion_normal_camera)
+        self.assertEqual(payload["pca_surface_normal_camera"], estimate.pca_surface_normal_camera)
+
+    def test_estimator_can_target_shoulder_center_without_refinement(self) -> None:
+        cfg = NeckSurfaceConfig(
+            min_center_points=10,
+            min_patch_points=8,
+            patch_radius_mm=35.0,
+            target_mode=TARGET_MODE_SHOULDER_CENTER,
+            target_region="patient_left",
+            lateral_offset_mm=50.0,
+            inferior_offset_mm=10.0,
+        )
+
+        estimate = estimate_neck_surface_pose(_keypoints(), _depth_image(), _camera_matrix(), cfg)
+
+        self.assertEqual(estimate.status, STATUS_OK, msg=estimate.message)
+        self.assertEqual(estimate.target_mode, TARGET_MODE_SHOULDER_CENTER)
+        self.assertEqual(estimate.refinement_status, "skipped")
+        self.assertEqual(estimate.refinement_reason, TARGET_MODE_SHOULDER_CENTER)
+        assert estimate.left_shoulder_camera_m is not None
+        assert estimate.right_shoulder_camera_m is not None
+        assert estimate.shoulder_center_camera_m is not None
+        expected_center = (
+            np.asarray(estimate.left_shoulder_camera_m, dtype=np.float64)
+            + np.asarray(estimate.right_shoulder_camera_m, dtype=np.float64)
+        ) / 2.0
+        np.testing.assert_allclose(estimate.shoulder_center_camera_m, expected_center, atol=1e-9)
+        np.testing.assert_allclose(estimate.target_point_camera_m, estimate.shoulder_center_camera_m, atol=1e-9)
+        assert estimate.rotation_matrix_camera is not None
+        np.testing.assert_allclose(np.asarray(estimate.rotation_matrix_camera, dtype=np.float64)[:, 2], estimate.motion_normal_camera, atol=1e-9)
+        np.testing.assert_allclose(estimate.motion_normal_camera, estimate.pca_surface_normal_camera, atol=1e-9)
+        assert estimate.patient_left_outward_normal_camera is not None
+        self.assertTrue(math.isclose(float(np.linalg.norm(estimate.patient_left_outward_normal_camera)), 1.0, rel_tol=1e-9))
+        payload = estimate.status_payload()
+        self.assertEqual(payload["target_mode"], TARGET_MODE_SHOULDER_CENTER)
+        self.assertEqual(payload["shoulder_center_camera_m"], estimate.shoulder_center_camera_m)
+
+    def test_estimator_fails_refinement_without_coarse_fallback_target(self) -> None:
+        cfg = NeckSurfaceConfig(
+            min_center_points=10,
+            min_patch_points=8,
+            patch_radius_mm=30.0,
+            target_region="patient_left",
+            lateral_offset_mm=200.0,
+            inferior_offset_mm=0.0,
+        )
+        estimate = estimate_neck_surface_pose(_keypoints(), _depth_image(), _camera_matrix(), cfg)
+        self.assertEqual(estimate.status, STATUS_FAILED)
+        self.assertEqual(estimate.reason, REASON_INSUFFICIENT_PATCH_POINTS)
+        self.assertEqual(estimate.refinement_status, STATUS_FAILED)
+        self.assertEqual(estimate.refinement_reason, REASON_INSUFFICIENT_REFINEMENT_POINTS)
+        self.assertIsNone(estimate.target_point_camera_m)
+        self.assertIsNone(estimate.rotation_matrix_camera)
+        self.assertIsNotNone(estimate.coarse_target_point_camera_m)
 
     def test_estimator_fails_when_center_depth_is_sparse(self) -> None:
         cfg = NeckSurfaceConfig(min_center_points=10)
@@ -240,15 +328,50 @@ class NeckSurfaceEstimatorTests(unittest.TestCase):
         depth = _depth_image()
         estimate = estimate_neck_surface_pose(_keypoints(), depth, _camera_matrix(), cfg)
         debug = draw_debug_overlay(image, estimate)
+        debug_eval = draw_eval_overlay(
+            image,
+            estimate,
+            _camera_matrix(),
+            {
+                "status": "ok",
+                "marker_pose_camera_m": [0.0, 0.0, 0.7],
+                "markerless_target_camera_m": estimate.target_point_camera_m,
+                "error_norm_mm": 12.0,
+                "normal_angle_error_deg": 5.0,
+            },
+        )
+        debug_surface = draw_surface_overlay(image, estimate, _camera_matrix())
         self.assertEqual(debug.shape, image.shape)
         with tempfile.TemporaryDirectory() as tmp_dir:
-            frame_dir = write_logging_artifacts(tmp_dir, image, depth, debug, estimate, "frame_000001")
+            frame_dir = write_logging_artifacts(
+                tmp_dir,
+                image,
+                depth,
+                debug,
+                estimate,
+                "frame_000001",
+                debug_eval_image=debug_eval,
+                debug_surface_image=debug_surface,
+                save_depth=False,
+            )
             self.assertTrue((frame_dir / "rgb.png").exists())
-            self.assertTrue((frame_dir / "depth.npy").exists())
+            self.assertFalse((frame_dir / "depth.npy").exists())
             self.assertTrue((frame_dir / "debug.png").exists())
+            self.assertTrue((frame_dir / "debug_eval.png").exists())
+            self.assertTrue((frame_dir / "debug_surface.png").exists())
             metadata = json.loads((frame_dir / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["source"], "markerless_neck")
             self.assertIn("keypoints", metadata)
+
+    def test_logging_can_save_depth_when_enabled(self) -> None:
+        cfg = NeckSurfaceConfig(min_center_points=10, min_patch_points=8, patch_radius_mm=80.0)
+        image = np.zeros((480, 640, 3), dtype=np.uint8)
+        depth = _depth_image()
+        estimate = estimate_neck_surface_pose(_keypoints(), depth, _camera_matrix(), cfg)
+        debug = draw_debug_overlay(image, estimate)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            frame_dir = write_logging_artifacts(tmp_dir, image, depth, debug, estimate, "frame_000001", save_depth=True)
+            self.assertTrue((frame_dir / "depth.npy").exists())
 
 
 if __name__ == "__main__":

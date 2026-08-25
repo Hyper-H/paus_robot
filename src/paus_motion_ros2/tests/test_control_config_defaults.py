@@ -28,6 +28,34 @@ class ConfigControlDefaultsTests(unittest.TestCase):
         self.assertNotIn("prefer_windows_exec_bridge", control)
         self.assertNotIn("prefer_remote_command_service", control)
 
+    def test_default_control_config_uses_side_approach_hover(self) -> None:
+        config = load_config(PROJECT_ROOT / "src" / "paus_bringup" / "configs" / "default.yaml")
+        control = config["control"]
+        self.assertFalse(control["execute_motion"])
+        self.assertEqual(control["hover_clearance_mm"], 50.0)
+        self.assertFalse(control["prefer_positive_z_surface_normal"])
+        self.assertEqual(control["max_execution_stage"], "final_hover")
+        self.assertEqual(control["motion_strategy"], "staged_patient_left_final_hover")
+        self.assertFalse(control["move_to_approach_ready_on_start"])
+        self.assertEqual(len(control["approach_ready_joint_deg"]), 6)
+        self.assertTrue(all(isinstance(value, (int, float)) for value in control["approach_ready_joint_deg"]))
+        self.assertEqual(control["approach_ready_tolerance_deg"], 10.0)
+        self.assertEqual(control["approach_ready_vel"], 30.0)
+        self.assertEqual(control["pre_approach_vel"], 20.0)
+        self.assertEqual(control["final_hover_vel"], 5.0)
+        self.assertEqual(control["joint_motion_blend_time_ms"], 0.0)
+        self.assertEqual(control["joint_motion_done_timeout_s"], 120.0)
+        self.assertFalse(control["final_hover_servo_enabled"])
+        self.assertEqual(control["final_hover_servo_max_step_mm"], 1.0)
+        self.assertEqual(control["final_hover_servo_max_step_deg"], 0.3)
+        self.assertEqual(control["final_hover_servo_ready_timeout_s"], 10.0)
+        self.assertTrue(control["final_hover_servo_orientation_enabled"])
+        self.assertEqual(control["max_direct_final_hover_distance_mm"], 250.0)
+        self.assertEqual(control["roll_policy"], "base_up_projection")
+        self.assertEqual(control["roll_offset_deg"], 0.0)
+        self.assertTrue(control["require_locked_target_before_motion"])
+        self.assertTrue(control["continue_with_last_locked_target_on_source_loss"])
+
     def test_user_config_can_override_fairino_sdk_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.yaml"
@@ -50,15 +78,22 @@ class ConfigControlDefaultsTests(unittest.TestCase):
             self.assertEqual(control["linux_fairino_sdk_root"], "/srv/fairino/linux_sdk")
             self.assertTrue(control["use_mock_pose"])
 
-    def test_default_yaml_paths_resolve_against_project_root(self) -> None:
+    def test_default_yaml_uses_external_calibration_artifacts(self) -> None:
         config_path = PROJECT_ROOT / "src" / "paus_bringup" / "configs" / "default.yaml"
 
         config = load_config(config_path)
         calibration = config["calibration"]
 
-        self.assertEqual(calibration["output_path"], str(PROJECT_ROOT / "src" / "paus_bringup" / "configs" / "extrinsics.yaml"))
-        self.assertEqual(calibration["trajectory_path"], str(PROJECT_ROOT / "src" / "paus_bringup" / "configs" / "eye_to_hand_trajectory.yaml"))
-        self.assertEqual(calibration["session_root_path"], str(PROJECT_ROOT / "calibration_sessions"))
+        self.assertEqual(calibration["output_path"], "/mnt/data/projects/paus_robot/calibration/current/extrinsics.yaml")
+        self.assertEqual(calibration["session_root_path"], "/mnt/data/projects/paus_robot/calibration/sessions")
+        self.assertEqual(
+            calibration["example_output_path"],
+            str(PROJECT_ROOT / "src" / "paus_bringup" / "configs" / "extrinsics.yaml"),
+        )
+        self.assertEqual(
+            calibration["trajectory_path"],
+            str(PROJECT_ROOT / "src" / "paus_bringup" / "configs" / "eye_to_hand_trajectory.example.yaml"),
+        )
 
     def test_resolve_config_path_uses_config_location_for_relative_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -128,6 +163,58 @@ class FairinoLinuxClientTests(unittest.TestCase):
 
         self.assertEqual(error, 0)
         self.assertEqual(client.robot.kwargs["acc"], 7.5)
+
+    def test_move_j_forwards_nonblocking_blend_time_when_present(self) -> None:
+        class RobotStub:
+            def __init__(self) -> None:
+                self.kwargs = None
+
+            def MoveJ(self, joint_pos, **kwargs):
+                del joint_pos
+                self.kwargs = kwargs
+                return 0
+
+        client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
+        client.robot = RobotStub()
+
+        error = client.move_j([1, 2, 3, 4, 5, 6], tool_id=0, user_id=0, vel=10.0, blend_time_ms=0.0)
+
+        self.assertEqual(error, 0)
+        self.assertEqual(client.robot.kwargs["blendT"], 0.0)
+
+    def test_move_j_pose_forwards_desc_pos_matching_inverse_kin_target(self) -> None:
+        class RobotStub:
+            def __init__(self) -> None:
+                self.inverse_kin_exaxis_args = None
+                self.move_j_args = None
+                self.move_j_kwargs = None
+
+            def GetInverseKinExaxis(self, type_id, desc_pos, exaxis, tool, workpiece):
+                self.inverse_kin_exaxis_args = (type_id, desc_pos, exaxis, tool, workpiece)
+                return (0, [11, 22, 33, 44, 55, 66])
+
+            def MoveJ(self, joint_pos, **kwargs):
+                self.move_j_args = joint_pos
+                self.move_j_kwargs = kwargs
+                return 0
+
+        client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
+        client.robot = RobotStub()
+
+        error = client.move_j_pose(
+            [100, 200, 300, 1, 2, 3],
+            joint_pos_ref_deg=[1, 1, 1, 1, 1, 1],
+            tool_id=1,
+            user_id=0,
+            vel=10.0,
+            acc=7.5,
+        )
+
+        self.assertEqual(error, 0)
+        self.assertEqual(client.robot.inverse_kin_exaxis_args, (0, [100.0, 200.0, 300.0, 1.0, 2.0, 3.0], [0.0, 0.0, 0.0, 0.0], 1, 0))
+        self.assertEqual(client.robot.move_j_args, [11.0, 22.0, 33.0, 44.0, 55.0, 66.0])
+        self.assertEqual(client.robot.move_j_kwargs["desc_pos"], [100.0, 200.0, 300.0, 1.0, 2.0, 3.0])
+        self.assertEqual(client.robot.move_j_kwargs["tool"], 1)
 
     def test_normalize_pose_result_accepts_sdk_list_shape(self) -> None:
         client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")

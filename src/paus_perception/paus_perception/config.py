@@ -69,12 +69,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "solver_method": "opencv_handeye_park",
         # 求解前最少需要的样本数。
         "min_sample_count": 10,
-        # 标定结果默认保存路径。
-        "output_path": "extrinsics.yaml",
-        # 半自动标定示教轨迹保存路径。
-        "trajectory_path": "eye_to_hand_trajectory.yaml",
-        # 每次半自动标定运行的归档目录根路径。
-        "session_root_path": "calibration_sessions",
+        # 真实标定结果默认保存路径，位于 repo 外部的部署 artifact 目录。
+        "output_path": "/mnt/data/projects/paus_robot/calibration/current/extrinsics.yaml",
+        # repo 内 identity/example 外参，仅供 test、dry-run、demo 使用。
+        "example_output_path": "src/paus_bringup/configs/extrinsics.yaml",
+        # 半自动标定示教轨迹默认读取 repo 内示例文件。
+        "trajectory_path": "src/paus_bringup/configs/eye_to_hand_trajectory.example.yaml",
+        # 每次半自动标定运行的归档目录根路径，位于 repo 外部。
+        "session_root_path": "/mnt/data/projects/paus_robot/calibration/sessions",
         # 是否保存每个有效样本图像。
         "save_sample_images": True,
         # 棋盘 solvePnP 质量过滤阈值。
@@ -235,7 +237,7 @@ def _resolve_project_paths(config: dict[str, Any], config_path: Path) -> dict[st
     calibration = config.get("calibration", {})
     if not isinstance(calibration, dict):
         return config
-    for field_name in ("output_path", "trajectory_path"):
+    for field_name in ("output_path", "example_output_path", "trajectory_path"):
         value = calibration.get(field_name)
         if value:
             calibration[field_name] = _resolve_config_artifact_path(value, config_path)
