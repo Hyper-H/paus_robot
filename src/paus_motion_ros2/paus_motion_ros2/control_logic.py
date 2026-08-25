@@ -17,6 +17,8 @@ PRE_APPROACH_STAGE = "pre_approach"
 REORIENT_STAGE = "reorient"
 FINAL_HOVER_STAGE = "final_hover"
 SAFE_LIFT_STAGE = "safe_lift"
+ROLL_POLICY_CURRENT_TCP_PROJECTION = "current_tcp_projection"
+ROLL_POLICY_BASE_UP_PROJECTION = "base_up_projection"
 
 STAGE_ORDER: dict[str, int] = {
     SAFE_LIFT_STAGE: -1,
@@ -108,6 +110,9 @@ def _build_face_aligned_rotation(
     surface_normal_base: np.ndarray,
     current_rotation: np.ndarray,
     flange_face_axis: str,
+    *,
+    roll_policy: str = ROLL_POLICY_CURRENT_TCP_PROJECTION,
+    roll_offset_deg: float = 0.0,
 ) -> np.ndarray:
     face_axis_local = _parse_axis_spec(flange_face_axis)
     face_axis_local = _unit_vector(face_axis_local, "Flange face axis is degenerate.")
@@ -122,10 +127,20 @@ def _build_face_aligned_rotation(
         "Local side axis is degenerate.",
     )
 
-    preferred_world_anchor = current_rotation @ local_anchor_axis
+    if roll_policy == ROLL_POLICY_CURRENT_TCP_PROJECTION:
+        preferred_world_anchor = current_rotation @ local_anchor_axis
+    elif roll_policy == ROLL_POLICY_BASE_UP_PROJECTION:
+        preferred_world_anchor = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    else:
+        raise ValueError(f"Unsupported roll_policy: {roll_policy}")
+
     world_anchor_projection = _project_onto_plane(preferred_world_anchor, surface_normal_base)
     if float(np.linalg.norm(world_anchor_projection)) <= 1e-9:
-        preferred_world_side = current_rotation @ local_side_axis
+        preferred_world_side = (
+            current_rotation @ local_side_axis
+            if roll_policy == ROLL_POLICY_CURRENT_TCP_PROJECTION
+            else np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        )
         world_anchor_projection = np.cross(preferred_world_side, surface_normal_base)
     if float(np.linalg.norm(world_anchor_projection)) <= 1e-9:
         for fallback_world_axis in (
@@ -146,6 +161,22 @@ def _build_face_aligned_rotation(
         np.cross(world_side_axis, surface_normal_base),
         "World anchor axis is degenerate after orthogonalization.",
     )
+    if abs(float(roll_offset_deg)) > 1e-9:
+        angle_rad = math.radians(float(roll_offset_deg))
+        c = math.cos(angle_rad)
+        s = math.sin(angle_rad)
+        world_anchor_axis = _unit_vector(
+            c * world_anchor_axis + s * world_side_axis,
+            "World anchor axis is degenerate after roll offset.",
+        )
+        world_side_axis = _unit_vector(
+            np.cross(surface_normal_base, world_anchor_axis),
+            "World side axis is degenerate after roll offset.",
+        )
+        world_anchor_axis = _unit_vector(
+            np.cross(world_side_axis, surface_normal_base),
+            "World anchor axis is degenerate after roll offset orthogonalization.",
+        )
 
     local_basis = np.column_stack((local_anchor_axis, local_side_axis, face_axis_local))
     world_basis = np.column_stack((world_anchor_axis, world_side_axis, surface_normal_base))
@@ -279,6 +310,8 @@ def build_approach_decision(
     safe_lift_step_mm: float = 80.0,
     safe_lift_above_marker_mm: float = 180.0,
     safe_lift_max_z_mm: float = 500.0,
+    roll_policy: str = ROLL_POLICY_CURRENT_TCP_PROJECTION,
+    roll_offset_deg: float = 0.0,
 ) -> ControlDecision:
     if stage_switch_buffer_mm is None:
         stage_switch_buffer_mm = 5.0
@@ -352,7 +385,13 @@ def build_approach_decision(
         surface_normal = -surface_normal
 
     try:
-        final_hover_rotation = _build_face_aligned_rotation(surface_normal, current_rotation, flange_face_axis)
+        final_hover_rotation = _build_face_aligned_rotation(
+            surface_normal,
+            current_rotation,
+            flange_face_axis,
+            roll_policy=roll_policy,
+            roll_offset_deg=roll_offset_deg,
+        )
     except ValueError as exc:
         return rejection(str(exc), surface_normal_base=surface_normal.tolist())
 
@@ -372,7 +411,7 @@ def build_approach_decision(
         float(pre_approach_position[0]),
         float(pre_approach_position[1]),
         float(pre_approach_position[2]),
-        *[float(value) for value in current_tcp_pose_mmdeg[3:6]],
+        *[float(value) for value in adjusted_target_orientation_rpy_deg],
     ]
 
     for pose_name, pose_position in (
@@ -416,13 +455,23 @@ def build_approach_decision(
         step_distance = distance_to_final_hover
         candidate_rotation = final_hover_rotation
     elif distance_to_pre_approach > float(stage_switch_buffer_mm):
-        candidate_stage = PRE_APPROACH_STAGE
-        candidate_position, step_distance = _limit_translation_step(
-            current_position,
-            pre_approach_position,
-            float(max_step_distance_mm),
-        )
-        candidate_rotation = current_rotation
+        if orientation_delta_deg > float(DEFAULT_REORIENT_TOLERANCE_DEG):
+            candidate_stage = REORIENT_STAGE
+            candidate_position = current_position.copy()
+            step_distance = 0.0
+            candidate_rotation = _interpolate_rotation_towards(
+                current_rotation,
+                final_hover_rotation,
+                float(DEFAULT_MAX_REORIENT_STEP_DEG),
+            )
+        else:
+            candidate_stage = PRE_APPROACH_STAGE
+            candidate_position, step_distance = _limit_translation_step(
+                current_position,
+                pre_approach_position,
+                float(max_step_distance_mm),
+            )
+            candidate_rotation = final_hover_rotation
     elif orientation_delta_deg > float(DEFAULT_REORIENT_TOLERANCE_DEG):
         candidate_stage = REORIENT_STAGE
         candidate_position = pre_approach_position.copy()
@@ -447,8 +496,8 @@ def build_approach_decision(
         if candidate_order < latch_order:
             if stage_latch == REORIENT_STAGE:
                 candidate_stage = REORIENT_STAGE
-                candidate_position = pre_approach_position.copy()
-                step_distance = float(np.linalg.norm(candidate_position - current_position))
+                candidate_position = current_position.copy()
+                step_distance = 0.0
                 candidate_rotation = _interpolate_rotation_towards(
                     current_rotation,
                     final_hover_rotation,
