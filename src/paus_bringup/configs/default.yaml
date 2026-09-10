@@ -115,7 +115,7 @@ target_lock:
   drift_action: "warn_only"
 
 control:
-  robot_ip: "192.168.58.2"
+  robot_ip: "172.16.33.126"
   linux_fairino_sdk_root: "/opt/fairino_python_sdk/linux"
   execute_motion: false
   tool_id: 2
