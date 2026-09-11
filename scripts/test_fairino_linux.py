@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     # 指定 SDK 根目录。
     parser.add_argument("--sdk-root", default="/opt/fairino_python_sdk/linux", help="Linux FAIRINO SDK root.")
     # 指定机器人控制器 IP。
-    parser.add_argument("--robot-ip", default="192.168.58.2", help="Robot controller IP.")
+    parser.add_argument("--robot-ip", default="172.16.33.126", help="Robot controller IP.")
     # 指定要测试的命令类型。
     parser.add_argument("--command", required=True, choices=("connect", "set_speed", "get_joints", "get_tcp", "move_j", "move_l"))
     # `set_speed` 使用的速度。

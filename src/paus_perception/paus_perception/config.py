@@ -97,7 +97,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # 机械臂接近控制相关配置。
     "control": {
         # 机械臂控制器 IP。
-        "robot_ip": "192.168.58.2",
+        "robot_ip": "172.16.33.126",
         # 官方 Linux FAIRINO Python SDK 根目录。
         "linux_fairino_sdk_root": "/opt/fairino_python_sdk/linux",
         # 默认只做 dry-run，不执行真实动作。
