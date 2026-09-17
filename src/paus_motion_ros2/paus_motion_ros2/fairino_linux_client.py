@@ -6,6 +6,7 @@ import sys
 import socket
 import threading
 import xmlrpc.client
+import time
 from pathlib import Path
 from collections.abc import Sequence
 from xmlrpc.client import Fault
@@ -110,8 +111,11 @@ class FairinoLinuxClient:
 
     # 设置机器人速度倍率。
     def set_speed(self, speed: float) -> int:
+        speed_value = float(speed)
+        if not 0.0 <= speed_value <= 100.0:
+            raise ValueError(f"FAIRINO global speed must be within [0, 100], got {speed_value}.")
         self.ensure_connection()
-        return int(self.robot.SetSpeed(float(speed)))
+        return int(self.robot.SetSpeed(int(round(speed_value))))
 
     def reset_all_error(self) -> int:
         self.ensure_connection()
@@ -129,21 +133,189 @@ class FairinoLinuxClient:
         self.ensure_connection()
         return int(self.robot.Mode(1))
 
-    def prepare_motion(self) -> dict[str, int]:
+    def get_robot_realtime_state(self) -> tuple[int, dict[str, int]]:
+        """Read the controller's current realtime state as JSON-safe scalar fields."""
+        self.ensure_connection()
+        # The Linux SDK initializes `robot_state_pkg` with the ctypes structure
+        # class and replaces it asynchronously when the UDP feedback thread
+        # receives its first packet. Do not try to convert `_ctypes.CField`
+        # descriptors from that transient state.
+        deadline = time.monotonic() + 1.0
+        while True:
+            result = self.robot.GetRobotRealTimeState()
+            if not isinstance(result, Sequence) or len(result) < 2:
+                raise RuntimeError(f"GetRobotRealTimeState returned unexpected result: {result!r}")
+            error = int(result[0])
+            state_pkg = result[1]
+            if error != 0:
+                return error, {}
+            if state_pkg is not None and not isinstance(state_pkg, type):
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "GetRobotRealTimeState returned an uninitialized ctypes state package."
+                )
+            time.sleep(0.02)
+
+        fields = (
+            "main_code",
+            "sub_code",
+            "robot_mode",
+            "robot_state",
+            "program_state",
+            "rbtEnableState",
+            "EmergencyStop",
+            "safety_stop0_state",
+            "safety_stop1_state",
+            "motion_done",
+            "mc_queue_len",
+            "collisionState",
+        )
+        state: dict[str, int] = {}
+        for field in fields:
+            if not hasattr(state_pkg, field):
+                raise RuntimeError(f"GetRobotRealTimeState result has no field {field!r}.")
+            value = getattr(state_pkg, field)
+            if type(value).__name__ == "CField":
+                raise RuntimeError(
+                    f"GetRobotRealTimeState field {field!r} is an uninitialized ctypes descriptor."
+                )
+            state[field] = int(value)
+        return error, state
+
+    def get_motion_diagnostics(self) -> dict[str, object]:
+        """Read motion-related controller state without hiding partial failures."""
+        state_error, state = self.get_robot_realtime_state()
+        diagnostics: dict[str, object] = {"realtime_state_error": int(state_error), **state}
+        for name, getter in (
+            ("active_tool", self.get_actual_tcp_num),
+            ("active_user", self.get_actual_wobj_num),
+            ("robot_error_code", self.get_robot_error_code),
+        ):
+            try:
+                diagnostics[name] = getter()
+            except Exception as exc:
+                diagnostics[f"{name}_error"] = repr(exc)
+        return diagnostics
+
+    def prepare_motion(
+        self,
+        *,
+        global_speed: float | None = None,
+        mode_timeout_s: float = 3.0,
+        poll_interval_s: float = 0.05,
+        mode_retry_count: int = 3,
+        mode_retry_delay_s: float = 0.1,
+    ) -> dict[str, int]:
         reset_error = self.reset_all_error()
         if reset_error != 0:
             return {"ResetAllError": reset_error}
         enable_error = self.robot_enable(True)
         if enable_error != 0:
             return {"ResetAllError": reset_error, "RobotEnable": enable_error}
-        mode_error = self.set_auto_mode()
-        return {"ResetAllError": reset_error, "RobotEnable": enable_error, "Mode": mode_error}
+        result = {
+            "ResetAllError": reset_error,
+            "RobotEnable": enable_error,
+            "Mode": 0,
+            "ModeConfirm": 1,
+            "RobotMode": -1,
+        }
+        attempts = max(int(mode_retry_count), 1)
+        mode_confirmed = False
+        for attempt in range(attempts):
+            mode_error = self.set_auto_mode()
+            result["Mode"] = int(mode_error)
+            if mode_error != 0:
+                return result
+
+            deadline = time.monotonic() + max(float(mode_timeout_s), 0.0)
+            while True:
+                state_error, state = self.get_robot_realtime_state()
+                if state_error != 0:
+                    result["ModeState"] = int(state_error)
+                    return result
+                result["RobotMode"] = int(state["robot_mode"])
+                if result["RobotMode"] == 0:
+                    result["ModeConfirm"] = 0
+                    result["ModeAttempts"] = attempt + 1
+                    mode_confirmed = True
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(max(float(poll_interval_s), 0.0))
+
+            if mode_confirmed:
+                break
+            if attempt + 1 < attempts:
+                time.sleep(max(float(mode_retry_delay_s), 0.0))
+        if not mode_confirmed:
+            result["ModeAttempts"] = attempts
+            return result
+        if global_speed is not None:
+            result["GlobalSpeed"] = int(self.set_speed(global_speed))
+            if result["GlobalSpeed"] != 0:
+                return result
+        return result
+
+    def release_motion(self, *, mode_timeout_s: float = 3.0, poll_interval_s: float = 0.05) -> dict[str, int]:
+        """Stop active motion if needed and return the controller to manual mode."""
+        result: dict[str, int] = {
+            "RealtimeState": 0,
+            "MotionActive": 0,
+            "StopMotion": 0,
+            "ResetAllError": 0,
+            "Mode": 0,
+            "ModeConfirm": 1,
+            "RobotMode": -1,
+        }
+
+        try:
+            state_error, state = self.get_robot_realtime_state()
+            result["RealtimeState"] = int(state_error)
+            motion_active = state_error == 0 and (
+                int(state.get("motion_done", 1)) == 0
+                or int(state.get("mc_queue_len", 0)) > 0
+                or int(state.get("robot_state", 1)) in {2, 3}
+            )
+            result["MotionActive"] = int(motion_active)
+        except Exception:
+            # Mode recovery is still attempted when the state stream is unavailable.
+            motion_active = False
+            result["RealtimeState"] = -1
+
+        if motion_active:
+            result["StopMotion"] = int(self.stop_motion())
+        result["ResetAllError"] = int(self.reset_all_error())
+        for attempt in range(3):
+            result["Mode"] = int(self.set_manual_mode())
+            if result["Mode"] == 0:
+                deadline = time.monotonic() + max(float(mode_timeout_s), 0.0)
+                while True:
+                    state_error, state = self.get_robot_realtime_state()
+                    if state_error != 0:
+                        result["ModeState"] = int(state_error)
+                        break
+                    result["RobotMode"] = int(state["robot_mode"])
+                    if result["RobotMode"] == 1:
+                        result["ModeConfirm"] = 0
+                        return result
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(max(float(poll_interval_s), 0.0))
+            if attempt + 1 < 3:
+                time.sleep(max(float(poll_interval_s), 0.0))
+        return result
 
     # 读取当前关节角，单位为度。
     def get_actual_joint_pos_degree(self) -> tuple[int, list[float]]:
         self.ensure_connection()
         result = self.robot.GetActualJointPosDegree()
         return self._normalize_pose_result(result, "GetActualJointPosDegree")
+
+    def get_forward_kin(self, joint_pos_deg: list[float]) -> tuple[int, list[float]]:
+        self.ensure_connection()
+        result = self.robot.GetForwardKin([float(value) for value in joint_pos_deg])
+        return self._normalize_pose_result(result, "GetForwardKin")
 
     # 读取当前 TCP 位姿，位置单位为 mm，姿态单位为 deg。
     def get_actual_tcp_pose(self) -> tuple[int, list[float]]:
@@ -163,6 +335,27 @@ class FairinoLinuxClient:
         self.ensure_connection()
         result = self.robot.GetActualTCPNum(0)
         return self._normalize_int_result(result, "GetActualTCPNum")
+
+    def get_actual_wobj_num(self) -> tuple[int, int | None]:
+        self.ensure_connection()
+        result = self.robot.GetActualWObjNum(0)
+        return self._normalize_int_result(result, "GetActualWObjNum")
+
+    def get_robot_error_code(self) -> tuple[int, list[int]]:
+        self.ensure_connection()
+        result = self.robot.GetRobotErrorCode()
+        if not isinstance(result, Sequence):
+            raise RuntimeError(f"GetRobotErrorCode returned non-sequence result: {result!r}")
+        if len(result) == 2 and isinstance(result[1], Sequence):
+            return int(result[0]), [int(value) for value in result[1]]
+        if len(result) >= 3:
+            return int(result[0]), [int(result[1]), int(result[2])]
+        raise RuntimeError(f"GetRobotErrorCode returned unexpected result: {result!r}")
+
+    def get_joint_soft_limit_deg(self) -> tuple[int, list[float]]:
+        self.ensure_connection()
+        result = self.robot.GetJointSoftLimitDeg()
+        return self._normalize_vector_result(result, "GetJointSoftLimitDeg", expected_length=12)
 
     def get_cur_tool_coord(self) -> tuple[int, list[float]]:
         self.ensure_connection()
@@ -208,6 +401,25 @@ class FairinoLinuxClient:
         elif len(result) >= 7:
             error = int(result[0])
             values = result[1:7]
+        else:
+            raise RuntimeError(f"{method_name} returned unexpected result: {result!r}")
+        return error, [float(value) for value in values]
+
+    def _normalize_vector_result(
+        self,
+        result: object,
+        method_name: str,
+        *,
+        expected_length: int,
+    ) -> tuple[int, list[float]]:
+        if not isinstance(result, Sequence):
+            raise RuntimeError(f"{method_name} returned non-sequence result: {result!r}")
+        if len(result) == 2 and isinstance(result[1], Sequence):
+            error = int(result[0])
+            values = result[1]
+        elif len(result) == expected_length + 1:
+            error = int(result[0])
+            values = result[1:]
         else:
             raise RuntimeError(f"{method_name} returned unexpected result: {result!r}")
         return error, [float(value) for value in values]

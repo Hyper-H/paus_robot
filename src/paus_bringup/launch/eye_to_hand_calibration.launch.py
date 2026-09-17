@@ -2,8 +2,8 @@ from __future__ import annotations
 
 # 导入 Path，便于定位包内文件。
 from pathlib import Path
-# 导入 shutil，用于查找 python3 可执行文件。
-import shutil
+# 导入 sys，复用 ros2 launch 当前使用的 ROS 兼容 Python。
+import sys
 import yaml
 
 # 导入 ament 索引工具，用于定位安装后的 package share 路径。
@@ -45,8 +45,8 @@ def _launch_setup(context, *args, **kwargs):
     bringup_share = Path(get_package_share_directory("paus_bringup"))
     marker_share = Path(get_package_share_directory("paus_marker_ros2"))
     workspace_root = bringup_share.parents[3]
-    # 优先使用系统里的 python3。
-    python_exec = shutil.which("python3") or "/usr/bin/python3"
+    # ros2 launch is already running under the ROS-compatible Python.
+    python_exec = sys.executable
     # `camera_bridge.py` 是普通 Python 脚本，不是 ROS2 node。
     camera_bridge_script = marker_share / "scripts" / "camera_bridge.py"
 
@@ -85,11 +85,17 @@ def _launch_setup(context, *args, **kwargs):
     stable_window_s = float(LaunchConfiguration("stable_window_s").perform(context))
     stable_timeout_s = float(LaunchConfiguration("stable_timeout_s").perform(context))
     dwell_s = float(LaunchConfiguration("dwell_s").perform(context))
+    motion_target_tolerance_deg = float(LaunchConfiguration("motion_target_tolerance_deg").perform(context))
+    motion_timeout_s = float(LaunchConfiguration("motion_timeout_s").perform(context))
+    motion_poll_interval_s = float(LaunchConfiguration("motion_poll_interval_s").perform(context))
     execute_motion = LaunchConfiguration("execute_motion").perform(context).strip().lower() in ("1", "true", "yes", "on")
     tool_id = int(LaunchConfiguration("tool_id").perform(context))
     user_id = int(LaunchConfiguration("user_id").perform(context))
+    motion_tool_id = int(LaunchConfiguration("motion_tool_id").perform(context))
+    motion_user_id = int(LaunchConfiguration("motion_user_id").perform(context))
     move_vel = float(LaunchConfiguration("move_vel").perform(context))
     move_acc = float(LaunchConfiguration("move_acc").perform(context))
+    global_speed = float(LaunchConfiguration("global_speed").perform(context))
     tool_to_board_tx = float(LaunchConfiguration("tool_to_board_tx").perform(context))
     tool_to_board_ty = float(LaunchConfiguration("tool_to_board_ty").perform(context))
     tool_to_board_tz = float(LaunchConfiguration("tool_to_board_tz").perform(context))
@@ -182,11 +188,17 @@ def _launch_setup(context, *args, **kwargs):
                     "stable_window_s": stable_window_s,
                     "stable_timeout_s": stable_timeout_s,
                     "dwell_s": dwell_s,
+                    "motion_target_tolerance_deg": motion_target_tolerance_deg,
+                    "motion_timeout_s": motion_timeout_s,
+                    "motion_poll_interval_s": motion_poll_interval_s,
                     "execute_motion": execute_motion,
                     "tool_id": tool_id,
                     "user_id": user_id,
+                    "motion_tool_id": motion_tool_id,
+                    "motion_user_id": motion_user_id,
                     "move_vel": move_vel,
                     "move_acc": move_acc,
+                    "global_speed": global_speed,
                     "tool_to_board.translation_m": [tool_to_board_tx, tool_to_board_ty, tool_to_board_tz],
                     "tool_to_board.rotation_rpy_deg": [tool_to_board_rx, tool_to_board_ry, tool_to_board_rz],
                 }
@@ -224,11 +236,18 @@ def generate_launch_description() -> LaunchDescription:
     default_stable_window_s = str(calibration_cfg.get("stable_window_s", 0.5))
     default_stable_timeout_s = str(calibration_cfg.get("stable_timeout_s", 10.0))
     default_dwell_s = str(calibration_cfg.get("dwell_s", 0.5))
-    default_execute_motion = str(config_payload.get("control", {}).get("execute_motion", False)).lower()
-    default_tool_id = str(config_payload.get("control", {}).get("tool_id", 0))
-    default_user_id = str(config_payload.get("control", {}).get("user_id", 0))
-    default_move_vel = str(config_payload.get("control", {}).get("move_vel", 10.0))
-    default_move_acc = str(config_payload.get("control", {}).get("move_acc", 10.0))
+    default_motion_target_tolerance_deg = str(calibration_cfg.get("motion_target_tolerance_deg", 0.5))
+    default_motion_timeout_s = str(calibration_cfg.get("motion_timeout_s", 120.0))
+    default_motion_poll_interval_s = str(calibration_cfg.get("motion_poll_interval_s", 0.05))
+    control_cfg = config_payload.get("control", {})
+    default_execute_motion = str(control_cfg.get("execute_motion", False)).lower()
+    default_tool_id = str(calibration_cfg.get("tool_id", 0))
+    default_user_id = str(calibration_cfg.get("user_id", 0))
+    default_motion_tool_id = str(calibration_cfg.get("motion_tool_id", -1))
+    default_motion_user_id = str(calibration_cfg.get("motion_user_id", -1))
+    default_move_vel = str(control_cfg.get("move_vel", 20.0))
+    default_move_acc = str(control_cfg.get("move_acc", 20.0))
+    default_global_speed = str(control_cfg.get("global_speed", 100.0))
     default_corner_patch_size_px = str(calibration_cfg.get("corner_patch_size_px", 5))
     default_corner_min_points = str(calibration_cfg.get("corner_min_points", 8))
     default_min_valid_corner_patch_ratio = str(calibration_cfg.get("min_valid_corner_patch_ratio", 0.80))
@@ -369,16 +388,22 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("save_sample_images", default_value=default_save_sample_images, description="Whether to save accepted sample images in the session directory."),
             DeclareLaunchArgument("max_reprojection_error_px", default_value=default_max_reprojection_error_px, description="Maximum accepted chessboard reprojection error in pixels."),
             DeclareLaunchArgument("min_board_margin_px", default_value=default_min_board_margin_px, description="Minimum chessboard corner margin from image border in pixels."),
-            DeclareLaunchArgument("stable_position_tolerance_mm", default_value=default_stable_position_tolerance_mm, description="TCP position delta threshold for stable sampling."),
-            DeclareLaunchArgument("stable_rotation_tolerance_deg", default_value=default_stable_rotation_tolerance_deg, description="TCP rotation delta threshold for stable sampling."),
-            DeclareLaunchArgument("stable_window_s", default_value=default_stable_window_s, description="Required stable TCP window before capture."),
-            DeclareLaunchArgument("stable_timeout_s", default_value=default_stable_timeout_s, description="Timeout for TCP stability wait."),
+            DeclareLaunchArgument("stable_position_tolerance_mm", default_value=default_stable_position_tolerance_mm, description="Flange position delta threshold for stable sampling."),
+            DeclareLaunchArgument("stable_rotation_tolerance_deg", default_value=default_stable_rotation_tolerance_deg, description="Flange rotation delta threshold for stable sampling."),
+            DeclareLaunchArgument("stable_window_s", default_value=default_stable_window_s, description="Required stable flange window before capture."),
+            DeclareLaunchArgument("stable_timeout_s", default_value=default_stable_timeout_s, description="Timeout for flange stability wait."),
             DeclareLaunchArgument("dwell_s", default_value=default_dwell_s, description="Default dwell time after each waypoint stabilizes."),
+            DeclareLaunchArgument("motion_target_tolerance_deg", default_value=default_motion_target_tolerance_deg, description="Maximum per-joint error accepted for a reached MoveJ waypoint."),
+            DeclareLaunchArgument("motion_timeout_s", default_value=default_motion_timeout_s, description="Timeout for a non-blocking MoveJ waypoint to reach its target."),
+            DeclareLaunchArgument("motion_poll_interval_s", default_value=default_motion_poll_interval_s, description="Polling interval for MoveJ target confirmation."),
             DeclareLaunchArgument("execute_motion", default_value=default_execute_motion, description="When false, semi-auto trajectory execution only dry-runs."),
-            DeclareLaunchArgument("tool_id", default_value=default_tool_id, description="FAIRINO tool ID used by semi-auto recording and motion."),
-            DeclareLaunchArgument("user_id", default_value=default_user_id, description="FAIRINO user ID used by semi-auto recording and motion."),
+            DeclareLaunchArgument("tool_id", default_value=default_tool_id, description="FAIRINO tool ID used as the calibration flange reference."),
+            DeclareLaunchArgument("user_id", default_value=default_user_id, description="FAIRINO work-object ID used as the calibration reference."),
+            DeclareLaunchArgument("motion_tool_id", default_value=default_motion_tool_id, description="FAIRINO MoveJ tool ID; -1 follows the controller's active tool."),
+            DeclareLaunchArgument("motion_user_id", default_value=default_motion_user_id, description="FAIRINO MoveJ work-object ID; -1 follows the controller's active work object."),
             DeclareLaunchArgument("move_vel", default_value=default_move_vel, description="FAIRINO MoveJ velocity used when recording waypoints."),
             DeclareLaunchArgument("move_acc", default_value=default_move_acc, description="FAIRINO acceleration used when recording waypoints."),
+            DeclareLaunchArgument("global_speed", default_value=default_global_speed, description="FAIRINO controller global speed percentage."),
             DeclareLaunchArgument("tool_to_board_tx", default_value=str(default_tool_to_board_translation[0]), description="Tool-to-board X translation in meters."),
             DeclareLaunchArgument("tool_to_board_ty", default_value=str(default_tool_to_board_translation[1]), description="Tool-to-board Y translation in meters."),
             DeclareLaunchArgument("tool_to_board_tz", default_value=str(default_tool_to_board_translation[2]), description="Tool-to-board Z translation in meters."),

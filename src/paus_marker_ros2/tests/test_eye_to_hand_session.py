@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -26,6 +27,31 @@ from paus_marker_ros2.semi_auto_calibration import build_recorded_waypoint, samp
 
 
 class EyeToHandSessionTests(unittest.TestCase):
+    def test_camera_calibration_loader_retries_until_file_is_valid(self) -> None:
+        node = EyeToHandCalibrationNode.__new__(EyeToHandCalibrationNode)
+        node.camera_config_wait_timeout_s = 1.0
+        warnings: list[str] = []
+        node.get_logger = lambda: type(
+            "FakeLogger",
+            (),
+            {"warning": lambda _self, message: warnings.append(message)},
+        )()
+        attempts = 0
+
+        def fake_loader(_path: str):
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise ValueError("camera.yaml is still being written")
+            return "camera-calibration"
+
+        with patch("paus_marker_ros2.eye_to_hand_calibration_node.load_camera_calibration", side_effect=fake_loader):
+            result = node._load_camera_calibration_when_ready("/tmp/camera.yaml")
+
+        self.assertEqual(result, "camera-calibration")
+        self.assertEqual(attempts, 3)
+        self.assertEqual(len(warnings), 1)
+
     def test_session_owner_matches_for_active_semi_auto_capture(self) -> None:
         self.assertTrue(session_owner_matches("semi_auto", "semi_auto"))
 
@@ -57,7 +83,7 @@ class EyeToHandSessionTests(unittest.TestCase):
             def get_actual_joint_pos_degree(self) -> tuple[int, list[float]]:
                 return 0, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
 
-            def get_actual_tcp_pose(self) -> tuple[int, list[float]]:
+            def get_actual_tool_flange_pose(self) -> tuple[int, list[float]]:
                 return 0, [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
 
         node = EyeToHandCalibrationNode.__new__(EyeToHandCalibrationNode)
@@ -96,6 +122,10 @@ class EyeToHandSessionTests(unittest.TestCase):
         self.assertEqual(started_modes, ["manual"])
         self.assertEqual(appended[-1][0], "waypoint_recorded")
         self.assertEqual(appended[-1][1]["waypoint_name"], "waypoint_001")
+        self.assertEqual(
+            appended[-1][1]["waypoint"]["expected_tcp_pose_mmdeg"],
+            [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+        )
         self.assertEqual(published[-1]["status"], "waypoint_recorded")
         self.assertEqual(published[-1]["payload"]["waypoint_name"], "waypoint_001")
 
@@ -195,6 +225,149 @@ class EyeToHandSessionTests(unittest.TestCase):
         self.assertEqual(appended[-1][0], "waypoint_deleted")
         self.assertEqual(appended[-1][1]["waypoint_name"], "waypoint_001")
         self.assertEqual(published[-1]["payload"]["recorded_trajectory"]["waypoints"][0]["name"], "waypoint_002")
+
+    def test_semi_auto_motion_preparation_refuses_manual_mode(self) -> None:
+        node = EyeToHandCalibrationNode.__new__(EyeToHandCalibrationNode)
+        node.session_dir = None
+        node.linux_client = type(
+            "FakeClient",
+            (),
+            {
+                "get_actual_tcp_num": lambda _self: (0, 3),
+                "get_actual_wobj_num": lambda _self: (0, 0),
+                "prepare_motion": lambda _self: {
+                    "ResetAllError": 0,
+                    "RobotEnable": 0,
+                    "Mode": 0,
+                    "ModeConfirm": 1,
+                    "RobotMode": 1,
+                }
+            },
+        )()
+        node.motion_tool_id = 3
+        node.motion_user_id = 0
+        appended: list[tuple[str, dict[str, object] | None]] = []
+        published: list[dict[str, object]] = []
+        node._append_run_log = lambda event, payload=None: appended.append((event, payload))
+        node._publish_status = lambda status, message, payload=None: published.append(
+            {"status": status, "message": message, "payload": payload or {}}
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "did not enter automatic mode"):
+            node._prepare_motion_for_semi_auto()
+
+        self.assertEqual(appended[-1][0], "motion_preparation_failed")
+        self.assertEqual(published[-1]["status"], "motion_preparation_failed")
+        self.assertEqual(published[-1]["payload"]["result"]["RobotMode"], 1)
+
+    def test_semi_auto_motion_preparation_rejects_active_frame_mismatch(self) -> None:
+        node = EyeToHandCalibrationNode.__new__(EyeToHandCalibrationNode)
+        node.session_dir = None
+        node.motion_tool_id = 0
+        node.motion_user_id = 0
+        node.linux_client = type(
+            "FakeClient",
+            (),
+            {
+                "get_actual_tcp_num": lambda _self: (0, 3),
+                "get_actual_wobj_num": lambda _self: (0, 0),
+                "prepare_motion": lambda _self: {
+                    "ResetAllError": 0,
+                    "RobotEnable": 0,
+                    "Mode": 0,
+                    "ModeConfirm": 0,
+                    "RobotMode": 0,
+                    "ModeAttempts": 1,
+                },
+            },
+        )()
+        appended: list[tuple[str, dict[str, object] | None]] = []
+        published: list[dict[str, object]] = []
+        node._append_run_log = lambda event, payload=None: appended.append((event, payload))
+        node._publish_status = lambda status, message, payload=None: published.append(
+            {"status": status, "message": message, "payload": payload or {}}
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "MoveJ frame mismatch"):
+            EyeToHandCalibrationNode._prepare_motion_for_semi_auto(node)
+
+        self.assertEqual(appended[0][0], "motion_preparation_failed")
+        self.assertFalse(appended[0][1]["active_frame_matches"])
+        self.assertFalse(published[-1]["payload"]["success"])
+
+    def test_semi_auto_motion_preparation_follows_active_frame_when_auto(self) -> None:
+        node = EyeToHandCalibrationNode.__new__(EyeToHandCalibrationNode)
+        node.session_dir = None
+        node.motion_tool_id = -1
+        node.motion_user_id = -1
+        node.linux_client = type(
+            "FakeClient",
+            (),
+            {
+                "get_actual_tcp_num": lambda _self: (0, 3),
+                "get_actual_wobj_num": lambda _self: (0, 0),
+                "prepare_motion": lambda _self: {
+                    "ResetAllError": 0,
+                    "RobotEnable": 0,
+                    "Mode": 0,
+                    "ModeConfirm": 0,
+                    "RobotMode": 0,
+                    "ModeAttempts": 1,
+                },
+            },
+        )()
+        appended: list[tuple[str, dict[str, object] | None]] = []
+        published: list[dict[str, object]] = []
+        node._append_run_log = lambda event, payload=None: appended.append((event, payload))
+        node._publish_status = lambda status, message, payload=None: published.append(
+            {"status": status, "message": message, "payload": payload or {}}
+        )
+
+        EyeToHandCalibrationNode._prepare_motion_for_semi_auto(node)
+
+        self.assertEqual(node._resolved_motion_tool_id, 3)
+        self.assertEqual(node._resolved_motion_user_id, 0)
+        self.assertEqual(appended[0][0], "motion_preparation")
+        self.assertEqual(published[-1]["payload"]["motion_tool_id"], 3)
+        self.assertEqual(published[-1]["payload"]["motion_user_id"], 0)
+
+    def test_blocking_movej_waits_for_joint_target_before_capture(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.joints = iter(
+                    [
+                        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                    ]
+                )
+                self.motion_done = iter([0, 1])
+                self.queue_lengths = iter([1, 0])
+
+            def get_actual_joint_pos_degree(self) -> tuple[int, list[float]]:
+                return 0, next(self.joints)
+
+            def get_robot_motion_done(self) -> tuple[int, int]:
+                return 0, next(self.motion_done)
+
+            def get_motion_queue_length(self) -> tuple[int, int]:
+                return 0, next(self.queue_lengths)
+
+        node = EyeToHandCalibrationNode.__new__(EyeToHandCalibrationNode)
+        node._stop_lock = threading.Lock()
+        node._stop_requested = False
+        node.linux_client = FakeClient()
+        node.motion_target_tolerance_deg = 0.1
+        node.motion_timeout_s = 1.0
+        node.motion_poll_interval_s = 0.01
+
+        reached = EyeToHandCalibrationNode._wait_until_waypoint_joint_target_reached(
+            node,
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            waypoint_name="waypoint_001",
+            waypoint_index=1,
+        )
+
+        self.assertEqual(reached, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 
     def test_rgb_quality_gate_rejects_high_reprojection_sample(self) -> None:
         node = EyeToHandCalibrationNode.__new__(EyeToHandCalibrationNode)
@@ -470,7 +643,25 @@ class EyeToHandSessionTests(unittest.TestCase):
             )
 
             class FakeClient:
-                def move_j(self, joint_deg: list[float], **_kwargs: object) -> int:
+                def __init__(self) -> None:
+                    self.moves: list[list[float]] = []
+                    self.move_kwargs: list[dict[str, object]] = []
+
+                def get_actual_tcp_num(self) -> tuple[int, int]:
+                    return 0, 3
+
+                def get_actual_wobj_num(self) -> tuple[int, int]:
+                    return 0, 0
+
+                def prepare_motion(self) -> dict[str, int]:
+                    return {"ResetAllError": 0, "RobotEnable": 0, "Mode": 0, "ModeConfirm": 0, "RobotMode": 0}
+
+                def release_motion(self) -> dict[str, int]:
+                    return {"Mode": 0, "ModeConfirm": 0, "RobotMode": 1}
+
+                def move_j(self, joint_deg: list[float], **kwargs: object) -> int:
+                    self.moves.append(joint_deg)
+                    self.move_kwargs.append(kwargs)
                     return 0
 
             class FakeSample:
@@ -492,10 +683,17 @@ class EyeToHandSessionTests(unittest.TestCase):
             node.samples = []
             node.current_solution = None
             node.linux_client = FakeClient()
+            node.motion_tool_id = 3
+            node.motion_user_id = 0
             node.post_motion_capture_delay_s = 0.0
+            node.motion_target_tolerance_deg = 0.5
+            node.motion_timeout_s = 1.0
+            node.motion_poll_interval_s = 0.01
             node.sample_log_override_path = None
-            node._archive_current_trajectory = lambda: None
-            node._wait_until_tcp_stable = lambda: [0, 0, 0, 0, 0, 0]
+            node._archive_current_trajectory = lambda *_args, **_kwargs: None
+            node._collect_waypoint_motion_diagnostics = lambda _target: {}
+            node._wait_until_waypoint_joint_target_reached = lambda *_args, **_kwargs: [1, 2, 3, 4, 5, 6]
+            node._wait_until_flange_stable = lambda: [0, 0, 0, 0, 0, 0]
             node._sample_to_log_record = lambda sample: {"sample_index": 1}
             node._save_current_solution = lambda: (_ for _ in ()).throw(AssertionError("save must not run after stop"))
             node._solve_callback = lambda *_args: (_ for _ in ()).throw(AssertionError("solve must not run after stop"))
@@ -517,7 +715,8 @@ class EyeToHandSessionTests(unittest.TestCase):
             self.assertFalse(response.success)
             self.assertEqual(response.message, "Semi-auto calibration stopped.")
             self.assertEqual(len(node.samples), 1)
-            self.assertEqual(published[-1]["status"], "semi_auto_stopped")
+            self.assertIn("semi_auto_stopped", [item["status"] for item in published])
+            self.assertEqual(published[-1]["status"], "motion_released")
             assert node.run_log_path is not None
             self.assertIn('"event": "semi_auto_stopped"', node.run_log_path.read_text(encoding="utf-8"))
 
@@ -564,9 +763,23 @@ class EyeToHandSessionTests(unittest.TestCase):
             class FakeClient:
                 def __init__(self) -> None:
                     self.moves: list[list[float]] = []
+                    self.move_kwargs: list[dict[str, object]] = []
 
-                def move_j(self, joint_deg: list[float], **_kwargs: object) -> int:
+                def get_actual_tcp_num(self) -> tuple[int, int]:
+                    return 0, 3
+
+                def get_actual_wobj_num(self) -> tuple[int, int]:
+                    return 0, 0
+
+                def prepare_motion(self) -> dict[str, int]:
+                    return {"ResetAllError": 0, "RobotEnable": 0, "Mode": 0, "ModeConfirm": 0, "RobotMode": 0}
+
+                def release_motion(self) -> dict[str, int]:
+                    return {"Mode": 0, "ModeConfirm": 0, "RobotMode": 1}
+
+                def move_j(self, joint_deg: list[float], **kwargs: object) -> int:
                     self.moves.append(joint_deg)
+                    self.move_kwargs.append(kwargs)
                     return 0
 
             class FakeSample:
@@ -589,11 +802,18 @@ class EyeToHandSessionTests(unittest.TestCase):
             node.min_sample_count = 10
             node.tool_id = 0
             node.user_id = 0
+            node.motion_tool_id = 3
+            node.motion_user_id = 0
+            node.motion_target_tolerance_deg = 0.5
+            node.motion_timeout_s = 1.0
+            node.motion_poll_interval_s = 0.01
             node.observation_mode = "rgb_pnp"
             node.solver_method = "ax_xb_park"
             node.sample_log_override_path = None
-            node._archive_current_trajectory = lambda: None
-            node._wait_until_tcp_stable = lambda: [0, 0, 0, 0, 0, 0]
+            node._archive_current_trajectory = lambda *_args, **_kwargs: None
+            node._collect_waypoint_motion_diagnostics = lambda _target: {}
+            node._wait_until_waypoint_joint_target_reached = lambda *_args, **_kwargs: [1, 2, 3, 4, 5, 6]
+            node._wait_until_flange_stable = lambda: [0, 0, 0, 0, 0, 0]
             node._sample_to_log_record = lambda sample: {"sample_index": 1, "row_index": 1}
             published: list[dict[str, object]] = []
             node._publish_status = lambda status, message, payload=None: published.append(
@@ -631,15 +851,29 @@ class EyeToHandSessionTests(unittest.TestCase):
 
             self.assertFalse(response.success)
             self.assertEqual(len(node.linux_client.moves), 2)
+            self.assertEqual(node.linux_client.move_kwargs[0]["acc"], 10.0)
+            self.assertEqual(node.linux_client.move_kwargs[0]["blend_time_ms"], -1.0)
+            self.assertEqual(node.linux_client.move_kwargs[0]["tool_id"], 3)
+            self.assertEqual(node.linux_client.move_kwargs[0]["user_id"], 0)
             self.assertIn("Need at least", response.message)
             statuses = [item["status"] for item in published]
+            terminal_statuses = [
+                status
+                for status in statuses
+                if status in {"waypoint_capture_skipped", "waypoint_sample_captured", "waypoint_failed", "waypoint_stopped"}
+            ]
+            self.assertEqual(terminal_statuses, ["waypoint_capture_skipped", "waypoint_sample_captured"])
+            self.assertEqual(statuses.count("waypoint_motion_started"), 2)
             self.assertIn("waypoint_capture_skipped", statuses)
             self.assertIn("waypoint_sample_captured", statuses)
-            self.assertEqual(published[-1]["status"], "semi_auto_insufficient_samples")
+            self.assertIn("semi_auto_insufficient_samples", statuses)
+            self.assertEqual(published[-1]["status"], "motion_released")
             assert node.run_log_path is not None
             run_log = node.run_log_path.read_text(encoding="utf-8")
+            self.assertEqual(run_log.count('"event": "waypoint_motion_started"'), 2)
             self.assertIn('"event": "waypoint_capture_skipped"', run_log)
             self.assertIn('"event": "waypoint_sample_captured"', run_log)
+            self.assertNotIn('"event": "semi_auto_failed"', run_log)
 
     def test_save_trajectory_archives_saved_trajectory(self) -> None:
         class FakeTrajectory:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 import sys
 import tempfile
 import unittest
@@ -19,6 +20,7 @@ from paus_marker_ros2.semi_auto_calibration import (
     create_session_dir,
     empty_trajectory,
     load_trajectory,
+    override_trajectory_motion,
     save_trajectory,
     wrapped_rotation_delta_norm_deg,
 )
@@ -83,6 +85,27 @@ class SemiAutoCalibrationTrajectoryTests(unittest.TestCase):
             with self.assertRaises(TrajectoryValidationError):
                 load_trajectory(path)
 
+    def test_motion_override_replaces_legacy_waypoint_speed(self) -> None:
+        trajectory = empty_trajectory(tool_id=0, user_id=0, default_vel=10.0, default_acc=10.0, default_dwell_s=0.5)
+        trajectory.waypoints.append(
+            build_recorded_waypoint(
+                index=1,
+                joint_deg=[1, 2, 3, 4, 5, 6],
+                tcp_pose_mmdeg=[100, 200, 300, 10, 20, 30],
+                vel=10.0,
+                acc=10.0,
+                dwell_s=0.5,
+            )
+        )
+
+        overridden = override_trajectory_motion(trajectory, vel=20.0, acc=20.0)
+
+        self.assertEqual(overridden.default_vel, 20.0)
+        self.assertEqual(overridden.default_acc, 20.0)
+        self.assertEqual(overridden.waypoints[0].vel, 20.0)
+        self.assertEqual(overridden.waypoints[0].acc, 20.0)
+        self.assertEqual(trajectory.waypoints[0].vel, 10.0)
+
     def test_duplicate_waypoint_names_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "duplicate.yaml"
@@ -129,6 +152,20 @@ class SemiAutoCalibrationTrajectoryTests(unittest.TestCase):
             self.assertEqual(first.name, "2026-04-28_153012")
             self.assertEqual(second.name, "2026-04-28_153012_02")
             self.assertTrue((first / "images").is_dir())
+
+    def test_session_dir_is_unique_under_concurrent_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            now = datetime(2026, 4, 28, 15, 30, 12)
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                paths = list(
+                    executor.map(
+                        lambda _index: create_session_dir(temp_dir, now=now),
+                        range(8),
+                    )
+                )
+
+            self.assertEqual(len({path.name for path in paths}), 8)
+            self.assertTrue(all((path / "images").is_dir() for path in paths))
 
 
 if __name__ == "__main__":
