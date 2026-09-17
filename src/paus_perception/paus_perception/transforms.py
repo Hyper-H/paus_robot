@@ -57,6 +57,22 @@ class EyeToHandCalibrationSolution:
     session_diagnostics: dict[str, Any] | None = None
     # 样本质量汇总。
     sample_quality_summary: dict[str, Any] | None = None
+    # 根据求解结果回代估计的固定 tool->board 变换。
+    estimated_tool_to_board: Transform3D | None = None
+    # 使用原始 tool->board 参数计算的残差。
+    raw_residuals: CalibrationResidualSummary | None = None
+    # 使用估计 tool->board 参数计算的修正残差。
+    corrected_residuals: CalibrationResidualSummary | None = None
+    # 结果质量状态和告警。
+    quality_status: str | None = None
+    quality_warnings: list[str] | None = None
+    # 结果生成和来源元数据。
+    generated_at: str | None = None
+    session_dir: str | None = None
+    trajectory_path: str | None = None
+    git_branch: str | None = None
+    git_commit: str | None = None
+    git_dirty: bool | None = None
     # 外参 YAML 来源路径。
     source_path: str | None = None
     # 外参 artifact 类型，例如 calibration_result / identity_example。
@@ -239,6 +255,27 @@ def average_transform_matrices(transform_matrices: list[np.ndarray]) -> np.ndarr
     return make_transform_matrix(mean_translation, mean_rotation)
 
 
+# Estimate the fixed tool->board transform from eye-to-hand samples.
+def estimate_tool_to_board_from_samples(
+    base_to_camera_matrix: np.ndarray,
+    base_to_tool_matrices: list[np.ndarray],
+    camera_to_board_matrices: list[np.ndarray],
+) -> np.ndarray:
+    if len(base_to_tool_matrices) != len(camera_to_board_matrices):
+        raise ValueError("Robot and camera sample counts do not match.")
+    if not base_to_tool_matrices:
+        raise ValueError("At least one sample is required to estimate tool-to-board transform.")
+
+    base_to_camera = np.asarray(base_to_camera_matrix, dtype=np.float64).reshape(4, 4)
+    tool_to_board_samples = [
+        invert_transform_matrix(np.asarray(base_to_tool, dtype=np.float64).reshape(4, 4))
+        @ base_to_camera
+        @ np.asarray(camera_to_board, dtype=np.float64).reshape(4, 4)
+        for base_to_tool, camera_to_board in zip(base_to_tool_matrices, camera_to_board_matrices)
+    ]
+    return average_transform_matrices(tool_to_board_samples)
+
+
 # 计算两个旋转矩阵之间的夹角，单位为度。
 def rotation_error_deg(lhs_rotation: np.ndarray, rhs_rotation: np.ndarray) -> float:
     delta = np.asarray(lhs_rotation, dtype=np.float64).reshape(3, 3).T @ np.asarray(rhs_rotation, dtype=np.float64).reshape(3, 3)
@@ -387,6 +424,62 @@ def solve_ax_xb_hand_eye_park(lhs_absolute_matrices: list[np.ndarray], rhs_absol
     return make_transform_matrix(translation, rotation)
 
 
+def _residual_payload(summary: CalibrationResidualSummary) -> dict[str, Any]:
+    return {
+        "translation_rms_mm": summary.translation_rms_mm,
+        "translation_mean_mm": summary.translation_mean_mm,
+        "translation_max_mm": summary.translation_max_mm,
+        "rotation_rms_deg": summary.rotation_rms_deg,
+        "rotation_mean_deg": summary.rotation_mean_deg,
+        "rotation_max_deg": summary.rotation_max_deg,
+        "sample_count": summary.sample_count,
+    }
+
+
+def _residual_from_payload(payload: Any) -> CalibrationResidualSummary | None:
+    if not isinstance(payload, dict):
+        return None
+    required = (
+        "translation_rms_mm",
+        "translation_mean_mm",
+        "translation_max_mm",
+        "rotation_rms_deg",
+        "rotation_mean_deg",
+        "rotation_max_deg",
+        "sample_count",
+    )
+    if any(key not in payload for key in required):
+        return None
+    try:
+        return CalibrationResidualSummary(
+            translation_rms_mm=float(payload["translation_rms_mm"]),
+            translation_mean_mm=float(payload["translation_mean_mm"]),
+            translation_max_mm=float(payload["translation_max_mm"]),
+            rotation_rms_deg=float(payload["rotation_rms_deg"]),
+            rotation_mean_deg=float(payload["rotation_mean_deg"]),
+            rotation_max_deg=float(payload["rotation_max_deg"]),
+            sample_count=int(payload["sample_count"]),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _transform_payload(transform: Transform3D | None) -> dict[str, Any] | None:
+    if transform is None:
+        return None
+    return {
+        "translation_m": list(transform.translation_m),
+        "rotation_matrix": [list(row) for row in transform.rotation_matrix],
+        "rotation_quaternion_xyzw": list(transform.rotation_quaternion_xyzw),
+        "parent_frame": transform.parent_frame,
+        "child_frame": transform.child_frame,
+    }
+
+
+def _optional_str(value: Any) -> str | None:
+    return str(value) if value is not None else None
+
+
 # 保存 eye-to-hand 标定结果到 YAML。
 def save_eye_to_hand_solution(solution: EyeToHandCalibrationSolution, output_path: str | Path) -> None:
     output_path = Path(output_path)
@@ -419,15 +512,30 @@ def save_eye_to_hand_solution(solution: EyeToHandCalibrationSolution, output_pat
         },
     }
     if solution.residuals is not None:
-        payload["calibration"]["residuals"] = {
-            "translation_rms_mm": solution.residuals.translation_rms_mm,
-            "translation_mean_mm": solution.residuals.translation_mean_mm,
-            "translation_max_mm": solution.residuals.translation_max_mm,
-            "rotation_rms_deg": solution.residuals.rotation_rms_deg,
-            "rotation_mean_deg": solution.residuals.rotation_mean_deg,
-            "rotation_max_deg": solution.residuals.rotation_max_deg,
-            "sample_count": solution.residuals.sample_count,
-        }
+        payload["calibration"]["residuals"] = _residual_payload(solution.residuals)
+    if solution.raw_residuals is not None:
+        payload["calibration"]["raw_residuals"] = _residual_payload(solution.raw_residuals)
+    if solution.corrected_residuals is not None:
+        payload["calibration"]["corrected_residuals"] = _residual_payload(solution.corrected_residuals)
+    estimated_tool_to_board = _transform_payload(solution.estimated_tool_to_board)
+    if estimated_tool_to_board is not None:
+        payload["calibration"]["estimated_tool_to_board"] = estimated_tool_to_board
+    if solution.quality_status is not None:
+        payload["calibration"]["quality_status"] = solution.quality_status
+    if solution.quality_warnings is not None:
+        payload["calibration"]["quality_warnings"] = list(solution.quality_warnings)
+    if solution.generated_at is not None:
+        payload["calibration"]["generated_at"] = solution.generated_at
+    if solution.session_dir is not None:
+        payload["calibration"]["session_dir"] = solution.session_dir
+    if solution.trajectory_path is not None:
+        payload["calibration"]["trajectory_path"] = solution.trajectory_path
+    if solution.git_branch is not None:
+        payload["calibration"]["git_branch"] = solution.git_branch
+    if solution.git_commit is not None:
+        payload["calibration"]["git_commit"] = solution.git_commit
+    if solution.git_dirty is not None:
+        payload["calibration"]["git_dirty"] = bool(solution.git_dirty)
     if solution.session_diagnostics is not None:
         payload["calibration"]["session_diagnostics"] = solution.session_diagnostics
     if solution.sample_quality_summary is not None:
@@ -441,10 +549,10 @@ def load_eye_to_hand_solution(input_path: str | Path) -> EyeToHandCalibrationSol
     input_path = Path(input_path)
     with input_path.open("r", encoding="utf-8") as handle:
         payload: dict[str, Any] = yaml.safe_load(handle) or {}
-    extrinsic_payload = payload.get("extrinsic", {}).get("base_to_camera", {})
-    calibration_payload = payload.get("calibration", {})
-    metadata_payload = payload.get("metadata", {})
-    tool_to_board_payload = calibration_payload.get("tool_to_board", {})
+    extrinsic_payload = (payload.get("extrinsic", {}) or {}).get("base_to_camera", {}) or {}
+    calibration_payload = payload.get("calibration", {}) or {}
+    metadata_payload = payload.get("metadata", {}) or {}
+    tool_to_board_payload = calibration_payload.get("tool_to_board", {}) or {}
     artifact_kind = str(
         metadata_payload.get("artifact_kind")
         or calibration_payload.get("artifact_kind")
@@ -461,8 +569,18 @@ def load_eye_to_hand_solution(input_path: str | Path) -> EyeToHandCalibrationSol
             translation_m=[float(value) for value in extrinsic_payload["translation_m"]],
             rotation_matrix=[[float(value) for value in row] for row in extrinsic_payload["rotation_matrix"]],
             rotation_quaternion_xyzw=[float(value) for value in extrinsic_payload.get("rotation_quaternion_xyzw", [])],
-            parent_frame="robot_base",
-            child_frame="camera",
+            parent_frame=str(extrinsic_payload.get("parent_frame", "robot_base")),
+            child_frame=str(extrinsic_payload.get("child_frame", "camera")),
+        )
+    estimated_tool_to_board = None
+    estimated_payload = calibration_payload.get("estimated_tool_to_board", {}) or {}
+    if isinstance(estimated_payload, dict) and estimated_payload.get("translation_m") and estimated_payload.get("rotation_matrix"):
+        estimated_tool_to_board = Transform3D(
+            translation_m=[float(value) for value in estimated_payload["translation_m"]],
+            rotation_matrix=[[float(value) for value in row] for row in estimated_payload["rotation_matrix"]],
+            rotation_quaternion_xyzw=[float(value) for value in estimated_payload.get("rotation_quaternion_xyzw", [])],
+            parent_frame=str(estimated_payload.get("parent_frame", "tool")),
+            child_frame=str(estimated_payload.get("child_frame", "board")),
         )
     return EyeToHandCalibrationSolution(
         status="ok" if base_to_camera is not None else "missing_extrinsic",
@@ -474,9 +592,20 @@ def load_eye_to_hand_solution(input_path: str | Path) -> EyeToHandCalibrationSol
         tool_to_board_rotation_rpy_deg=[float(value) for value in tool_to_board_payload.get("rotation_rpy_deg", [0.0, 0.0, 0.0])],
         method=str(calibration_payload.get("method", "eye_to_hand_board_average")),
         observation_mode=str(calibration_payload.get("observation_mode", "rgb_pnp")),
-        residuals=CalibrationResidualSummary(**calibration_payload["residuals"]) if "residuals" in calibration_payload else None,
+        residuals=_residual_from_payload(calibration_payload.get("residuals")),
         session_diagnostics=dict(calibration_payload.get("session_diagnostics", {})) if calibration_payload.get("session_diagnostics") is not None else None,
         sample_quality_summary=dict(calibration_payload.get("sample_quality_summary", {})) if calibration_payload.get("sample_quality_summary") is not None else None,
+        estimated_tool_to_board=estimated_tool_to_board,
+        raw_residuals=_residual_from_payload(calibration_payload.get("raw_residuals")),
+        corrected_residuals=_residual_from_payload(calibration_payload.get("corrected_residuals")),
+        quality_status=_optional_str(calibration_payload.get("quality_status")),
+        quality_warnings=list(calibration_payload.get("quality_warnings", [])) if isinstance(calibration_payload.get("quality_warnings"), list) else None,
+        generated_at=_optional_str(calibration_payload.get("generated_at")),
+        session_dir=_optional_str(calibration_payload.get("session_dir")),
+        trajectory_path=_optional_str(calibration_payload.get("trajectory_path")),
+        git_branch=_optional_str(calibration_payload.get("git_branch")),
+        git_commit=_optional_str(calibration_payload.get("git_commit")),
+        git_dirty=bool(calibration_payload["git_dirty"]) if "git_dirty" in calibration_payload else None,
         source_path=str(input_path),
         artifact_kind=artifact_kind,
         is_dummy=is_dummy,

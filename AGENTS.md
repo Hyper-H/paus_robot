@@ -28,8 +28,15 @@ Runtime and data directories:
 Hard rules:
 - Never run real robot motion unless the user explicitly approves the hardware safety flow.
 - Default ROS launch and smoke tests must use `execute_motion:=false`.
+- Before any Python, ROS, colcon, camera, or UI command, activate the project runtime in this exact order:
+  `source /opt/ros/humble/setup.bash`
+  `source ~/miniconda3/etc/profile.d/conda.sh`
+  `conda activate paus_robot`
+  `source install/local_setup.bash`
+- Do not use the system Python or another Conda environment for PAUS commands. Verify with:
+  `which python3 && python3 -c "import sys; print(sys.executable)"`
 - Source ROS before ROS commands:
-  `source /opt/ros/humble/setup.bash && source install/setup.bash`
+  `source /opt/ros/humble/setup.bash && source install/local_setup.bash`
 - Stop stale PAUS runtime before hardware or launch checks:
   `ros2 run paus_bringup stop_paus_runtime --kill --force`
 - Never commit `runtime_logs/`, `runs/`, `rosbags/`, `*.bag`, `*.db3`, `*.bak_*.yaml`, `.humanize/`, `.codex/`, `build/`, `install/`, `log/`, or one-off debug scripts unless the user explicitly asks.

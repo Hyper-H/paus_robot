@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import shutil
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -39,7 +38,11 @@ def _launch_setup(context, *args, **kwargs):
     del args, kwargs
 
     marker_share = Path(get_package_share_directory("paus_marker_ros2"))
-    python_exec = shutil.which("python3") or "/usr/bin/python3"
+    # Keep the ROS launch parent on the system Python, but run the camera and
+    # UI processes in the paus_robot environment. With ROS sourced, this
+    # environment can import rclpy while also providing compatible FastAPI,
+    # Uvicorn, websockets, and the camera SDK.
+    python_exec = LaunchConfiguration("python_exec").perform(context).strip() or "/home/chen_lab/miniconda3/envs/paus_robot/bin/python3"
     camera_bridge_script = marker_share / "scripts" / "camera_bridge.py"
 
     config_path = LaunchConfiguration("config_path").perform(context)
@@ -53,8 +56,15 @@ def _launch_setup(context, *args, **kwargs):
     camera_ip = LaunchConfiguration("camera_ip").perform(context).strip()
     camera_index = LaunchConfiguration("camera_index").perform(context).strip()
     image_topic = LaunchConfiguration("image_topic").perform(context)
+    preview_image_topic = LaunchConfiguration("preview_image_topic").perform(context)
     status_topic = LaunchConfiguration("status_topic").perform(context)
     camera_config_wait_timeout_s = float(LaunchConfiguration("camera_config_wait_timeout_s").perform(context))
+    fresh_image_timeout_s = float(
+        _arg_or_config(
+            LaunchConfiguration("fresh_image_timeout_s").perform(context),
+            calibration_cfg.get("fresh_image_timeout_s", 5.0),
+        )
+    )
     ui_host = LaunchConfiguration("ui_host").perform(context)
     ui_port = int(LaunchConfiguration("ui_port").perform(context))
     observation_mode = _arg_or_config(LaunchConfiguration("observation_mode").perform(context), calibration_cfg.get("observation_mode", "rgb_pnp")).strip()
@@ -75,7 +85,27 @@ def _launch_setup(context, *args, **kwargs):
     stable_window_s = float(_arg_or_config(LaunchConfiguration("stable_window_s").perform(context), calibration_cfg.get("stable_window_s", 0.5)))
     stable_timeout_s = float(_arg_or_config(LaunchConfiguration("stable_timeout_s").perform(context), calibration_cfg.get("stable_timeout_s", 10.0)))
     dwell_s = float(_arg_or_config(LaunchConfiguration("dwell_s").perform(context), calibration_cfg.get("dwell_s", 0.5)))
+    motion_target_tolerance_deg = float(_arg_or_config(LaunchConfiguration("motion_target_tolerance_deg").perform(context), calibration_cfg.get("motion_target_tolerance_deg", 0.5)))
+    motion_timeout_s = float(_arg_or_config(LaunchConfiguration("motion_timeout_s").perform(context), calibration_cfg.get("motion_timeout_s", 120.0)))
+    motion_poll_interval_s = float(_arg_or_config(LaunchConfiguration("motion_poll_interval_s").perform(context), calibration_cfg.get("motion_poll_interval_s", 0.05)))
     execute_motion = _as_bool(_arg_or_config(LaunchConfiguration("execute_motion").perform(context), control_cfg.get("execute_motion", False)))
+    calibration_tool_id = int(_arg_or_config(LaunchConfiguration("tool_id").perform(context), calibration_cfg.get("tool_id", 0)))
+    calibration_user_id = int(_arg_or_config(LaunchConfiguration("user_id").perform(context), calibration_cfg.get("user_id", 0)))
+    motion_tool_id = int(
+        _arg_or_config(
+            LaunchConfiguration("motion_tool_id").perform(context),
+            calibration_cfg.get("motion_tool_id", -1),
+        )
+    )
+    motion_user_id = int(
+        _arg_or_config(
+            LaunchConfiguration("motion_user_id").perform(context),
+            calibration_cfg.get("motion_user_id", -1),
+        )
+    )
+    move_vel = float(_arg_or_config(LaunchConfiguration("move_vel").perform(context), control_cfg.get("move_vel", 20.0)))
+    move_acc = float(_arg_or_config(LaunchConfiguration("move_acc").perform(context), control_cfg.get("move_acc", 20.0)))
+    global_speed = float(_arg_or_config(LaunchConfiguration("global_speed").perform(context), control_cfg.get("global_speed", 100.0)))
     tool_to_board_tx = float(_arg_or_config(LaunchConfiguration("tool_to_board_tx").perform(context), default_tool_to_board_translation[0]))
     tool_to_board_ty = float(_arg_or_config(LaunchConfiguration("tool_to_board_ty").perform(context), default_tool_to_board_translation[1]))
     tool_to_board_tz = float(_arg_or_config(LaunchConfiguration("tool_to_board_tz").perform(context), default_tool_to_board_translation[2]))
@@ -87,6 +117,13 @@ def _launch_setup(context, *args, **kwargs):
     start_calibration_node = _as_bool(LaunchConfiguration("start_calibration_node").perform(context))
     image_receiver_host = LaunchConfiguration("image_receiver_host").perform(context)
     image_receiver_port = LaunchConfiguration("image_receiver_port").perform(context)
+    camera_control_host = LaunchConfiguration("camera_control_host").perform(context)
+    camera_control_port = LaunchConfiguration("camera_control_port").perform(context)
+    preview_max_fps = LaunchConfiguration("preview_max_fps").perform(context)
+    preview_width = LaunchConfiguration("preview_width").perform(context)
+    preview_jpeg_quality = LaunchConfiguration("preview_jpeg_quality").perform(context)
+    camera_max_fps = LaunchConfiguration("camera_max_fps").perform(context)
+    enable_depth = _as_bool(LaunchConfiguration("enable_depth").perform(context))
 
     camera_bridge_cmd = [
         python_exec,
@@ -97,12 +134,25 @@ def _launch_setup(context, *args, **kwargs):
         image_receiver_port,
         "--camera-config-output",
         camera_config_output,
+        "--preview-max-fps",
+        preview_max_fps,
+        "--preview-width",
+        preview_width,
+        "--preview-jpeg-quality",
+        preview_jpeg_quality,
+        "--max-fps",
+        camera_max_fps,
+        "--control-host",
+        camera_control_host,
+        "--control-port",
+        camera_control_port,
     ]
     if camera_ip:
         camera_bridge_cmd += ["--camera-ip", camera_ip]
     if camera_index:
         camera_bridge_cmd += ["--camera-index", camera_index]
-    camera_bridge_cmd += ["--enable-depth"]
+    if enable_depth:
+        camera_bridge_cmd += ["--enable-depth"]
 
     actions = []
     if start_image_receiver:
@@ -116,6 +166,7 @@ def _launch_setup(context, *args, **kwargs):
                     {
                         "image_topic": image_topic,
                         "depth_topic": depth_topic,
+                        "preview_topic": preview_image_topic,
                     }
                 ],
             )
@@ -145,6 +196,7 @@ def _launch_setup(context, *args, **kwargs):
                     "config_path": config_path,
                     "camera_config_path": camera_config_output,
                     "camera_config_wait_timeout_s": camera_config_wait_timeout_s,
+                    "fresh_image_timeout_s": fresh_image_timeout_s,
                     "image_topic": image_topic,
                     "status_topic": status_topic,
                     "observation_mode": observation_mode,
@@ -165,7 +217,17 @@ def _launch_setup(context, *args, **kwargs):
                     "stable_window_s": stable_window_s,
                     "stable_timeout_s": stable_timeout_s,
                     "dwell_s": dwell_s,
+                    "motion_target_tolerance_deg": motion_target_tolerance_deg,
+                    "motion_timeout_s": motion_timeout_s,
+                    "motion_poll_interval_s": motion_poll_interval_s,
                     "execute_motion": execute_motion,
+                    "tool_id": calibration_tool_id,
+                    "user_id": calibration_user_id,
+                    "motion_tool_id": motion_tool_id,
+                    "motion_user_id": motion_user_id,
+                    "move_vel": move_vel,
+                    "move_acc": move_acc,
+                    "global_speed": global_speed,
                     "tool_to_board.translation_m": [tool_to_board_tx, tool_to_board_ty, tool_to_board_tz],
                     "tool_to_board.rotation_rpy_deg": [tool_to_board_rx, tool_to_board_ry, tool_to_board_rz],
                 }
@@ -198,6 +260,8 @@ def _launch_setup(context, *args, **kwargs):
                 "-p",
                 f"image_topic:={image_topic}",
                 "-p",
+                f"preview_image_topic:={preview_image_topic}",
+                "-p",
                 f"status_topic:={status_topic}",
                 "-p",
                 f"observation_mode:={observation_mode}",
@@ -219,6 +283,18 @@ def _launch_setup(context, *args, **kwargs):
                 f"min_board_margin_px:={min_board_margin_px}",
                 "-p",
                 f"execute_motion:={str(execute_motion).lower()}",
+                "-p",
+                f"move_vel:={move_vel}",
+                "-p",
+                f"move_acc:={move_acc}",
+                "-p",
+                f"global_speed:={global_speed}",
+                "-p",
+                f"camera_control_host:={camera_control_host}",
+                "-p",
+                f"camera_control_port:={camera_control_port}",
+                "-p",
+                f"camera_depth_initially_enabled:={str(enable_depth).lower()}",
             ],
             name="paus_ui_server",
             output="screen",
@@ -236,18 +312,34 @@ def generate_launch_description() -> LaunchDescription:
     calibration_cfg = config_payload.get("calibration", {})
     default_observation_mode = str(calibration_cfg.get("observation_mode", "rgb_pnp"))
     default_depth_topic = str(calibration_cfg.get("depth_topic", "/camera/depth_aligned"))
+    # Depth is started by the UI only when a real calibration run begins.
+    default_enable_depth = "false"
 
     return LaunchDescription(
         [
             DeclareLaunchArgument("config_path", default_value=default_config_path, description="Path to the main YAML config file."),
+            DeclareLaunchArgument(
+                "python_exec",
+                default_value="/home/chen_lab/miniconda3/envs/paus_robot/bin/python3",
+                description="Python executable for camera_bridge and paus_ui; ROS must be sourced in this environment.",
+            ),
             DeclareLaunchArgument("camera_config_output", default_value=RUNTIME_CAMERA_CONFIG, description="Path where camera_bridge.py will write camera.yaml."),
             DeclareLaunchArgument("camera_ip", default_value="", description="Optional camera IP. Leave empty to use the first discovered camera."),
             DeclareLaunchArgument("camera_index", default_value="", description="Optional camera index. Leave empty to use auto-selection."),
             DeclareLaunchArgument("image_receiver_host", default_value="127.0.0.1", description="TCP host where camera_bridge.py sends frames."),
             DeclareLaunchArgument("image_receiver_port", default_value="5001", description="TCP port where camera_bridge.py sends frames."),
-            DeclareLaunchArgument("image_topic", default_value="/camera/image_bridge", description="Image topic used by the UI preview."),
+            DeclareLaunchArgument("camera_control_host", default_value="127.0.0.1", description="Local host for camera depth control commands."),
+            DeclareLaunchArgument("camera_control_port", default_value="5002", description="Local TCP port for camera depth control commands."),
+            DeclareLaunchArgument("preview_max_fps", default_value="8.0", description="Max FPS for UI preview JPEG stream."),
+            DeclareLaunchArgument("preview_width", default_value="960", description="Max width for UI preview JPEG stream. 0 keeps source width."),
+            DeclareLaunchArgument("preview_jpeg_quality", default_value="72", description="JPEG quality for UI preview stream."),
+            DeclareLaunchArgument("camera_max_fps", default_value="8.0", description="Max RGB capture/send FPS; 0 disables throttling."),
+            DeclareLaunchArgument("enable_depth", default_value=default_enable_depth, description="Enable aligned depth capture; keep false for RGB-only calibration and lower CPU load."),
+            DeclareLaunchArgument("image_topic", default_value="/camera/image_bridge", description="Raw image topic used by calibration."),
+            DeclareLaunchArgument("preview_image_topic", default_value="/camera/preview_jpeg", description="Compressed JPEG topic used by the UI live preview."),
             DeclareLaunchArgument("status_topic", default_value="/eye_to_hand/status", description="Eye-to-hand JSON status topic."),
             DeclareLaunchArgument("camera_config_wait_timeout_s", default_value="15.0", description="How long the calibration node waits for camera.yaml to be written."),
+            DeclareLaunchArgument("fresh_image_timeout_s", default_value="", description="How long calibration waits for a new RGB frame after motion."),
             DeclareLaunchArgument("ui_host", default_value="0.0.0.0", description="UI bind host."),
             DeclareLaunchArgument("ui_port", default_value="8080", description="UI HTTP port."),
             DeclareLaunchArgument("observation_mode", default_value=default_observation_mode, description="UI / calibration observation mode."),
@@ -263,12 +355,22 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("save_sample_images", default_value="", description="Whether to save accepted sample images."),
             DeclareLaunchArgument("max_reprojection_error_px", default_value="", description="Max single-image reprojection error. 0 disables this filter."),
             DeclareLaunchArgument("min_board_margin_px", default_value="", description="Minimum board margin in pixels."),
-            DeclareLaunchArgument("stable_position_tolerance_mm", default_value="", description="TCP stability position tolerance."),
-            DeclareLaunchArgument("stable_rotation_tolerance_deg", default_value="", description="TCP stability rotation tolerance."),
+            DeclareLaunchArgument("stable_position_tolerance_mm", default_value="", description="Flange stability position tolerance."),
+            DeclareLaunchArgument("stable_rotation_tolerance_deg", default_value="", description="Flange stability rotation tolerance."),
             DeclareLaunchArgument("stable_window_s", default_value="", description="Required stable window in seconds."),
-            DeclareLaunchArgument("stable_timeout_s", default_value="", description="Timeout for waiting stable TCP."),
+            DeclareLaunchArgument("stable_timeout_s", default_value="", description="Timeout for waiting flange stability."),
             DeclareLaunchArgument("dwell_s", default_value="", description="Extra dwell after reaching each waypoint."),
+            DeclareLaunchArgument("motion_target_tolerance_deg", default_value="", description="Maximum per-joint error accepted for a reached MoveJ waypoint."),
+            DeclareLaunchArgument("motion_timeout_s", default_value="", description="Timeout for a non-blocking MoveJ waypoint to reach its target."),
+            DeclareLaunchArgument("motion_poll_interval_s", default_value="", description="Polling interval for MoveJ target confirmation."),
             DeclareLaunchArgument("execute_motion", default_value="", description="Whether to allow real robot motion. Defaults to dry-run when config keeps execute_motion false."),
+            DeclareLaunchArgument("tool_id", default_value="", description="FAIRINO tool ID used as the calibration flange reference."),
+            DeclareLaunchArgument("user_id", default_value="", description="FAIRINO work-object ID used as the calibration reference."),
+            DeclareLaunchArgument("motion_tool_id", default_value="", description="FAIRINO MoveJ tool ID; -1 follows the controller's active tool."),
+            DeclareLaunchArgument("motion_user_id", default_value="", description="FAIRINO MoveJ work-object ID; -1 follows the controller's active work object."),
+            DeclareLaunchArgument("move_vel", default_value="", description="FAIRINO MoveJ velocity used when recording waypoints."),
+            DeclareLaunchArgument("move_acc", default_value="", description="FAIRINO acceleration used when recording waypoints."),
+            DeclareLaunchArgument("global_speed", default_value="", description="FAIRINO controller global speed percentage."),
             DeclareLaunchArgument("tool_to_board_tx", default_value="", description="Tool-to-board x in meters."),
             DeclareLaunchArgument("tool_to_board_ty", default_value="", description="Tool-to-board y in meters."),
             DeclareLaunchArgument("tool_to_board_tz", default_value="", description="Tool-to-board z in meters."),

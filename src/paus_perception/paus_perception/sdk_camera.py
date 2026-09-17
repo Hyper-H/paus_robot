@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 # 导入 dataclass，定义发现到的相机信息结构。
 from dataclasses import dataclass
+from io import BytesIO
 # 导入 Path，便于处理标定输出路径。
 from pathlib import Path
 # 导入 time，便于桥接层循环取帧时休眠与时间戳记录。
@@ -14,6 +15,11 @@ from typing import Any
 import cv2
 # 导入 NumPy，用于图像数组转换。
 import numpy as np
+try:
+    from PIL import Image, ImageFile
+except ImportError:  # pragma: no cover - optional runtime fallback
+    Image = None
+    ImageFile = None
 
 # 导入统一的相机标定结果类型。
 from .calibration import CameraCalibration, save_camera_calibration
@@ -43,6 +49,73 @@ class CameraRuntime:
     rgb_channel: int = 2
     # 当前已经打开的 SDK stream channel。
     stream_channels: tuple[int, ...] = (2,)
+
+
+def _configure_stream_transport(DkamSDK: Any, camera_obj: Any, channel: int) -> dict[str, int]:
+    """Enable packet recovery and return the SDK transport settings."""
+    channel = int(channel)
+    settings: dict[str, int] = {}
+    if hasattr(DkamSDK, "SetResendRequest"):
+        resend_result = DkamSDK.SetResendRequest(camera_obj, channel, 1)
+        if resend_result is not None and int(resend_result) != 0:
+            raise RuntimeError(f"SetResendRequest(channel={channel}) failed with code {int(resend_result)}.")
+
+    getters = (
+        ("packet_timeout_us", "GetPacketTimeout"),
+        ("block_timeout_us", "GetBlockTimeout"),
+        ("packet_resend_ratio", "GetPacketResendRatio"),
+        ("socket_select_timeout_us", "GetSocketSelectTimeout"),
+        ("max_buffer_length", "GetMaxBufferLength"),
+        ("resend_request", "GetResendRequest"),
+    )
+    for key, function_name in getters:
+        function = getattr(DkamSDK, function_name, None)
+        if function is None:
+            continue
+        try:
+            settings[key] = int(function(camera_obj, channel))
+        except Exception:
+            # Older SDK builds expose only a subset of the transport getters.
+            continue
+    return settings
+
+
+def read_stream_transport_diagnostics(runtime: CameraRuntime, channel: int | None = None) -> dict[str, object]:
+    """Read best-effort packet/block counters for the active camera stream."""
+    DkamSDK = _require_dkam_sdk()
+    selected_channel = int(runtime.rgb_channel if channel is None else channel)
+    diagnostics: dict[str, object] = {"channel": selected_channel}
+    for key, function_name, names in (
+        (
+            "packet_statistics",
+            "GetPacketStatistics",
+            ("received_packets", "missing_packets", "error_packets", "ignored_packets", "resend_requests", "resent_packets", "duplicated_packets"),
+        ),
+        (
+            "block_statistics",
+            "GetBlockStatistics",
+            ("completed_buffers", "failures", "timeouts", "underruns", "aborteds", "missing_frames", "block_camera_wrong", "size_mismatch_errors"),
+        ),
+    ):
+        function = getattr(DkamSDK, function_name, None)
+        if function is None:
+            continue
+        arrays = [DkamSDK.new_unsignedintArray(1) for _ in names]
+        try:
+            function(runtime.camera_obj, selected_channel, *arrays)
+            diagnostics[key] = {
+                name: int(DkamSDK.unsignedintArray_getitem(array, 0))
+                for name, array in zip(names, arrays)
+            }
+        except Exception as exc:
+            diagnostics[f"{key}_error"] = repr(exc)
+        finally:
+            for array in arrays:
+                try:
+                    DkamSDK.delete_unsignedintArray(array)
+                except Exception:
+                    pass
+    return diagnostics
 
 
 # 以懒加载方式导入 DkamSDK，避免在 py310 环境中误导入。
@@ -238,6 +311,8 @@ def open_camera_runtime(
             if point_trigger_status != 0:
                 raise RuntimeError(f"SetTriggerMode failed with code {point_trigger_status}.")
         for channel in active_stream_channels:
+            _configure_stream_transport(DkamSDK, camera_obj, channel)
+        for channel in active_stream_channels:
             stream_status = int(DkamSDK.StreamOn(camera_obj, channel))
             if stream_status != 0:
                 raise RuntimeError(f"StreamOn({channel}) failed with code {stream_status}.")
@@ -280,15 +355,81 @@ def capture_raw_frame(runtime: CameraRuntime, channel: int, buffer_size: int, ti
     return photo_info, raw_buffer
 
 
+def _capture_payload_size(photo_info: Any, buffer_length: int) -> int:
+    """Return the transport payload length, not the output buffer capacity."""
+    payload_size = int(getattr(photo_info, "gvsp_payload_size", 0) or 0)
+    if payload_size <= 0:
+        payload_size = int(getattr(photo_info, "payload_size", 0) or 0)
+    if payload_size < 4 or payload_size > int(buffer_length):
+        return 0
+    return payload_size
+
+
+def _has_complete_jpeg_payload(photo_info: Any, raw_buffer: bytes) -> bool:
+    payload_size = _capture_payload_size(photo_info, len(raw_buffer))
+    if payload_size < 4:
+        return False
+    payload = raw_buffer[:payload_size]
+    return payload.startswith(b"\xff\xd8") and payload.endswith(b"\xff\xd9")
+
+
+def _decode_jpeg_payload(photo_info: Any, raw_buffer: bytes) -> np.ndarray | None:
+    if not _has_complete_jpeg_payload(photo_info, raw_buffer):
+        return None
+    payload_size = _capture_payload_size(photo_info, len(raw_buffer))
+    payload = raw_buffer[:payload_size]
+    if Image is not None:
+        try:
+            if ImageFile is not None and ImageFile.LOAD_TRUNCATED_IMAGES:
+                return None
+            with Image.open(BytesIO(payload)) as image:
+                image.verify()
+            with Image.open(BytesIO(payload)) as image:
+                image.load()
+                rgb_image = np.asarray(image.convert("RGB"), dtype=np.uint8).copy()
+            return cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
+        except Exception:
+            return None
+    return cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+
+
 # 在当前连接的相机上抓取一帧 RGB 图像。
-def capture_rgb_frame(runtime: CameraRuntime, timeout_us: int = 3_000_000) -> np.ndarray:
+def capture_rgb_frame(runtime: CameraRuntime, timeout_us: int = 3_000_000, max_attempts: int = 3) -> np.ndarray:
     DkamSDK = _require_dkam_sdk()
     pixel_count = runtime.rgb_width * runtime.rgb_height * 3
-    photo_info, rgb_buffer = capture_raw_frame(runtime, runtime.rgb_channel, pixel_count, timeout_us=timeout_us)
-    if hasattr(DkamSDK, "RawdataToRgb888CSharp"):
-        DkamSDK.RawdataToRgb888CSharp(runtime.camera_obj, photo_info, rgb_buffer, pixel_count)
-    rgb_array = np.frombuffer(rgb_buffer, dtype=np.uint8).reshape((runtime.rgb_height, runtime.rgb_width, 3))
-    return cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
+    last_payload_size = 0
+    attempts = max(int(max_attempts), 1)
+    errors: list[str] = []
+    for attempt_index in range(1, attempts + 1):
+        try:
+            photo_info, rgb_buffer = capture_raw_frame(runtime, runtime.rgb_channel, pixel_count, timeout_us=timeout_us)
+            last_payload_size = _capture_payload_size(photo_info, len(rgb_buffer))
+            decoded_image = _decode_jpeg_payload(photo_info, rgb_buffer)
+            if decoded_image is not None:
+                if decoded_image.shape != (runtime.rgb_height, runtime.rgb_width, 3):
+                    raise RuntimeError(f"decoded RGB shape was {decoded_image.shape!r}")
+                return decoded_image
+            if last_payload_size > 0 and rgb_buffer[:2] == b"\xff\xd8":
+                # This camera reports JPEG payloads. Never pass a malformed JPEG
+                # to RawdataToRgb888CSharp; it logs a warning and may emit a
+                # partially decoded frame.
+                raise RuntimeError(
+                    "incomplete or undecodable JPEG payload "
+                    f"(gvsp_payload_size={last_payload_size}, buffer_size={pixel_count})"
+                )
+            if hasattr(DkamSDK, "RawdataToRgb888CSharp"):
+                DkamSDK.RawdataToRgb888CSharp(runtime.camera_obj, photo_info, rgb_buffer, pixel_count)
+            rgb_array = np.frombuffer(rgb_buffer, dtype=np.uint8).reshape((runtime.rgb_height, runtime.rgb_width, 3))
+            return cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
+        except Exception as exc:
+            errors.append(f"attempt {attempt_index}: {exc!r}")
+            if attempt_index < attempts:
+                time.sleep(0.05)
+    raise RuntimeError(
+        "RGB capture did not produce a valid frame after "
+        f"{attempts} attempts (gvsp_payload_size={last_payload_size}, buffer_size={pixel_count}; "
+        f"errors={errors})."
+    )
 
 
 # 启动时从当前相机读取厂家标定参数并写入 camera.yaml。

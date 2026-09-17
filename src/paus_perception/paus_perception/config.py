@@ -97,7 +97,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # 机械臂接近控制相关配置。
     "control": {
         # 机械臂控制器 IP。
-        "robot_ip": "192.168.58.2",
+        "robot_ip": "172.16.33.126",
         # 官方 Linux FAIRINO Python SDK 根目录。
         "linux_fairino_sdk_root": "/opt/fairino_python_sdk/linux",
         # 默认只做 dry-run，不执行真实动作。
@@ -106,10 +106,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "tool_id": 0,
         # 当前使用的用户坐标系编号。
         "user_id": 0,
-        # MoveL 速度。
-        "move_vel": 10.0,
-        # MoveL 加速度。
-        "move_acc": 10.0,
+        # Default joint/cartesian motion velocity percentage.
+        "move_vel": 20.0,
+        # Default joint/cartesian motion acceleration percentage.
+        "move_acc": 20.0,
+        # FAIRINO 控制器全局速度倍率。100% 时由每个 MoveJ/MoveL 的速度参数控制。
+        "global_speed": 100.0,
         # MoveL 速度倍率。
         "move_ovl": 20.0,
         # MoveL 圆滑半径。
