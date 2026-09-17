@@ -3,9 +3,23 @@ from __future__ import annotations
 # 导入 os / sys / Path，用于动态组织 Linux SDK 的导入路径。
 import os
 import sys
+import socket
+import threading
+import xmlrpc.client
 from pathlib import Path
 from collections.abc import Sequence
 from xmlrpc.client import Fault
+
+
+class _BoundedXmlRpcTransport(xmlrpc.client.Transport):
+    def __init__(self, timeout_s: float) -> None:
+        super().__init__()
+        self.timeout_s = timeout_s
+
+    def make_connection(self, host: str):
+        connection = super().make_connection(host)
+        connection.timeout = self.timeout_s
+        return connection
 
 
 # 这个类负责把官方 Linux FAIRINO Python SDK 包装成更稳定的项目内部接口。
@@ -17,6 +31,10 @@ class FairinoLinuxClient:
         self.robot_ip = str(robot_ip)
         self.robot = None
         self._robot_module = None
+        self._bounded_rpc_lock = threading.Lock()
+        self._bounded_rpc_transport = None
+        self._bounded_rpc_proxy = None
+        self._bounded_rpc_timeout_s = None
 
     # 确保官方 SDK 所在目录已经加入 Python 搜索路径，并且成功导入 `fairino.Robot`。
     def _ensure_sdk_importable(self) -> None:
@@ -54,6 +72,41 @@ class FairinoLinuxClient:
     def ensure_connection(self) -> None:
         if self.robot is None:
             self.connect()
+
+    def _bounded_rpc_call(self, method: str, args: tuple[object, ...], timeout_s: float) -> object:
+        if timeout_s <= 0:
+            raise ValueError("RPC timeout must be positive")
+        with self._bounded_rpc_lock:
+            if self._bounded_rpc_proxy is None or self._bounded_rpc_timeout_s != timeout_s:
+                if self._bounded_rpc_transport is not None:
+                    self._bounded_rpc_transport.close()
+                transport = _BoundedXmlRpcTransport(timeout_s)
+                self._bounded_rpc_transport = transport
+                self._bounded_rpc_proxy = xmlrpc.client.ServerProxy(
+                    f"http://{self.robot_ip}:20003", transport=transport, allow_none=True
+                )
+                self._bounded_rpc_timeout_s = timeout_s
+            try:
+                return getattr(self._bounded_rpc_proxy, method)(*args)
+            except Exception:
+                self._bounded_rpc_transport.close()
+                self._bounded_rpc_transport = None
+                self._bounded_rpc_proxy = None
+                self._bounded_rpc_timeout_s = None
+                raise
+
+    def close(self) -> int:
+        with self._bounded_rpc_lock:
+            if self._bounded_rpc_transport is not None:
+                self._bounded_rpc_transport.close()
+            self._bounded_rpc_transport = None
+            self._bounded_rpc_proxy = None
+            self._bounded_rpc_timeout_s = None
+        robot, self.robot = self.robot, None
+        if robot is None:
+            return 0
+        result = robot.CloseRPC()
+        return 0 if result is None else int(result)
 
     # 设置机器人速度倍率。
     def set_speed(self, speed: float) -> int:
@@ -269,13 +322,23 @@ class FairinoLinuxClient:
             kwargs["acc"] = float(acc)
         return int(self.robot.MoveCart([float(v) for v in pose_mmdeg], **kwargs))
 
-    def ft_activate(self, state: bool) -> int:
+    def ft_activate(self, state: bool, call_timeout_s: float | None = None) -> int:
         self.ensure_connection()
+        if call_timeout_s is not None:
+            return int(self._bounded_rpc_call("FT_Activate", (1 if state else 0,), call_timeout_s))
         return int(self.robot.FT_Activate(1 if state else 0))
 
     def ft_set_zero(self, state: bool = True) -> int:
         self.ensure_connection()
         return int(self.robot.FT_SetZero(1 if state else 0))
+
+    def ft_set_rcs(self, ref: int = 0, coord: list[float] | None = None) -> int:
+        self.ensure_connection()
+        if coord is None:
+            coord = [0.0] * 6
+        if len(coord) != 6:
+            raise ValueError("FT reference coordinate must have 6 values")
+        return int(self.robot.FT_SetRCS(ref=int(ref), coord=[float(value) for value in coord]))
 
     def ft_get_force_torque_rcs(self) -> tuple[int, list[float]]:
         self.ensure_connection()
@@ -386,13 +449,17 @@ class FairinoLinuxClient:
             )
         )
 
-    def servo_move_start(self) -> int:
+    def servo_move_start(self, com_type: int = 0, call_timeout_s: float | None = None) -> int:
         self.ensure_connection()
-        return int(self.robot.ServoMoveStart())
+        if call_timeout_s is not None:
+            return int(self._bounded_rpc_call("ServoMoveStart", (int(com_type),), call_timeout_s))
+        return int(self.robot.ServoMoveStart(cmdType=int(com_type)))
 
-    def servo_move_end(self) -> int:
+    def servo_move_end(self, com_type: int = 0, call_timeout_s: float | None = None) -> int:
         self.ensure_connection()
-        return int(self.robot.ServoMoveEnd())
+        if call_timeout_s is not None:
+            return int(self._bounded_rpc_call("ServoMoveEnd", (int(com_type),), call_timeout_s))
+        return int(self.robot.ServoMoveEnd(cmdType=int(com_type)))
 
     def get_robot_motion_done(self) -> tuple[int, int | None]:
         self.ensure_connection()
@@ -418,6 +485,7 @@ class FairinoLinuxClient:
         cmd_t: float = 0.008,
         pos_gain: list[float] | None = None,
         mode: int = 2,
+        call_timeout_s: float | None = None,
     ) -> int:
         self.ensure_connection()
         if pos_gain is None:
@@ -425,6 +493,20 @@ class FairinoLinuxClient:
         desc_pos = [float(value) for value in delta_mmdeg]
         exaxis = [0.0, 0.0, 0.0, 0.0]
         pos_gain = [float(value) for value in pos_gain]
+        if call_timeout_s is not None:
+            safety_code = int(self.robot.GetSafetyCode())
+            if safety_code != 0:
+                return safety_code
+            try:
+                return int(
+                    self._bounded_rpc_call(
+                        "ServoCart",
+                        (int(mode), desc_pos, pos_gain, exaxis, 0.0, 0.0, float(cmd_t), 0.0, 0.0),
+                        call_timeout_s,
+                    )
+                )
+            except (socket.timeout, TimeoutError, OSError):
+                return -16
         try:
             return int(
                 self.robot.ServoCart(
@@ -440,6 +522,18 @@ class FairinoLinuxClient:
                 raise
             return int(self.robot.robot.ServoCart(int(mode), desc_pos, exaxis, 0.0, 0.0, float(cmd_t), 0.0, 0.0))
 
-    def stop_motion(self) -> int:
+    def stop_motion(self, call_timeout_s: float | None = None) -> int:
         self.ensure_connection()
+        if call_timeout_s is not None:
+            return int(self._bounded_rpc_call("StopMotion", (), call_timeout_s))
         return int(self.robot.StopMotion())
+
+    def stop_motion_urgent(self, call_timeout_s: float = 0.5) -> int:
+        transport = _BoundedXmlRpcTransport(call_timeout_s)
+        proxy = xmlrpc.client.ServerProxy(
+            f"http://{self.robot_ip}:20003", transport=transport, allow_none=True
+        )
+        try:
+            return int(proxy.StopMotion())
+        finally:
+            transport.close()

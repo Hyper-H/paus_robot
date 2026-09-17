@@ -36,8 +36,6 @@ class SourceAwareControlValidityTests(unittest.TestCase):
         self.node.targeting_mode = "markerless_neck"
         self.node.target_pose_topic = "/selected_target_pose_base"
         self.node.last_target_lock_status = None
-        self.node.require_locked_target_before_motion = True
-        self.node.continue_with_last_locked_target_on_source_loss = True
 
     def test_markerless_uses_selected_target_validity(self) -> None:
         self.assertFalse(self.node._uses_marker_visibility_gate())
@@ -73,7 +71,7 @@ class SourceAwareControlValidityTests(unittest.TestCase):
         )
         self.assertIsNone(
             self.node._target_loss_reason(
-                target_age_ms=600.0,
+                target_age_ms=100.0,
                 marker_visibility_status="not_found",
                 transform_validity_status="invalid",
                 selected_source_status="stale",
@@ -104,20 +102,6 @@ class SourceAwareControlValidityTests(unittest.TestCase):
             "target_lock_not_locked",
         )
 
-    def test_locked_target_message_is_not_allowed_for_motion_until_locked(self) -> None:
-        self.node.target_pose_topic = DEFAULT_LOCKED_TARGET_POSE_TOPIC
-        self.node.last_target_lock_status = {
-            "state": "collecting",
-            "locked": False,
-        }
-        self.assertFalse(self.node._target_message_allowed_for_motion())
-
-        self.node.last_target_lock_status = {
-            "state": "locked",
-            "locked": True,
-        }
-        self.assertTrue(self.node._target_message_allowed_for_motion())
-
     def test_marker_mode_uses_marker_visibility_gate(self) -> None:
         self.node.targeting_mode = "marker"
 
@@ -132,24 +116,41 @@ class SourceAwareControlValidityTests(unittest.TestCase):
             )
         )
 
-    def test_markerless_timeout_reason_points_to_selected_target(self) -> None:
-        reason = self.node._target_loss_reason(
-            target_age_ms=600.0,
-            marker_visibility_status="not_found",
-            transform_validity_status="invalid",
-            selected_source_status="stale",
+    def test_marker_static_target_uses_locked_target_after_marker_loss(self) -> None:
+        self.node.targeting_mode = "marker"
+        self.node.target_pose_topic = DEFAULT_LOCKED_TARGET_POSE_TOPIC
+        self.node.static_target_after_lock = True
+        self.node.locked_target_pose_received = True
+        self.node.last_target_lock_status = {"state": "collecting", "locked": False}
+
+        self.assertFalse(self.node._uses_marker_visibility_gate())
+        self.assertTrue(self.node._uses_target_lock_gate())
+        self.assertTrue(self.node._static_target_armed())
+        self.assertTrue(
+            self.node._source_fresh_for_tracking(
+                marker_visibility_status="not_found",
+                transform_validity_status="stale",
+                selected_source_status="stale",
+            )
+        )
+        self.assertIsNone(
+            self.node._target_loss_reason(
+                target_age_ms=5000.0,
+                marker_visibility_status="not_found",
+                transform_validity_status="stale",
+                selected_source_status="stale",
+            )
         )
 
-        self.assertEqual(reason, "selected_target_timeout")
+    def test_marker_without_static_target_keeps_visibility_gate(self) -> None:
+        self.node.targeting_mode = "marker"
+        self.node.target_pose_topic = "/selected_target_pose_base"
+        self.node.static_target_after_lock = False
 
-    def test_locked_target_timeout_can_be_restored_as_fatal_when_configured(self) -> None:
-        self.node.target_pose_topic = DEFAULT_LOCKED_TARGET_POSE_TOPIC
-        self.node.last_target_lock_status = {
-            "state": "locked",
-            "locked": True,
-        }
-        self.node.continue_with_last_locked_target_on_source_loss = False
+        self.assertTrue(self.node._uses_marker_visibility_gate())
+        self.assertFalse(self.node._source_fresh_for_tracking("not_found", "ok", "ok"))
 
+    def test_markerless_timeout_reason_points_to_selected_target(self) -> None:
         reason = self.node._target_loss_reason(
             target_age_ms=600.0,
             marker_visibility_status="not_found",
@@ -172,8 +173,6 @@ class SourceAwareControlValidityTests(unittest.TestCase):
         self.node.max_execution_stage = "final_hover"
         self.node.control_backend = "mock_pose"
         self.node.max_marker_displacement_before_relatch_mm = 200.0
-        self.node.require_locked_target_before_motion = True
-        self.node.continue_with_last_locked_target_on_source_loss = True
         self.node.last_valid_target_point_base_m = None
         self.node.status_publisher = mock.MagicMock()
         self.node.debug_status_publisher = mock.MagicMock()

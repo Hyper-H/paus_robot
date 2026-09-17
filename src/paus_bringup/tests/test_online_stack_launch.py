@@ -29,9 +29,11 @@ class OnlineStackLaunchStaticTests(unittest.TestCase):
 
         self.assertIn("enabled", config["neck_surface"])
         self.assertIn('load_config(config_path)', launch_text)
-        self.assertIn('enable_neck_surface = bool(neck_cfg.get("enabled", False))', launch_text)
+        self.assertIn('enable_neck_surface_configured = bool(neck_cfg.get("enabled", False))', launch_text)
         self.assertIn('if enable_neck_surface:', launch_text)
         self.assertIn('executable="neck_surface_pose_node"', launch_text)
+        self.assertIn('enable_neck_surface_configured and targeting_mode != "marker"', launch_text)
+        self.assertIn('enable_neck_eval = bool(neck_cfg.get("eval_enabled", False)) and enable_neck_surface', launch_text)
 
     def test_markerless_neck_surface_enables_depth_bridge(self) -> None:
         launch_text = (PROJECT_ROOT / "src" / "paus_bringup" / "launch" / "online_stack.launch.py").read_text(
@@ -86,6 +88,9 @@ class OnlineStackLaunchStaticTests(unittest.TestCase):
         self.assertIn('"control_trace_path": str(neck_session_root / "control_trace.jsonl")', launch_text)
         self.assertIn('"run_report_path": str(neck_session_root / "run_report.md")', launch_text)
         self.assertIn('"run_dir": str(neck_session_root)', launch_text)
+        self.assertIn('"logging_output_dir"', launch_text)
+        self.assertIn('Path("/mnt/data/projects/paus_robot/runs") / workspace_root.name', launch_text)
+        self.assertIn('logging_output_dir_override', launch_text)
         self.assertIn('"logging_enabled": False', launch_text)
         self.assertIn('"run_dir": str(neck_session_root)', launch_text)
         self.assertIn('executable="target_transform_node"', launch_text)
@@ -104,15 +109,13 @@ class OnlineStackLaunchStaticTests(unittest.TestCase):
         self.assertEqual(config["targeting"]["mode"], "markerless_neck")
         self.assertEqual(config["targeting"]["source_timeout_ms"], 2000)
         self.assertTrue(config["target_lock"]["enabled"])
+        self.assertFalse(config["target_lock"].get("static_target_after_lock", False))
         self.assertEqual(config["target_lock"]["collect_duration_s"], 4.0)
         self.assertEqual(config["target_lock"]["min_samples"], 3)
         self.assertEqual(config["target_lock"]["max_sample_age_ms"], 2500)
         self.assertEqual(config["target_lock"]["max_sample_jump_mm"], 120.0)
         self.assertEqual(config["target_lock"]["max_position_spread_mm"], 60.0)
         self.assertEqual(config["target_lock"]["drift_warning_mm"], 80.0)
-        self.assertEqual(config["target_lock"]["policy"], "lock_once_episode")
-        self.assertEqual(config["target_lock"]["stale_after_locked_action"], "warn_only")
-        self.assertFalse(config["target_lock"]["allow_relock_during_motion"])
         self.assertIn('markerless_target_pose_topic = "/markerless_neck_target_pose_base"', launch_text)
         self.assertIn('marker_target_pose_topic = "/marker_target_pose_base"', launch_text)
         self.assertIn('selected_target_pose_topic = "/selected_target_pose_base"', launch_text)
@@ -126,11 +129,10 @@ class OnlineStackLaunchStaticTests(unittest.TestCase):
         self.assertIn('"selector_status_topic": selector_status_topic', launch_text)
         self.assertIn('"target_lock_status_topic": target_lock_status_topic', launch_text)
         self.assertIn('"targeting_mode": targeting_mode', launch_text)
-        self.assertIn('"neck_surface_target_mode": neck_cfg.get("target_mode", "refined_surface")', launch_text)
         self.assertIn('DeclareLaunchArgument(\n                "targeting_mode"', launch_text)
+        self.assertIn('DeclareLaunchArgument(\n                "static_target_after_lock"', launch_text)
+        self.assertIn('"static_target_after_lock": static_target_after_lock', launch_text)
         self.assertEqual(config["control"]["motion_strategy"], "staged_patient_left_final_hover")
-        self.assertTrue(config["control"]["require_locked_target_before_motion"])
-        self.assertTrue(config["control"]["continue_with_last_locked_target_on_source_loss"])
         self.assertFalse(config["control"]["move_to_approach_ready_on_start"])
         self.assertEqual(len(config["control"]["approach_ready_joint_deg"]), 6)
         self.assertEqual(config["control"]["roll_policy"], "base_up_projection")
@@ -148,14 +150,6 @@ class OnlineStackLaunchStaticTests(unittest.TestCase):
         self.assertFalse(neck_cfg["save_depth"])
         self.assertTrue(neck_cfg["save_debug_eval"])
         self.assertTrue(neck_cfg["save_debug_surface"])
-
-    def test_markerless_refined_surface_target_mode_is_default(self) -> None:
-        config = yaml.safe_load(
-            (PROJECT_ROOT / "src" / "paus_bringup" / "configs" / "default.yaml").read_text(encoding="utf-8")
-        )
-
-        self.assertEqual(config["neck_surface"]["target_mode"], "refined_surface")
-        self.assertEqual(config["targeting"]["mode"], "markerless_neck")
 
     def test_camera_bridge_defaults_to_paus_robot_conda_python(self) -> None:
         launch_text = (PROJECT_ROOT / "src" / "paus_bringup" / "launch" / "online_stack.launch.py").read_text(

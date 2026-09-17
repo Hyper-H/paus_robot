@@ -48,13 +48,23 @@ def _test_config(*args, **kwargs):
             "tool_id": 0,
             "user_id": 0,
             "move_vel": 50.0,
+            "move_acc": 10.0,
+            "move_ovl": 20.0,
+            "motion_strategy": "legacy_direct_final_hover",
+            "approach_ready_joint_deg": None,
+            "approach_ready_tolerance_deg": 5.0,
+            "approach_ready_vel": 20.0,
+            "pre_approach_vel": 10.0,
+            "final_hover_vel": 5.0,
+            "max_direct_final_hover_distance_mm": 120.0,
             "max_step_distance_mm": 80.0,
             "min_safe_z_mm": 50.0,
             "orientation_mode": "face_marker_normal",
             "flange_face_axis": "-Z",
+            "roll_policy": "current_tcp_projection",
+            "roll_offset_deg": 0.0,
             "hover_clearance_mm": 30.0,
             "pre_approach_distance_mm": 80.0,
-            "min_plane_clearance_mm": 10.0,
             "prefer_positive_z_surface_normal": True,
             "enable_safe_lift_on_low_clearance": True,
             "safe_lift_step_mm": 80.0,
@@ -109,6 +119,9 @@ class _ProxyNode:
         return mock.MagicMock()
 
     def create_timer(self, *args, **kwargs):
+        return mock.MagicMock()
+
+    def create_service(self, *args, **kwargs):
         return mock.MagicMock()
 
 
@@ -248,6 +261,7 @@ class RealNodeTargetLossTests(unittest.TestCase):
         self.node._completion_allowed.return_value = True
         self.node._marker_visibility_status.return_value = "ok"
         self.node._transform_validity_status.return_value = "ok"
+        self.node.targeting_mode = "marker"
 
     # ── AC-4: Brief loss preserves state ──
 

@@ -262,7 +262,6 @@ def _build_safe_lift_position(
     surface_normal_base: np.ndarray,
     current_clearance_mm: float,
     min_safe_z_mm: float,
-    min_plane_clearance_mm: float,
     safe_lift_step_mm: float,
     safe_lift_above_marker_mm: float,
     safe_lift_max_z_mm: float,
@@ -271,14 +270,12 @@ def _build_safe_lift_position(
     if normal_z <= 1e-6:
         raise ValueError("Safe lift requires a positive surface normal z component.")
 
-    z_for_clearance = float(current_position_mm[2]) + (
-        float(min_plane_clearance_mm) - float(current_clearance_mm)
-    ) / normal_z
+    z_for_surface_side = float(current_position_mm[2]) + (-float(current_clearance_mm)) / normal_z
     safe_z = max(
         float(current_position_mm[2]) + float(safe_lift_step_mm),
         float(marker_center_mm[2]) + float(safe_lift_above_marker_mm),
         float(min_safe_z_mm),
-        z_for_clearance,
+        z_for_surface_side,
     )
     if safe_z > float(safe_lift_max_z_mm):
         raise ValueError("Safe lift pose exceeds maximum z.")
@@ -299,7 +296,6 @@ def build_approach_decision(
     pre_approach_distance_mm: float,
     max_step_distance_mm: float,
     min_safe_z_mm: float,
-    min_plane_clearance_mm: float,
     workspace_min_mm: list[float],
     workspace_max_mm: list[float],
     *,
@@ -411,6 +407,9 @@ def build_approach_decision(
         float(pre_approach_position[0]),
         float(pre_approach_position[1]),
         float(pre_approach_position[2]),
+        # Align at the far pre-approach point.  The final-hover move should
+        # then be a translation along the already selected surface normal,
+        # rather than rotating close to the patient or contact surface.
         *[float(value) for value in adjusted_target_orientation_rpy_deg],
     ]
 
@@ -435,43 +434,26 @@ def build_approach_decision(
                 final_hover_pose_mmdeg=final_hover_pose_mmdeg,
                 pre_approach_pose_mmdeg=pre_approach_pose_mmdeg,
             )
-        if _signed_plane_clearance_mm(pose_position, marker_center, surface_normal) < float(min_plane_clearance_mm):
-            return rejection(
-                f"{pose_name} is below minimum plane clearance.",
-                target_pose_base_mmdeg=target_pose_base_mmdeg,
-                surface_normal_base=surface_normal.tolist(),
-                final_hover_pose_mmdeg=final_hover_pose_mmdeg,
-                pre_approach_pose_mmdeg=pre_approach_pose_mmdeg,
-            )
-
     distance_to_final_hover = float(np.linalg.norm(final_hover_position - current_position))
     distance_to_pre_approach = float(np.linalg.norm(pre_approach_position - current_position))
     orientation_delta_deg = _rotation_delta_deg(current_rotation, final_hover_rotation)
     current_clearance_to_plane_mm = _signed_plane_clearance_mm(current_position, marker_center, surface_normal)
-
     if distance_to_final_hover <= float(stage_switch_buffer_mm) and orientation_delta_deg <= float(DEFAULT_REORIENT_TOLERANCE_DEG):
         candidate_stage = FINAL_HOVER_STAGE
         candidate_position = final_hover_position.copy()
         step_distance = distance_to_final_hover
         candidate_rotation = final_hover_rotation
     elif distance_to_pre_approach > float(stage_switch_buffer_mm):
-        if orientation_delta_deg > float(DEFAULT_REORIENT_TOLERANCE_DEG):
-            candidate_stage = REORIENT_STAGE
-            candidate_position = current_position.copy()
-            step_distance = 0.0
-            candidate_rotation = _interpolate_rotation_towards(
-                current_rotation,
-                final_hover_rotation,
-                float(DEFAULT_MAX_REORIENT_STEP_DEG),
-            )
-        else:
-            candidate_stage = PRE_APPROACH_STAGE
-            candidate_position, step_distance = _limit_translation_step(
-                current_position,
-                pre_approach_position,
-                float(max_step_distance_mm),
-            )
-            candidate_rotation = final_hover_rotation
+        candidate_stage = PRE_APPROACH_STAGE
+        candidate_position, step_distance = _limit_translation_step(
+            current_position,
+            pre_approach_position,
+            float(max_step_distance_mm),
+        )
+        # Include the orientation target in the pre-approach command.  This
+        # makes the normal approach path position-and-orientation aligned
+        # before the robot enters the near-surface final-hover segment.
+        candidate_rotation = final_hover_rotation
     elif orientation_delta_deg > float(DEFAULT_REORIENT_TOLERANCE_DEG):
         candidate_stage = REORIENT_STAGE
         candidate_position = pre_approach_position.copy()
@@ -496,8 +478,8 @@ def build_approach_decision(
         if candidate_order < latch_order:
             if stage_latch == REORIENT_STAGE:
                 candidate_stage = REORIENT_STAGE
-                candidate_position = current_position.copy()
-                step_distance = 0.0
+                candidate_position = pre_approach_position.copy()
+                step_distance = float(np.linalg.norm(candidate_position - current_position))
                 candidate_rotation = _interpolate_rotation_towards(
                     current_rotation,
                     final_hover_rotation,
@@ -516,8 +498,8 @@ def build_approach_decision(
     if (
         enable_safe_lift_on_low_clearance
         and (
-            current_clearance_to_plane_mm < float(min_plane_clearance_mm)
-            or clearance_to_plane_mm < float(min_plane_clearance_mm)
+            current_clearance_to_plane_mm < 0.0
+            or clearance_to_plane_mm < 0.0
             or float(candidate_position[2]) < float(min_safe_z_mm)
         )
     ):
@@ -528,7 +510,6 @@ def build_approach_decision(
                 surface_normal,
                 current_clearance_to_plane_mm,
                 float(min_safe_z_mm),
-                float(min_plane_clearance_mm),
                 float(safe_lift_step_mm),
                 float(safe_lift_above_marker_mm),
                 float(safe_lift_max_z_mm),
@@ -549,7 +530,6 @@ def build_approach_decision(
         candidate_rotation = current_rotation
         step_distance = float(np.linalg.norm(candidate_position - current_position))
         clearance_to_plane_mm = _signed_plane_clearance_mm(candidate_position, marker_center, surface_normal)
-
     workspace_error = _workspace_error(candidate_position, workspace_min_mm, workspace_max_mm)
     if workspace_error is not None:
         return rejection(
@@ -573,19 +553,6 @@ def build_approach_decision(
             distance_to_target_mm=distance_to_final_hover,
             clearance_to_plane_mm=clearance_to_plane_mm,
         )
-    if clearance_to_plane_mm < float(min_plane_clearance_mm):
-        return rejection(
-            "Candidate pose is below minimum plane clearance.",
-            target_pose_base_mmdeg=target_pose_base_mmdeg,
-            surface_normal_base=surface_normal.tolist(),
-            final_hover_pose_mmdeg=final_hover_pose_mmdeg,
-            pre_approach_pose_mmdeg=pre_approach_pose_mmdeg,
-            candidate_stage=candidate_stage,
-            step_distance_mm=step_distance,
-            distance_to_target_mm=distance_to_final_hover,
-            clearance_to_plane_mm=clearance_to_plane_mm,
-        )
-
     candidate_pose_mmdeg = [
         float(candidate_position[0]),
         float(candidate_position[1]),
