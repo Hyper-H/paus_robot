@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
+import signal
+import threading
 import time
-import traceback
 from typing import Any
 
 import numpy as np
@@ -13,16 +15,17 @@ from geometry_msgs.msg import PoseStamped
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_msgs.msg import String
+from std_srvs.srv import Trigger
 
-from paus_motion_ros2 import FairinoLinuxClient, build_approach_decision, compute_normal_alignment_error_deg
-from paus_motion_ros2.control_logic import _quaternion_slerp, _rotation_delta_deg
-from paus_perception import (
-    load_config,
-    quaternion_xyzw_to_rotation_matrix,
-    rotation_matrix_to_quaternion_xyzw,
-    rotation_matrix_to_rpy_deg,
-    rpy_deg_to_rotation_matrix,
+from paus_motion_ros2 import (
+    AdmittanceSession,
+    AdmittanceSessionConfig,
+    AdmittanceSessionState,
+    FairinoLinuxClient,
+    build_approach_decision,
+    compute_normal_alignment_error_deg,
 )
+from paus_perception import load_config, quaternion_xyzw_to_rotation_matrix, rotation_matrix_to_rpy_deg
 
 
 APPROACH_READY_STAGE = "approach_ready"
@@ -30,6 +33,10 @@ PRE_APPROACH_STAGE = "pre_approach"
 REORIENT_STAGE = "reorient"
 FINAL_HOVER_STAGE = "final_hover"
 SAFE_LIFT_STAGE = "safe_lift"
+CONTACT_STAGE = "contact"
+FORCE_HOLD_STAGE = "force_hold"
+TREATMENT_STAGE = "treatment"
+RETURN_START_STAGE = "return_start"
 MOTION_STRATEGY_LEGACY = "legacy_direct_final_hover"
 MOTION_STRATEGY_STAGED_PATIENT_LEFT_FINAL_HOVER = "staged_patient_left_final_hover"
 ROLL_POLICY_CURRENT_TCP_PROJECTION = "current_tcp_projection"
@@ -42,9 +49,13 @@ STAGE_PROGRESS_FINAL_HOVER_DONE = "final_hover_done"
 STAGE_ORDER = {
     SAFE_LIFT_STAGE: -1,
     APPROACH_READY_STAGE: 0,
-    REORIENT_STAGE: 1,
-    PRE_APPROACH_STAGE: 2,
+    PRE_APPROACH_STAGE: 1,
+    REORIENT_STAGE: 2,
     FINAL_HOVER_STAGE: 3,
+    CONTACT_STAGE: 4,
+    FORCE_HOLD_STAGE: 5,
+    TREATMENT_STAGE: 6,
+    RETURN_START_STAGE: 7,
 }
 
 TRACKING_IDLE = "idle_no_target"
@@ -90,6 +101,7 @@ class FairinoControlNode(Node):
         self.declare_parameter("selector_status_topic", "/target_selector_status")
         self.declare_parameter("target_lock_status_topic", "/target_lock_status")
         self.declare_parameter("targeting_mode", "")
+        self.declare_parameter("static_target_after_lock", "")
         self.declare_parameter("run_dir", "")
 
         config_path = self.get_parameter("config_path").get_parameter_value().string_value
@@ -101,55 +113,57 @@ class FairinoControlNode(Node):
         selector_status_topic = self.get_parameter("selector_status_topic").get_parameter_value().string_value
         target_lock_status_topic = self.get_parameter("target_lock_status_topic").get_parameter_value().string_value
         targeting_mode_param = self.get_parameter("targeting_mode").get_parameter_value().string_value.strip()
+        static_target_after_lock_param = self.get_parameter("static_target_after_lock").get_parameter_value().string_value.strip().lower()
         run_dir_param = self.get_parameter("run_dir").get_parameter_value().string_value.strip()
         self.run_dir = Path(run_dir_param) if run_dir_param else None
         self.control_trace_path = self.run_dir / "control_trace.jsonl" if self.run_dir is not None else None
+        self.force_trace_path = self.run_dir / "force_trace.jsonl" if self.run_dir is not None else None
         self.control_status_latest_path = self.run_dir / "control_status_latest.json" if self.run_dir is not None else None
         self.motion_summary_path = self.run_dir / "motion_summary.json" if self.run_dir is not None else None
         self.run_report_path = self.run_dir / "run_report.md" if self.run_dir is not None else None
 
         self.config = load_config(config_path)
-        control_cfg = self.config["control"]
+        control_cfg = dict(self.config["control"])
+        for name in (
+            "max_execution_stage",
+            "approach_ready_vel",
+            "pre_approach_vel",
+            "final_hover_vel",
+            "final_hover_servo_cmd_t_s",
+            "final_hover_servo_max_step_mm",
+            "final_hover_servo_max_step_deg",
+        ):
+            self.declare_parameter(name, str(control_cfg.get(name, "")) if name == "max_execution_stage" else float(control_cfg.get(name, 0.0)))
+            parameter = self.get_parameter(name).value
+            if isinstance(parameter, (str, int, float)) and parameter != "":
+                control_cfg[name] = parameter
         targeting_cfg = self.config.get("targeting", {})
+        target_lock_cfg = self.config.get("target_lock", {})
         configured_targeting_mode = str(targeting_cfg.get("mode", TARGETING_MARKERLESS_NECK))
         self.targeting_mode = targeting_mode_param or configured_targeting_mode
         self.target_pose_topic = target_pose_topic
-        self.declare_parameter("execute_motion", bool(control_cfg["execute_motion"]))
-        self.declare_parameter("max_execution_stage", str(control_cfg.get("max_execution_stage", FINAL_HOVER_STAGE)))
-        self.declare_parameter("approach_ready_vel", float(control_cfg.get("approach_ready_vel", control_cfg["move_vel"])))
-        self.declare_parameter("pre_approach_vel", float(control_cfg.get("pre_approach_vel", control_cfg["move_vel"])))
-        self.declare_parameter("final_hover_vel", float(control_cfg.get("final_hover_vel", control_cfg["move_vel"])))
-        self.declare_parameter("final_hover_servo_cmd_t_s", float(control_cfg.get("final_hover_servo_cmd_t_s", 0.008)))
-        self.declare_parameter("final_hover_servo_max_step_mm", float(control_cfg.get("final_hover_servo_max_step_mm", 1.0)))
-        self.declare_parameter("final_hover_servo_max_step_deg", float(control_cfg.get("final_hover_servo_max_step_deg", 1.0)))
+        self.static_target_after_lock = (
+            bool(target_lock_cfg.get("static_target_after_lock", False))
+            if static_target_after_lock_param == ""
+            else static_target_after_lock_param == "true"
+        )
 
         self.robot_ip = str(control_cfg["robot_ip"])
         self.linux_fairino_sdk_root = str(control_cfg["linux_fairino_sdk_root"])
-        self.execute_motion = bool(self.get_parameter("execute_motion").get_parameter_value().bool_value)
+        self.execute_motion = bool(control_cfg["execute_motion"])
         self.tool_id = int(control_cfg["tool_id"])
         self.user_id = int(control_cfg["user_id"])
         self.move_vel = float(control_cfg["move_vel"])
         self.move_acc = float(control_cfg.get("move_acc", 10.0))
         self.move_ovl = float(control_cfg.get("move_ovl", 20.0))
-        self.joint_motion_blend_time_ms = float(control_cfg.get("joint_motion_blend_time_ms", 0.0))
-        self.joint_motion_done_timeout_s = float(control_cfg.get("joint_motion_done_timeout_s", 60.0))
         self.motion_strategy = str(control_cfg.get("motion_strategy", MOTION_STRATEGY_LEGACY))
         self.move_to_approach_ready_on_start = bool(control_cfg.get("move_to_approach_ready_on_start", False))
         self.approach_ready_joint_deg = self._parse_optional_joint_deg(control_cfg.get("approach_ready_joint_deg"))
         self.approach_ready_tolerance_deg = float(control_cfg.get("approach_ready_tolerance_deg", 5.0))
-        self.approach_ready_vel = float(self.get_parameter("approach_ready_vel").get_parameter_value().double_value)
-        self.pre_approach_vel = float(self.get_parameter("pre_approach_vel").get_parameter_value().double_value)
-        self.final_hover_vel = float(self.get_parameter("final_hover_vel").get_parameter_value().double_value)
-        self.final_hover_servo_enabled = bool(control_cfg.get("final_hover_servo_enabled", True))
-        self.final_hover_servo_cmd_t_s = float(self.get_parameter("final_hover_servo_cmd_t_s").get_parameter_value().double_value)
-        self.final_hover_servo_max_step_mm = float(
-            self.get_parameter("final_hover_servo_max_step_mm").get_parameter_value().double_value
-        )
-        self.final_hover_servo_max_step_deg = float(
-            self.get_parameter("final_hover_servo_max_step_deg").get_parameter_value().double_value
-        )
-        self.final_hover_servo_ready_timeout_s = float(control_cfg.get("final_hover_servo_ready_timeout_s", 3.0))
-        self.final_hover_servo_orientation_enabled = bool(control_cfg.get("final_hover_servo_orientation_enabled", False))
+        self.approach_ready_vel = float(control_cfg.get("approach_ready_vel", self.move_vel))
+        self.pre_approach_vel = float(control_cfg.get("pre_approach_vel", self.move_vel))
+        self.final_hover_vel = float(control_cfg.get("final_hover_vel", self.move_vel))
+        self.return_start_vel = float(control_cfg.get("return_start_vel", self.move_vel))
         self.max_direct_final_hover_distance_mm = float(control_cfg.get("max_direct_final_hover_distance_mm", 120.0))
         self.roll_policy = str(control_cfg.get("roll_policy", ROLL_POLICY_CURRENT_TCP_PROJECTION))
         self.roll_offset_deg = float(control_cfg.get("roll_offset_deg", 0.0))
@@ -159,13 +173,12 @@ class FairinoControlNode(Node):
         self.flange_face_axis = str(control_cfg.get("flange_face_axis", "-Z"))
         self.hover_clearance_mm = float(control_cfg["hover_clearance_mm"])
         self.pre_approach_distance_mm = float(control_cfg["pre_approach_distance_mm"])
-        self.min_plane_clearance_mm = float(control_cfg["min_plane_clearance_mm"])
         self.prefer_positive_z_surface_normal = bool(control_cfg.get("prefer_positive_z_surface_normal", True))
         self.enable_safe_lift_on_low_clearance = bool(control_cfg.get("enable_safe_lift_on_low_clearance", True))
         self.safe_lift_step_mm = float(control_cfg.get("safe_lift_step_mm", 80.0))
         self.safe_lift_above_marker_mm = float(control_cfg.get("safe_lift_above_marker_mm", 180.0))
         self.safe_lift_max_z_mm = float(control_cfg.get("safe_lift_max_z_mm", 500.0))
-        self.max_execution_stage = str(self.get_parameter("max_execution_stage").get_parameter_value().string_value)
+        self.max_execution_stage = str(control_cfg.get("max_execution_stage", FINAL_HOVER_STAGE))
         if self.max_execution_stage not in STAGE_ORDER:
             self.get_logger().warning(
                 json.dumps(
@@ -180,10 +193,6 @@ class FairinoControlNode(Node):
             self.max_execution_stage = FINAL_HOVER_STAGE
 
         self.target_hold_timeout_ms = int(control_cfg.get("target_hold_timeout_ms", 500))
-        self.require_locked_target_before_motion = bool(control_cfg.get("require_locked_target_before_motion", True))
-        self.continue_with_last_locked_target_on_source_loss = bool(
-            control_cfg.get("continue_with_last_locked_target_on_source_loss", True)
-        )
         self.completion_position_tolerance_mm = float(control_cfg.get("completion_position_tolerance_mm", 20.0))
         self.completion_normal_tolerance_deg = float(control_cfg.get("completion_normal_tolerance_deg", 5.0))
         self.workspace_min_mm = [float(value) for value in control_cfg["workspace_min_mm"]]
@@ -195,6 +204,12 @@ class FairinoControlNode(Node):
         self.min_consecutive_detections = int(control_cfg.get("min_consecutive_detections", 2))
         self.use_mock_pose = bool(control_cfg["use_mock_pose"])
         self.mock_current_tcp_pose_mmdeg = [float(value) for value in control_cfg["mock_current_tcp_pose_mmdeg"]]
+        admittance_cfg = self.config.get("admittance_1d", {})
+        self.admittance_enabled = bool(admittance_cfg.get("enabled", False))
+        self.admittance_cfg = dict(admittance_cfg)
+
+        self.declare_parameter("execute_motion", bool(control_cfg["execute_motion"]))
+        self.execute_motion = bool(self.get_parameter("execute_motion").get_parameter_value().bool_value)
 
         self.status_publisher = self.create_publisher(String, status_topic, 10)
         self.debug_status_publisher = self.create_publisher(String, debug_status_topic, 10)
@@ -203,7 +218,8 @@ class FairinoControlNode(Node):
         self.transform_status_subscription = self.create_subscription(String, transform_status_topic, self._transform_status_callback, 10)
         self.selector_status_subscription = self.create_subscription(String, selector_status_topic, self._selector_status_callback, 10)
         self.target_lock_status_subscription = self.create_subscription(String, target_lock_status_topic, self._target_lock_status_callback, 10)
-        self.status_timer = self.create_timer(STATUS_TIMER_PERIOD_S, self._guarded_status_timer_callback)
+        self.force_stop_service = self.create_service(Trigger, "/force_control/stop", self._force_stop_callback)
+        self.status_timer = self.create_timer(STATUS_TIMER_PERIOD_S, self._status_timer_callback)
 
         self.last_executed_candidate_pose_mmdeg: list[float] | None = None
         self.last_executed_stage: str | None = None
@@ -216,9 +232,24 @@ class FairinoControlNode(Node):
         self.previous_stage: str | None = None
         self.stage_transition_reason: str | None = None
         self.motion_in_progress = False
-        self.motion_execution_faulted = False
         self.control_backend = "mock_pose"
         self.linux_client: FairinoLinuxClient | None = None
+        self.force_stop_event = threading.Event()
+        self.force_worker: threading.Thread | None = None
+        self.force_session: AdmittanceSession | None = None
+        self.force_start_joint_deg: list[float] | None = None
+        self.force_control_terminal = False
+        self._force_motion_owns_control_logged = False
+        self._force_control_terminal_logged = False
+        self._destroying = False
+        self._stop_motion_lock = threading.Lock()
+        self._stop_motion_requested = False
+        self._force_trace_lock = threading.Lock()
+        self._force_console_last_log_monotonic = 0.0
+        self._force_console_last_state: str | None = None
+        self._force_console_last_signature: tuple[Any, ...] | None = None
+        self._last_repeated_status_signature: tuple[Any, ...] | None = None
+        self.stage_timeline: list[dict[str, Any]] = []
 
         self.last_valid_target_pose_base_mmdeg: list[float] | None = None
         self.last_valid_final_hover_pose_mmdeg: list[float] | None = None
@@ -231,13 +262,15 @@ class FairinoControlNode(Node):
         self.last_transform_status: dict[str, Any] | None = None
         self.last_selector_status: dict[str, Any] | None = None
         self.last_target_lock_status: dict[str, Any] | None = None
+        self.last_locked_target_message: PoseStamped | None = None
+        self.locked_target_pose_received = False
         self.last_tracking_state = TRACKING_IDLE
         self.last_completion_reason = REASON_NO_VALID_TARGET
         self.last_timer_publish_signature: tuple[Any, ...] | None = None
+        self._completed_hold_console_logged = False
         self.last_trace_signature: tuple[Any, ...] | None = None
         self.last_trace_write_monotonic: float | None = None
         self.latest_risk_flags: list[str] = []
-        self.sdk_motion_prepared = False
         self.tracking_episode_completed = False
         self.completed_tracking_state: str | None = None
         self.completed_target_point_base_m: list[float] | None = None
@@ -258,7 +291,9 @@ class FairinoControlNode(Node):
             "clearance_to_plane_mm": None,
         }
 
-        if not self.use_mock_pose:
+        # execute_motion is the authoritative dry-run gate.  In particular,
+        # plan/mock mode must not import or connect the real SDK.
+        if self.execute_motion and not self.use_mock_pose:
             try:
                 self.linux_client = FairinoLinuxClient(self.linux_fairino_sdk_root, self.robot_ip)
                 self.linux_client.connect()
@@ -304,15 +339,10 @@ class FairinoControlNode(Node):
     def _uses_staged_motion(self) -> bool:
         return getattr(self, "motion_strategy", MOTION_STRATEGY_LEGACY) == MOTION_STRATEGY_STAGED_PATIENT_LEFT_FINAL_HOVER
 
-    def _uses_approach_ready_stage(self) -> bool:
-        return self._uses_staged_motion() and bool(getattr(self, "move_to_approach_ready_on_start", False))
-
     def _stage_sequence_planned(self) -> list[str]:
-        if self._uses_approach_ready_stage():
-            return [APPROACH_READY_STAGE, REORIENT_STAGE, PRE_APPROACH_STAGE, FINAL_HOVER_STAGE]
         if self._uses_staged_motion():
-            return [REORIENT_STAGE, PRE_APPROACH_STAGE, FINAL_HOVER_STAGE]
-        return [REORIENT_STAGE, PRE_APPROACH_STAGE, FINAL_HOVER_STAGE]
+            return [APPROACH_READY_STAGE, PRE_APPROACH_STAGE, FINAL_HOVER_STAGE]
+        return [PRE_APPROACH_STAGE, REORIENT_STAGE, FINAL_HOVER_STAGE]
 
     def _approach_ready_configured(self) -> bool:
         return getattr(self, "approach_ready_joint_deg", None) is not None
@@ -457,8 +487,6 @@ class FairinoControlNode(Node):
                 "target_lock_state": target_lock_state,
                 "target_lock_locked": target_lock_locked,
                 "target_hold_timeout_ms": self.target_hold_timeout_ms,
-                "require_locked_target_before_motion": self.require_locked_target_before_motion,
-                "continue_with_last_locked_target_on_source_loss": self.continue_with_last_locked_target_on_source_loss,
             }
         if approach_ready_joint_deg is None:
             approach_ready_joint_deg = getattr(self, "approach_ready_joint_deg", None)
@@ -546,8 +574,6 @@ class FairinoControlNode(Node):
             "completion_reason": completion_reason,
             "target_age_ms": target_age_ms,
             "target_hold_timeout_ms": target_hold_timeout_ms,
-            "require_locked_target_before_motion": self.require_locked_target_before_motion,
-            "continue_with_last_locked_target_on_source_loss": self.continue_with_last_locked_target_on_source_loss,
             "last_valid_target_pose_base_mmdeg": last_valid_target_pose_base_mmdeg,
             "last_valid_final_hover_pose_mmdeg": last_valid_final_hover_pose_mmdeg,
             "position_error_to_last_valid_final_hover_mm": position_error_to_last_valid_final_hover_mm,
@@ -564,6 +590,9 @@ class FairinoControlNode(Node):
             "selected_source_age_ms": selected_source_age_ms,
             "target_lock_state": target_lock_state,
             "target_lock_locked": target_lock_locked,
+            "locked_target_pose_received": bool(getattr(self, "locked_target_pose_received", False)),
+            "static_target_after_lock": getattr(self, "static_target_after_lock", False),
+            "static_target_armed": self._static_target_armed(),
             "target_validity_source": target_validity_source,
             "marker_visibility_role": marker_visibility_role,
             "target_loss_reason": target_loss_reason,
@@ -572,6 +601,11 @@ class FairinoControlNode(Node):
             "target_displacement_from_completed_mm": target_displacement_from_completed_mm,
             "completed_tracking_state": completed_tracking_state,
             "control_backend": self.control_backend,
+            "admittance_1d_enabled": bool(getattr(self, "admittance_enabled", False)),
+            "force_worker_active": bool(
+                getattr(self, "force_worker", None) is not None
+                and self.force_worker.is_alive()
+            ),
         }
         full_payload.update(extra_fields)
         full_payload["stamp_unix_s"] = time.time()
@@ -606,6 +640,9 @@ class FairinoControlNode(Node):
             "selected_source_age_ms": selected_source_age_ms,
             "target_lock_state": target_lock_state,
             "target_lock_locked": target_lock_locked,
+            "locked_target_pose_received": bool(getattr(self, "locked_target_pose_received", False)),
+            "static_target_after_lock": getattr(self, "static_target_after_lock", False),
+            "static_target_armed": self._static_target_armed(),
             "target_validity_source": target_validity_source,
             "marker_visibility_role": marker_visibility_role,
             "target_loss_reason": target_loss_reason,
@@ -619,6 +656,7 @@ class FairinoControlNode(Node):
             "control_backend": self.control_backend,
             "risk_flags": full_payload["risk_flags"],
         }
+        summary_payload.update(extra_fields)
 
         status_message = String()
         status_message.data = json.dumps(summary_payload, ensure_ascii=False)
@@ -627,7 +665,24 @@ class FairinoControlNode(Node):
         debug_message = String()
         debug_message.data = json.dumps(full_payload, ensure_ascii=False)
         self.debug_status_publisher.publish(debug_message)
-        self.get_logger().info(debug_message.data)
+        # Keep the terminal readable after a completed task.  The timer may
+        # continue receiving visual heartbeats, but the full event remains
+        # available through ROS topics and control_trace.jsonl.
+        terminal_log_allowed = True
+        if event == "tracking_completed_hold":
+            terminal_log_allowed = not self._completed_hold_console_logged
+            self._completed_hold_console_logged = True
+        if event in {"motion_busy", "control_skipped_repeat"}:
+            repeated_signature = (
+                event,
+                full_payload.get("stage_progress"),
+                full_payload.get("motion_command"),
+                full_payload.get("error_message"),
+            )
+            terminal_log_allowed = repeated_signature != self._last_repeated_status_signature
+            self._last_repeated_status_signature = repeated_signature
+        if terminal_log_allowed:
+            self.get_logger().info(self._terminal_status_line(full_payload))
         self._write_control_log(full_payload)
         if tracking_state is not None:
             self.last_tracking_state = tracking_state
@@ -643,17 +698,6 @@ class FairinoControlNode(Node):
             and target_age_ms > float(self.target_hold_timeout_ms)
         ):
             flags.append("target_age_over_timeout")
-        elif (
-            self._uses_target_lock_gate()
-            and isinstance(target_age_ms, (int, float))
-            and target_age_ms > float(self.target_hold_timeout_ms)
-        ):
-            flags.append("locked_target_age_over_timeout_warning")
-
-        if self._uses_target_lock_gate() and self._target_lock_locked():
-            selected_source_status = payload.get("selected_source_status")
-            if selected_source_status not in (None, "ok", "unknown"):
-                flags.append("source_stale_warning")
 
         current_tcp = payload.get("current_tcp_pose_mmdeg")
         target_point_mm = payload.get("target_point_base_mm")
@@ -693,11 +737,11 @@ class FairinoControlNode(Node):
             flags.append("candidate_not_final_hover")
         if payload.get("reject_reason") is not None:
             flags.append(str(payload.get("reject_reason")))
-        if self._uses_approach_ready_stage() and not payload.get("approach_ready_configured", False):
+        if self._uses_staged_motion() and not payload.get("approach_ready_configured", False):
             flags.append("approach_ready_not_configured")
         stage_progress = str(payload.get("stage_progress") or getattr(self, "stage_progress", STAGE_PROGRESS_NONE))
         if (
-            self._uses_approach_ready_stage()
+            self._uses_staged_motion()
             and candidate_stage == FINAL_HOVER_STAGE
             and stage_progress not in {STAGE_PROGRESS_PRE_APPROACH_DONE, STAGE_PROGRESS_FINAL_HOVER_DONE}
             and not payload.get("approach_ready_reached", False)
@@ -778,6 +822,62 @@ class FairinoControlNode(Node):
         except Exception as exc:
             self.get_logger().warning(json.dumps({"event": "control_trace_write_failed", "error": repr(exc)}, ensure_ascii=False))
 
+    def _write_force_trace(self, payload: dict[str, Any]) -> None:
+        """Persist high-rate force diagnostics without flooding the ROS terminal."""
+        self._log_force_console_summary(payload)
+        if self.force_trace_path is None:
+            return
+        try:
+            self.force_trace_path.parent.mkdir(parents=True, exist_ok=True)
+            record = {
+                "stamp_unix_s": time.time(),
+                **payload,
+            }
+            with self._force_trace_lock:
+                with self.force_trace_path.open("a", encoding="utf-8") as trace_file:
+                    trace_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            self.get_logger().warning(
+                json.dumps({"event": "force_trace_write_failed", "error": repr(exc)}, ensure_ascii=False)
+            )
+
+    def _log_force_console_summary(self, payload: dict[str, Any]) -> None:
+        """Print force progress on transitions and at a low fixed rate."""
+        event = str(payload.get("event", ""))
+        state = str(payload.get("state", "unknown"))
+        now = time.monotonic()
+        state_changed = state != self._force_console_last_state
+        periodic_due = now - self._force_console_last_log_monotonic >= 5.0
+        terminal_event = event in {
+            "contact_detected",
+            "force_settled",
+            "hold_complete",
+            "release_started",
+            "force_control_completed",
+            "force_control_failed",
+        }
+        if not state_changed and not periodic_due and not terminal_event:
+            return
+
+        self._force_console_last_state = state
+        self._force_console_last_log_monotonic = now
+        fields = {
+            "event": event or "force_progress",
+            "state": state,
+            "fz_raw_n": payload.get("fz_raw_n"),
+            "fz_filtered_n": payload.get("fz_filtered_n"),
+            "target_force_n": payload.get("target_force_n"),
+            "force_error_n": payload.get("force_error_n"),
+            "command_speed_mm_s": payload.get("command_speed_mm_s"),
+            "press_travel_mm": payload.get("press_travel_mm"),
+            "stroke_axis": payload.get("stroke_axis"),
+            "stroke_phase": payload.get("stroke_phase"),
+            "stroke_progress_mm": payload.get("stroke_progress_mm"),
+            "stroke_delta_x_mm": payload.get("stroke_delta_x_mm"),
+            "stroke_delta_y_mm": payload.get("stroke_delta_y_mm"),
+        }
+        self.get_logger().info(f"force_progress {json.dumps(fields, ensure_ascii=False)}")
+
     def _write_motion_summary_and_report(self, payload: dict[str, Any]) -> None:
         if self.motion_summary_path is None or self.run_report_path is None:
             return
@@ -798,6 +898,7 @@ class FairinoControlNode(Node):
             "stage_sequence_planned": payload.get("stage_sequence_planned"),
             "previous_stage": payload.get("previous_stage"),
             "stage_progress": payload.get("stage_progress"),
+            "stage_timeline": list(getattr(self, "stage_timeline", [])),
             "stage_regression_blocked": payload.get("stage_regression_blocked"),
             "full_pre_approach_move_enabled": payload.get("full_pre_approach_move_enabled"),
             "pre_approach_step_slicing_enabled": payload.get("pre_approach_step_slicing_enabled"),
@@ -856,6 +957,7 @@ class FairinoControlNode(Node):
             "latest_neck_surface_status": self._compact_neck_status(neck_latest),
             "files": {
                 "control_trace": str(self.control_trace_path),
+                "force_trace": str(getattr(self, "force_trace_path", None)),
                 "control_status_latest": str(self.control_status_latest_path),
                 "selector_trace": str(self.run_dir / "selector_trace.jsonl") if self.run_dir is not None else None,
                 "selector_status_latest": str(self.run_dir / "selector_status_latest.json") if self.run_dir is not None else None,
@@ -927,6 +1029,20 @@ class FairinoControlNode(Node):
             f"- stage_sequence_planned: `{self._format_value(summary.get('stage_sequence_planned'))}`",
             f"- previous_stage: `{summary.get('previous_stage')}`",
             f"- stage_progress: `{summary.get('stage_progress')}`",
+            "",
+            "## Stage Timeline",
+            "",
+            "| stage | command | duration_s | result |",
+            "|---|---|---:|---|",
+            *[
+                f"| {entry.get('stage', '-')} | {entry.get('command', '-')} | "
+                f"{entry.get('duration_s', '-')} | {entry.get('result', '-')} |"
+                for entry in (summary.get("stage_timeline") or [])
+            ],
+            "",
+            "Stage duration is the wall-clock duration of the synchronous motion command; "
+            "target-wait time and force-worker runtime are separate.",
+            "",
             f"- stage_regression_blocked: `{summary.get('stage_regression_blocked')}`",
             f"- full_pre_approach_move_enabled: `{summary.get('full_pre_approach_move_enabled')}`",
             f"- pre_approach_step_slicing_enabled: `{summary.get('pre_approach_step_slicing_enabled')}`",
@@ -1049,58 +1165,10 @@ class FairinoControlNode(Node):
     def _get_current_tcp_pose_mmdeg(self) -> list[float]:
         if self.control_backend == "mock_pose" or self.linux_client is None:
             return list(self.mock_current_tcp_pose_mmdeg)
-        active_tool_error, active_tool_id = self.linux_client.get_actual_tcp_num()
-        if active_tool_error == 0 and int(active_tool_id) != int(self.tool_id):
-            return self._get_current_configured_tool_pose_mmdeg()
         error, pose = self.linux_client.get_actual_tcp_pose()
         if error != 0:
             raise RuntimeError(f"GetActualTCPPose failed with code {error}.")
         return pose
-
-    def _get_current_configured_tool_pose_mmdeg(self) -> list[float]:
-        if self.linux_client is None:
-            raise RuntimeError("Linux FAIRINO SDK backend is unavailable.")
-        flange_error, flange_pose = self.linux_client.get_actual_tool_flange_pose()
-        if flange_error != 0 or len(flange_pose) < 6:
-            raise RuntimeError(f"GetActualToolFlangePose failed with code {flange_error}.")
-        tool_error, tool_coord = self.linux_client.get_tool_coord_with_id(self.tool_id)
-        if tool_error != 0 or len(tool_coord) < 6:
-            raise RuntimeError(f"GetToolCoordWithID({self.tool_id}) failed with code {tool_error}.")
-        flange_position = np.asarray(flange_pose[:3], dtype=np.float64)
-        flange_rotation = rpy_deg_to_rotation_matrix(flange_pose[3:6])
-        tool_translation = np.asarray(tool_coord[:3], dtype=np.float64)
-        tool_rotation = rpy_deg_to_rotation_matrix(tool_coord[3:6])
-        tcp_position = flange_position + flange_rotation @ tool_translation
-        tcp_rotation = flange_rotation @ tool_rotation
-        return [float(value) for value in tcp_position] + rotation_matrix_to_rpy_deg(tcp_rotation)
-
-    def _pose_mmdeg_to_transform(self, pose_mmdeg: list[float]) -> np.ndarray:
-        transform = np.eye(4, dtype=np.float64)
-        transform[:3, :3] = rpy_deg_to_rotation_matrix(pose_mmdeg[3:6])
-        transform[:3, 3] = np.asarray(pose_mmdeg[:3], dtype=np.float64)
-        return transform
-
-    def _transform_to_pose_mmdeg(self, transform: np.ndarray) -> list[float]:
-        return [float(value) for value in transform[:3, 3]] + rotation_matrix_to_rpy_deg(transform[:3, :3])
-
-    def _command_pose_and_tool_for_active_tcp(self, configured_tool_pose_mmdeg: list[float]) -> tuple[list[float], int]:
-        if self.linux_client is None:
-            raise RuntimeError("Linux FAIRINO SDK backend is unavailable.")
-        active_tool_error, active_tool_id = self.linux_client.get_actual_tcp_num()
-        if active_tool_error != 0 or active_tool_id is None or int(active_tool_id) == int(self.tool_id):
-            return list(configured_tool_pose_mmdeg), int(self.tool_id)
-        configured_tool_error, configured_tool_coord = self.linux_client.get_tool_coord_with_id(self.tool_id)
-        if configured_tool_error != 0 or len(configured_tool_coord) < 6:
-            raise RuntimeError(f"GetToolCoordWithID({self.tool_id}) failed with code {configured_tool_error}.")
-        active_tool_error, active_tool_coord = self.linux_client.get_tool_coord_with_id(int(active_tool_id))
-        if active_tool_error != 0 or len(active_tool_coord) < 6:
-            raise RuntimeError(f"GetToolCoordWithID({active_tool_id}) failed with code {active_tool_error}.")
-        configured_tool_transform = self._pose_mmdeg_to_transform(configured_tool_coord)
-        active_tool_transform = self._pose_mmdeg_to_transform(active_tool_coord)
-        configured_target_transform = self._pose_mmdeg_to_transform(configured_tool_pose_mmdeg)
-        flange_target_transform = configured_target_transform @ np.linalg.inv(configured_tool_transform)
-        active_target_transform = flange_target_transform @ active_tool_transform
-        return self._transform_to_pose_mmdeg(active_target_transform), int(active_tool_id)
 
     def _safe_get_current_tcp_pose_mmdeg(self) -> list[float] | None:
         try:
@@ -1122,12 +1190,10 @@ class FairinoControlNode(Node):
             return "MoveJ"
         if candidate_stage == SAFE_LIFT_STAGE:
             return "MoveL"
-        if candidate_stage == PRE_APPROACH_STAGE:
-            return "MoveJ"
-        if candidate_stage == REORIENT_STAGE:
+        if candidate_stage in (PRE_APPROACH_STAGE, REORIENT_STAGE):
             return "MoveJ"
         if candidate_stage == FINAL_HOVER_STAGE:
-            return "ServoCart" if getattr(self, "final_hover_servo_enabled", True) else "MoveL"
+            return "MoveL"
         return None
 
     def _stage_allowed(self, candidate_stage: str | None) -> bool:
@@ -1144,310 +1210,96 @@ class FairinoControlNode(Node):
             return self.final_hover_vel
         return self.move_vel
 
-    def _prepare_sdk_motion_if_needed(self) -> None:
-        if self.sdk_motion_prepared:
-            return
-        if self.linux_client is None:
-            raise RuntimeError("Linux FAIRINO SDK backend is unavailable.")
-        result = self.linux_client.prepare_motion()
-        failed = {name: code for name, code in result.items() if int(code) != 0}
-        if failed:
-            raise RuntimeError(f"FAIRINO motion preparation failed: {failed}.")
-        self.sdk_motion_prepared = True
-
-    def _release_robot_control(self) -> dict[str, int | str]:
-        result: dict[str, int | str] = {}
-        if self.control_backend != "linux_sdk" or self.linux_client is None:
-            return result
-        for name, call in (
-            ("ServoMoveEnd", self.linux_client.servo_move_end),
-            ("StopMotion", self.linux_client.stop_motion),
-            ("ModeManual", self.linux_client.set_manual_mode),
-        ):
-            try:
-                result[name] = int(call())
-            except Exception as exc:
-                result[name] = repr(exc)
-        self.sdk_motion_prepared = False
-        return result
-
-    def _wait_for_motion_idle(self, timeout_s: float) -> None:
-        if self.linux_client is None:
-            raise RuntimeError("Linux FAIRINO SDK backend is unavailable.")
-        deadline = time.monotonic() + max(float(timeout_s), 0.0)
-        last_state: dict[str, Any] = {}
-        while True:
-            done_code, done = self.linux_client.get_robot_motion_done()
-            queue_code, queue_len = self.linux_client.get_motion_queue_length()
-            last_state = {
-                "motion_done_code": done_code,
-                "motion_done": done,
-                "queue_code": queue_code,
-                "queue_len": queue_len,
-            }
-            if done_code == 0 and queue_code == 0 and int(done or 0) == 1 and int(queue_len or 0) == 0:
-                return
-            if time.monotonic() >= deadline:
-                raise RuntimeError(f"Timed out waiting for motion idle before ServoCart: {last_state}.")
-            time.sleep(0.02)
-
-    def _wait_for_joint_target_reached(self, target_joint_deg: list[float], timeout_s: float) -> None:
-        if self.linux_client is None:
-            raise RuntimeError("Linux FAIRINO SDK backend is unavailable.")
-        deadline = time.monotonic() + max(float(timeout_s), 0.0)
-        tolerance_deg = max(float(getattr(self, "approach_ready_tolerance_deg", 5.0)), 0.5)
-        last_joint: list[float] | None = None
-        last_error: int | None = None
-        while True:
-            error, joint_deg = self.linux_client.get_actual_joint_pos_degree()
-            last_error = int(error)
-            if error == 0 and len(joint_deg) == 6:
-                last_joint = [float(value) for value in joint_deg]
-                max_delta = max(abs(float(target) - float(current)) for target, current in zip(target_joint_deg, last_joint))
-                if max_delta <= tolerance_deg:
-                    return
-            if time.monotonic() >= deadline:
-                raise RuntimeError(
-                    f"Timed out waiting for joint target: error={last_error}, "
-                    f"last_joint={last_joint}, target_joint={target_joint_deg}."
-                )
-            time.sleep(0.05)
-
-    def _pose_target_error(
-        self,
-        current_pose_mmdeg: list[float],
-        target_pose_mmdeg: list[float],
-    ) -> tuple[float | None, float]:
-        position_error_mm = self._distance_between_pose_positions_mm(current_pose_mmdeg, target_pose_mmdeg)
-        orientation_error_deg = _rotation_delta_deg(
-            rpy_deg_to_rotation_matrix(current_pose_mmdeg[3:6]),
-            rpy_deg_to_rotation_matrix(target_pose_mmdeg[3:6]),
-        )
-        return position_error_mm, orientation_error_deg
-
-    def _pose_target_reached(
-        self,
-        current_pose_mmdeg: list[float],
-        target_pose_mmdeg: list[float],
-        position_tolerance_mm: float,
-        orientation_tolerance_deg: float,
-    ) -> tuple[bool, float | None, float]:
-        position_error_mm, orientation_error_deg = self._pose_target_error(current_pose_mmdeg, target_pose_mmdeg)
-        reached = (
-            position_error_mm is not None
-            and position_error_mm <= position_tolerance_mm
-            and orientation_error_deg <= orientation_tolerance_deg
-        )
-        return reached, position_error_mm, orientation_error_deg
-
-    def _wait_for_pose_target_reached(self, target_pose_mmdeg: list[float], timeout_s: float) -> None:
-        deadline = time.monotonic() + max(float(timeout_s), 0.0)
-        position_tolerance_mm = max(float(getattr(self, "stage_switch_buffer_mm", 10.0)), 3.0)
-        orientation_tolerance_deg = max(float(getattr(self, "completion_normal_tolerance_deg", 5.0)), 3.0)
-        timeout_grace_s = max(float(getattr(self, "pose_target_timeout_grace_s", 0.5)), 0.0)
-        last_pose: list[float] | None = None
-        last_position_error_mm: float | None = None
-        last_orientation_error_deg: float | None = None
-        while True:
-            try:
-                current_pose = self._get_current_tcp_pose_mmdeg()
-            except Exception:
-                current_pose = None
-            if current_pose is not None and len(current_pose) >= 6:
-                last_pose = [float(value) for value in current_pose]
-                reached, last_position_error_mm, last_orientation_error_deg = self._pose_target_reached(
-                    last_pose,
-                    target_pose_mmdeg,
-                    position_tolerance_mm,
-                    orientation_tolerance_deg,
-                )
-                if reached:
-                    return
-            if time.monotonic() >= deadline:
-                grace_deadline = time.monotonic() + timeout_grace_s
-                while time.monotonic() < grace_deadline:
-                    time.sleep(0.05)
-                    try:
-                        current_pose = self._get_current_tcp_pose_mmdeg()
-                    except Exception:
-                        current_pose = None
-                    if current_pose is None or len(current_pose) < 6:
-                        continue
-                    last_pose = [float(value) for value in current_pose]
-                    reached, last_position_error_mm, last_orientation_error_deg = self._pose_target_reached(
-                        last_pose,
-                        target_pose_mmdeg,
-                        position_tolerance_mm,
-                        orientation_tolerance_deg,
-                    )
-                    if reached:
-                        return
-                raise RuntimeError(
-                    "Timed out waiting for pose target: "
-                    f"last_pose={last_pose}, target_pose={target_pose_mmdeg}, "
-                    f"position_error_mm={last_position_error_mm}, "
-                    f"orientation_error_deg={last_orientation_error_deg}."
-                )
-            time.sleep(0.05)
-
-    def _execute_move(self, candidate_pose_mmdeg: list[float], candidate_stage: str | None) -> list[float]:
+    def _execute_move(self, candidate_pose_mmdeg: list[float], candidate_stage: str | None) -> None:
         if self.control_backend != "linux_sdk" or self.linux_client is None:
             raise RuntimeError("Linux FAIRINO SDK backend is unavailable.")
-        self._prepare_sdk_motion_if_needed()
         vel = self._stage_velocity(candidate_stage)
-        self.last_move_j_pose_backoff = None
-        executed_pose_mmdeg = list(candidate_pose_mmdeg)
-        if candidate_stage == APPROACH_READY_STAGE:
-            if self.approach_ready_joint_deg is None:
-                raise RuntimeError("approach_ready_not_configured")
-            active_tool_error, active_tool_id = self.linux_client.get_actual_tcp_num()
-            joint_motion_tool_id = int(active_tool_id) if active_tool_error == 0 and active_tool_id is not None else int(self.tool_id)
-            result = self.linux_client.move_j(
-                self.approach_ready_joint_deg,
-                tool_id=joint_motion_tool_id,
-                user_id=self.user_id,
-                vel=vel,
-                acc=self.move_acc,
-                blend_time_ms=self.joint_motion_blend_time_ms,
+        command = self._motion_command_for_stage(candidate_stage)
+        started_at = time.time()
+        try:
+            if candidate_stage == APPROACH_READY_STAGE:
+                if self.approach_ready_joint_deg is None:
+                    raise RuntimeError("approach_ready_not_configured")
+                result = self.linux_client.move_j(
+                    self.approach_ready_joint_deg,
+                    tool_id=self.tool_id,
+                    user_id=self.user_id,
+                    vel=vel,
+                    acc=self.move_acc,
+                )
+            elif candidate_stage in (PRE_APPROACH_STAGE, REORIENT_STAGE):
+                joint_error, current_joint_pos_deg = self.linux_client.get_actual_joint_pos_degree()
+                if joint_error != 0:
+                    raise RuntimeError(f"GetActualJointPosDegree failed with code {joint_error}.")
+                result = self.linux_client.move_j_pose(
+                    candidate_pose_mmdeg,
+                    joint_pos_ref_deg=current_joint_pos_deg,
+                    tool_id=self.tool_id,
+                    user_id=self.user_id,
+                    vel=vel,
+                    acc=self.move_acc,
+                )
+            else:
+                result = self.linux_client.move_l(
+                    candidate_pose_mmdeg,
+                    tool_id=self.tool_id,
+                    user_id=self.user_id,
+                    vel=vel,
+                )
+            if result != 0:
+                raise RuntimeError(f"{command} failed with code {result}.")
+        except Exception as exc:
+            self._record_stage_timeline(
+                candidate_stage,
+                command,
+                started_at,
+                result="failed",
+                error=repr(exc),
             )
-        elif candidate_stage == PRE_APPROACH_STAGE:
-            result, executed_pose_mmdeg = self._move_j_pose_with_reachability_backoff(
-                candidate_pose_mmdeg,
-                vel=vel,
-            )
-        elif candidate_stage == REORIENT_STAGE:
-            result, executed_pose_mmdeg = self._move_j_pose_with_reachability_backoff(
-                candidate_pose_mmdeg,
-                vel=vel,
-            )
-        elif candidate_stage == FINAL_HOVER_STAGE and self.final_hover_servo_enabled:
-            self._servo_cart_to_pose(candidate_pose_mmdeg)
-            result = 0
-        else:
-            result = self.linux_client.move_l(candidate_pose_mmdeg, tool_id=self.tool_id, user_id=self.user_id, vel=vel)
-        if result != 0:
-            raise RuntimeError(f"{self._motion_command_for_stage(candidate_stage)} failed with code {result}.")
-        if candidate_stage == APPROACH_READY_STAGE:
-            self._wait_for_joint_target_reached(self.approach_ready_joint_deg or [], self.joint_motion_done_timeout_s)
-        elif candidate_stage in {PRE_APPROACH_STAGE, REORIENT_STAGE}:
-            self._wait_for_pose_target_reached(executed_pose_mmdeg, self.joint_motion_done_timeout_s)
-        return executed_pose_mmdeg
-
-    def _move_j_pose_once(self, configured_tool_pose_mmdeg: list[float], joint_pos_ref_deg: list[float], vel: float) -> int:
-        if self.linux_client is None:
-            raise RuntimeError("Linux FAIRINO SDK backend is unavailable.")
-        command_pose_mmdeg, command_tool_id = self._command_pose_and_tool_for_active_tcp(configured_tool_pose_mmdeg)
-        return self.linux_client.move_j_pose(
-            command_pose_mmdeg,
-            joint_pos_ref_deg=joint_pos_ref_deg,
-            tool_id=command_tool_id,
-            user_id=self.user_id,
-            vel=vel,
-            acc=self.move_acc,
-            blend_time_ms=self.joint_motion_blend_time_ms,
+            raise
+        self._record_stage_timeline(
+            candidate_stage,
+            command,
+            started_at,
+            result="success",
         )
 
-    def _move_j_pose_with_reachability_backoff(self, target_pose_mmdeg: list[float], vel: float) -> tuple[int, list[float]]:
-        if self.linux_client is None:
-            raise RuntimeError("Linux FAIRINO SDK backend is unavailable.")
-        joint_error, current_joint_pos_deg = self.linux_client.get_actual_joint_pos_degree()
-        if joint_error != 0:
-            raise RuntimeError(f"GetActualJointPosDegree failed with code {joint_error}.")
+    def _record_stage_timeline(
+        self,
+        stage: str | None,
+        command: str | None,
+        started_at: float,
+        *,
+        result: str,
+        error: str | None = None,
+    ) -> None:
+        if stage is None:
+            return
+        finished_at = time.time()
+        entry: dict[str, Any] = {
+            "stage": stage,
+            "command": command,
+            "start_unix_s": started_at,
+            "end_unix_s": finished_at,
+            "duration_s": max(0.0, finished_at - started_at),
+            "result": result,
+        }
+        if error:
+            entry["error"] = error
+        self.stage_timeline.append(entry)
 
-        target_pose = [float(value) for value in target_pose_mmdeg]
-        result = self._move_j_pose_once(target_pose, current_joint_pos_deg, vel)
-        if int(result) != 112:
-            return int(result), target_pose
-
-        current_pose = self._get_current_tcp_pose_mmdeg()
-        current = np.asarray(current_pose, dtype=np.float64)
-        target = np.asarray(target_pose, dtype=np.float64)
-        translation_distance_mm = float(np.linalg.norm(target[:3] - current[:3]))
-        min_backoff_step_mm = 1.0
-        if translation_distance_mm <= min_backoff_step_mm:
-            return int(result), target_pose
-
-        attempts: list[dict[str, float | int]] = [
-            {
-                "factor": 1.0,
-                "translation_distance_mm": translation_distance_mm,
-                "result": int(result),
-            }
-        ]
-        factor = 0.5
-        while translation_distance_mm * factor >= min_backoff_step_mm:
-            candidate = (current + factor * (target - current)).tolist()
-            result = self._move_j_pose_once(candidate, current_joint_pos_deg, vel)
-            attempts.append(
-                {
-                    "factor": float(factor),
-                    "translation_distance_mm": float(translation_distance_mm * factor),
-                    "result": int(result),
-                }
-            )
-            if int(result) == 0:
-                self.last_move_j_pose_backoff = attempts
-                return 0, [float(value) for value in candidate]
-            if int(result) != 112:
-                self.last_move_j_pose_backoff = attempts
-                return int(result), [float(value) for value in candidate]
-            factor *= 0.5
-
-        self.last_move_j_pose_backoff = attempts
-        return int(result), target_pose
-
-    def _servo_cart_to_pose(self, target_pose_mmdeg: list[float]) -> None:
-        if self.linux_client is None:
-            raise RuntimeError("Linux FAIRINO SDK backend is unavailable.")
-        self._wait_for_motion_idle(self.final_hover_servo_ready_timeout_s)
-        current_pose_mmdeg = self._get_current_tcp_pose_mmdeg()
-        target = np.asarray(target_pose_mmdeg, dtype=np.float64)
-        current = np.asarray(current_pose_mmdeg, dtype=np.float64)
-        if not self.final_hover_servo_orientation_enabled:
-            target[3:6] = current[3:6]
-        current_rotation = rpy_deg_to_rotation_matrix(current[3:6])
-        target_rotation = rpy_deg_to_rotation_matrix(target[3:6])
-        current_quaternion = np.asarray(rotation_matrix_to_quaternion_xyzw(current_rotation), dtype=np.float64)
-        target_quaternion = np.asarray(rotation_matrix_to_quaternion_xyzw(target_rotation), dtype=np.float64)
-        translation_delta_mm = float(np.linalg.norm(target[:3] - current[:3]))
-        orientation_delta_deg = _rotation_delta_deg(current_rotation, target_rotation)
-        translation_steps = int(np.ceil(translation_delta_mm / max(self.final_hover_servo_max_step_mm, 0.001)))
-        orientation_steps = int(np.ceil(orientation_delta_deg / max(self.final_hover_servo_max_step_deg, 0.001)))
-        steps = max(1, translation_steps, orientation_steps)
-
-        start_code = self.linux_client.servo_move_start()
-        if start_code != 0:
-            raise RuntimeError(f"ServoMoveStart failed with code {start_code}.")
-        last_code = start_code
-        try:
-            previous_rpy_deg = current[3:6].copy()
-            for index in range(1, steps + 1):
-                alpha = float(index) / float(steps)
-                intermediate = (current + alpha * (target - current)).tolist()
-                if self.final_hover_servo_orientation_enabled:
-                    interpolated_quaternion = _quaternion_slerp(current_quaternion, target_quaternion, alpha)
-                    interpolated_rotation = quaternion_xyzw_to_rotation_matrix(interpolated_quaternion.tolist())
-                    interpolated_rpy = np.asarray(rotation_matrix_to_rpy_deg(interpolated_rotation), dtype=np.float64)
-                    for axis_index in range(3):
-                        while interpolated_rpy[axis_index] - previous_rpy_deg[axis_index] > 180.0:
-                            interpolated_rpy[axis_index] -= 360.0
-                        while interpolated_rpy[axis_index] - previous_rpy_deg[axis_index] < -180.0:
-                            interpolated_rpy[axis_index] += 360.0
-                    intermediate[3:6] = [float(value) for value in interpolated_rpy]
-                    previous_rpy_deg = interpolated_rpy
-                command_pose_mmdeg, _command_tool_id = self._command_pose_and_tool_for_active_tcp(intermediate)
-                last_code = self.linux_client.servo_cart_tool_delta(
-                    command_pose_mmdeg,
-                    cmd_t=self.final_hover_servo_cmd_t_s,
-                    mode=0,
-                )
-                if last_code != 0:
-                    raise RuntimeError(f"ServoCart final_hover failed with code {last_code} at step {index}/{steps}.")
-                time.sleep(max(self.final_hover_servo_cmd_t_s, 0.001))
-        finally:
-            end_code = self.linux_client.servo_move_end()
-            if last_code == 0 and end_code != 0:
-                raise RuntimeError(f"ServoMoveEnd failed with code {end_code}.")
+    @staticmethod
+    def _terminal_status_line(payload: dict[str, Any]) -> str:
+        stamp = time.strftime("%H:%M:%S", time.localtime(float(payload.get("stamp_unix_s", time.time()))))
+        event = str(payload.get("event") or "status")
+        stage = payload.get("candidate_stage") or payload.get("stage_progress") or "-"
+        command = payload.get("motion_command") or "-"
+        error = payload.get("error_message") or payload.get("reject_reason") or ""
+        suffix = f" error={error}" if error else ""
+        return (
+            f"[{stamp}] {event} stage={stage} cmd={command} "
+            f"executed={payload.get('executed')} progress={payload.get('stage_progress') or '-'}{suffix}"
+        )
 
     def _should_move_to_approach_ready_on_start(self) -> bool:
         return bool(
@@ -1456,6 +1308,13 @@ class FairinoControlNode(Node):
             and getattr(self, "move_to_approach_ready_on_start", False)
             and not getattr(self, "startup_approach_ready_attempted", False)
             and getattr(self, "stage_progress", STAGE_PROGRESS_NONE) == STAGE_PROGRESS_NONE
+        )
+
+    def _startup_approach_ready_failed(self) -> bool:
+        return bool(
+            getattr(self, "startup_approach_ready_attempted", False)
+            and not getattr(self, "startup_approach_ready_executed", False)
+            and getattr(self, "startup_approach_ready_error", None)
         )
 
     def _run_startup_approach_ready_if_needed(self) -> bool:
@@ -1477,6 +1336,7 @@ class FairinoControlNode(Node):
                 completion_reason=REASON_NO_VALID_TARGET,
                 control_gate_decision="startup_rejected",
             )
+
             return True
 
         try:
@@ -1518,6 +1378,233 @@ class FairinoControlNode(Node):
             self.motion_in_progress = False
         return True
 
+    def _force_stage_requested(self) -> bool:
+        return self.max_execution_stage in {
+            CONTACT_STAGE,
+            FORCE_HOLD_STAGE,
+            TREATMENT_STAGE,
+            RETURN_START_STAGE,
+        }
+
+    def _admittance_session_config(self) -> AdmittanceSessionConfig:
+        values = self.admittance_cfg
+        return AdmittanceSessionConfig(
+            contact_detect_force_n=float(values.get("contact_detect_force_n", 1.0)),
+            target_force_n=float(values.get("target_force_n", 2.0)),
+            release_force_n=float(values.get("release_force_n", 0.2)),
+            hold_s=float(values.get("hold_s", 10.0)) if self.max_execution_stage != CONTACT_STAGE else 0.0,
+            force_stable_s=float(values.get("force_stable_s", 1.0)),
+            loop_hz=float(values.get("loop_hz", 20.0)),
+            servo_cmd_t=float(values.get("servo_cmd_t", 0.008)),
+            max_control_cycle_s=float(values.get("max_control_cycle_s", 0.15)),
+            max_servo_call_s=float(values.get("max_servo_call_s", 0.15)),
+            contact_speed_mm_s=float(values.get("contact_speed_mm_s", 0.05)),
+            contact_direction_sign=float(values.get("contact_direction_sign", -1.0)),
+            max_press_mm=float(values.get("max_press_mm", 10.0)),
+            max_release_mm=float(values.get("max_release_mm", 2.0)),
+            deadband_n=float(values.get("deadband_n", 0.2)),
+            gain_mm_s_n=float(values.get("gain_mm_s_n", 0.2)),
+            max_speed_mm_s=float(values.get("max_speed_mm_s", 0.3)),
+            release_speed_mm_s=float(values.get("release_speed_mm_s", values.get("max_speed_mm_s", 0.3))),
+            force_filter_s=float(values.get("force_filter_s", 0.25)),
+            contact_timeout_s=float(values.get("contact_timeout_s", 20.0)),
+            settling_timeout_s=float(values.get("settling_timeout_s", 20.0)),
+            release_timeout_s=float(values.get("release_timeout_s", 10.0)),
+            force_hard_limit_n=float(values.get("force_hard_limit_n", 5.0)),
+            lateral_force_quality_limit_n=float(values.get("lateral_force_quality_limit_n", 1.0)),
+            lateral_force_hard_limit_n=float(values.get("lateral_force_hard_limit_n", 2.0)),
+            torque_hard_limit_nm=float(values.get("torque_hard_limit_nm", 0.5)),
+            stop_after_contact=self.max_execution_stage == CONTACT_STAGE,
+            stroke_enabled=bool(values.get("stroke_enabled", False)),
+            stroke_axes=tuple(str(axis).lower() for axis in values.get("stroke_axes", [])),
+            stroke_distances_mm=tuple(float(distance) for distance in values.get("stroke_distances_mm", [])),
+            stroke_speed_mm_s=float(values.get("stroke_speed_mm_s", 0.3)),
+            stroke_return_to_origin=bool(values.get("stroke_return_to_origin", True)),
+        )
+
+    def _force_stop_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+        del request
+        self.force_stop_event.set()
+        response.success = True
+        response.message = "force worker stop requested"
+        self._publish_status(
+            event="force_stop_requested",
+            error_message="",
+            check_passed=True,
+            tracking_state=TRACKING_ACTIVE,
+            control_gate_decision="stop_requested",
+        )
+        return response
+
+    def _request_robot_stop(self, reason: str, *, emergency: bool = False) -> None:
+        """Best-effort controller stop that is safe to call during shutdown."""
+        self.force_stop_event.set()
+        force_worker_alive = self.force_worker is not None and self.force_worker.is_alive()
+        if force_worker_alive and not emergency:
+            self.get_logger().warning(
+                f"graceful force cancellation requested; waiting for release before StopMotion (reason={reason})"
+            )
+            return
+        with self._stop_motion_lock:
+            if self._stop_motion_requested:
+                return
+            self._stop_motion_requested = True
+        client = self.linux_client
+        if client is None:
+            return
+
+        def stop_call() -> None:
+            try:
+                stop_method = getattr(client, "stop_motion_urgent", client.stop_motion)
+                result = stop_method(call_timeout_s=0.5)
+                self.get_logger().warning(
+                    json.dumps(
+                        {
+                            "event": "shutdown_stop_motion",
+                            "result": result,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            except Exception as exc:
+                self.get_logger().error(
+                    json.dumps(
+                        {
+                            "event": "shutdown_stop_motion_failed",
+                            "error": repr(exc),
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+
+        threading.Thread(target=stop_call, name="shutdown-stop-motion", daemon=True).start()
+
+    def _release_force(self) -> None:
+        if self.linux_client is None:
+            return
+        contact_direction_sign = float(self.admittance_cfg.get("contact_direction_sign", -1.0))
+        result = self.linux_client.servo_cart_tool_delta(
+            [
+                0.0,
+                0.0,
+                -contact_direction_sign * float(self.admittance_cfg.get("max_release_mm", 2.0)),
+            ],
+            cmd_t=float(self.admittance_cfg.get("servo_cmd_t", 0.008)),
+            mode=2,
+            call_timeout_s=float(self.admittance_cfg.get("max_servo_call_s", 0.15)),
+        )
+        if result != 0:
+            raise RuntimeError(f"release_servocart_failed:{result}")
+
+    def _return_to_start(self) -> None:
+        if self.linux_client is None or self.force_start_joint_deg is None:
+            return
+        result = self.linux_client.move_j(
+            self.force_start_joint_deg,
+            tool_id=self.tool_id,
+            user_id=self.user_id,
+            vel=self.return_start_vel,
+            acc=self.move_acc,
+        )
+        if result != 0:
+            raise RuntimeError(f"return_to_start_failed:{result}")
+
+    def _run_force_worker(self, final_hover_pose_mmdeg: list[float]) -> None:
+        del final_hover_pose_mmdeg
+        try:
+            if self.linux_client is None:
+                raise RuntimeError("linux_sdk_backend_unavailable")
+            self.force_session = AdmittanceSession(
+                self.linux_client,
+                config=self._admittance_session_config(),
+                start_pose_mmdeg=self._get_current_tcp_pose_mmdeg(),
+                return_callback=self._return_to_start,
+                release_callback=self._release_force,
+                trace_callback=self._write_force_trace,
+                stop_event=self.force_stop_event,
+            )
+            result = self.force_session.run()
+            self.force_control_terminal = True
+            self._publish_status(
+                event="force_control_completed" if result.success else "force_control_failed",
+                error_message="" if result.success else result.reason,
+                check_passed=result.success,
+                executed=result.success,
+                candidate_stage=self.max_execution_stage,
+                motion_command="ServoCart",
+                tracking_state=TRACKING_SUCCEEDED_VISIBLE if result.success else TRACKING_ACTIVE,
+                completion_reason="force_control_completed" if result.success else result.reason,
+                control_gate_decision="force_control_done" if result.success else "force_control_failed",
+                force_session_state=result.state.value,
+                force_samples=result.samples,
+                force_max_abs_fx_n=result.max_abs_fx_n,
+                force_max_abs_fy_n=result.max_abs_fy_n,
+                force_max_abs_torque_nm=result.max_abs_torque_nm,
+                force_contact_travel_mm=result.contact_travel_mm,
+                force_stroke_completed_segments=result.stroke_completed_segments,
+                force_stroke_total_distance_mm=result.stroke_total_distance_mm,
+            )
+            if result.success:
+                self._mark_tracking_episode_completed(TRACKING_SUCCEEDED_VISIBLE)
+        except Exception as exc:
+            self.force_control_terminal = True
+            self._publish_status(
+                event="force_control_failed",
+                error_message=repr(exc),
+                check_passed=False,
+                tracking_state=TRACKING_ACTIVE,
+                control_gate_decision="force_control_failed",
+            )
+        finally:
+            self.force_session = None
+            self.motion_in_progress = False
+            self.force_stop_event.clear()
+
+    def _start_force_worker(self, final_hover_pose_mmdeg: list[float]) -> None:
+        if not self.admittance_enabled:
+            raise RuntimeError("admittance_1d_disabled")
+        if self.force_worker is not None and self.force_worker.is_alive():
+            raise RuntimeError("force_worker_already_running")
+        if self.force_start_joint_deg is None:
+            self.force_start_joint_deg = self._safe_get_current_joint_deg()
+        if self.force_start_joint_deg is None:
+            raise RuntimeError("start_joint_read_failed")
+        self.force_stop_event.clear()
+        self.force_control_terminal = False
+        self._force_motion_owns_control_logged = False
+        self._force_control_terminal_logged = False
+        self._force_console_last_log_monotonic = 0.0
+        self._force_console_last_state = None
+        self.motion_in_progress = True
+        self.force_worker = threading.Thread(
+            target=self._run_force_worker,
+            args=(list(final_hover_pose_mmdeg),),
+            name="force-control-worker",
+            daemon=True,
+        )
+        self.force_worker.start()
+
+    def destroy_node(self):
+        if self._destroying:
+            return True
+        self._destroying = True
+        self._request_robot_stop("destroy_node")
+        self.force_stop_event.set()
+        if self.force_worker is not None and self.force_worker.is_alive():
+            graceful_timeout_s = float(self.admittance_cfg.get("shutdown_release_timeout_s", 3.0))
+            self.force_worker.join(timeout=max(0.1, graceful_timeout_s))
+        if self.force_worker is not None and self.force_worker.is_alive():
+            self._request_robot_stop("destroy_node_grace_period_expired", emergency=True)
+            self.force_worker.join(timeout=0.5)
+        if self.linux_client is not None:
+            try:
+                self.linux_client.close()
+            except Exception as exc:
+                self.get_logger().warning(
+                    json.dumps({"event": "linux_sdk_close_failed", "error": repr(exc)}, ensure_ascii=False)
+                )
+        return super().destroy_node()
+
     def _target_pose_to_mmdeg(self, message: PoseStamped) -> list[float]:
         rotation_matrix = quaternion_xyzw_to_rotation_matrix(
             [
@@ -1542,6 +1629,9 @@ class FairinoControlNode(Node):
 
     def _completion_allowed(self) -> bool:
         return self.max_execution_stage == FINAL_HOVER_STAGE
+
+    def _contact_mode_active(self) -> bool:
+        return self._force_stage_requested()
 
     def _compute_completion_metrics(self, current_tcp_pose_mmdeg: list[float] | None) -> tuple[float | None, float | None]:
         if (
@@ -1576,17 +1666,6 @@ class FairinoControlNode(Node):
             position_error_mm <= self.completion_position_tolerance_mm
             and normal_alignment_error_deg <= self.completion_normal_tolerance_deg
         )
-
-    def _final_hover_completion_reached(
-        self,
-        position_error_mm: float | None,
-        normal_alignment_error_deg: float | None,
-    ) -> bool:
-        if not self._completion_allowed() or position_error_mm is None:
-            return False
-        if self.final_hover_servo_enabled and not self.final_hover_servo_orientation_enabled:
-            return position_error_mm <= self.completion_position_tolerance_mm
-        return self._completion_reached(position_error_mm, normal_alignment_error_deg)
 
     def _marker_visibility_status(self, *, assume_visible: bool = False) -> str:
         if assume_visible:
@@ -1626,10 +1705,23 @@ class FairinoControlNode(Node):
         return None
 
     def _uses_marker_visibility_gate(self) -> bool:
-        return self.targeting_mode == TARGETING_MARKER
+        return self.targeting_mode == TARGETING_MARKER and not self._uses_target_lock_gate()
 
     def _uses_target_lock_gate(self) -> bool:
-        return self.targeting_mode == TARGETING_MARKERLESS_NECK and self.target_pose_topic == DEFAULT_LOCKED_TARGET_POSE_TOPIC
+        return (
+            self.target_pose_topic == DEFAULT_LOCKED_TARGET_POSE_TOPIC
+            and (
+                self.targeting_mode == TARGETING_MARKERLESS_NECK
+                or bool(getattr(self, "static_target_after_lock", False))
+            )
+        )
+
+    def _static_target_armed(self) -> bool:
+        return bool(
+            getattr(self, "static_target_after_lock", False)
+            and self.target_pose_topic == DEFAULT_LOCKED_TARGET_POSE_TOPIC
+            and getattr(self, "locked_target_pose_received", False)
+        )
 
     def _target_lock_state(self) -> str:
         if self.last_target_lock_status is None:
@@ -1640,13 +1732,6 @@ class FairinoControlNode(Node):
         if self.last_target_lock_status is None:
             return False
         return bool(self.last_target_lock_status.get("locked", False))
-
-    def _locked_target_timeout_is_warning_only(self) -> bool:
-        return (
-            self._uses_target_lock_gate()
-            and self._target_lock_locked()
-            and self.continue_with_last_locked_target_on_source_loss
-        )
 
     def _target_validity_source(self) -> str:
         if self._uses_marker_visibility_gate():
@@ -1662,13 +1747,8 @@ class FairinoControlNode(Node):
         if self._uses_marker_visibility_gate():
             return marker_visibility_status == "ok" and transform_validity_status == "ok"
         if self._uses_target_lock_gate():
-            return self._target_lock_locked()
+            return self._static_target_armed() or self._target_lock_locked()
         return selected_source_status == "ok"
-
-    def _target_message_allowed_for_motion(self) -> bool:
-        if self._uses_target_lock_gate() and self.require_locked_target_before_motion:
-            return self._target_lock_locked()
-        return True
 
     def _target_loss_reason(
         self,
@@ -1678,28 +1758,22 @@ class FairinoControlNode(Node):
         transform_validity_status: str,
         selected_source_status: str,
     ) -> str | None:
+        if (
+            target_age_ms is not None
+            and not self._static_target_armed()
+            and target_age_ms >= float(self.target_hold_timeout_ms)
+        ):
+            return "selected_target_timeout"
         if self._uses_marker_visibility_gate():
-            if target_age_ms is not None and target_age_ms >= float(self.target_hold_timeout_ms):
-                return "selected_target_timeout"
             if marker_visibility_status != "ok":
                 return "marker_not_visible"
             if transform_validity_status != "ok":
                 return "transform_not_ok"
         elif self._uses_target_lock_gate():
-            if not self._target_lock_locked():
+            if not self._static_target_armed() and not self._target_lock_locked():
                 return "target_lock_not_locked"
-            if (
-                target_age_ms is not None
-                and target_age_ms >= float(self.target_hold_timeout_ms)
-                and not self._locked_target_timeout_is_warning_only()
-            ):
-                return "selected_target_timeout"
         elif selected_source_status not in ("ok", "unknown"):
-            if target_age_ms is not None and target_age_ms >= float(self.target_hold_timeout_ms):
-                return "selected_target_timeout"
             return "selected_source_not_ok"
-        elif target_age_ms is not None and target_age_ms >= float(self.target_hold_timeout_ms):
-            return "selected_target_timeout"
         return None
 
     def _control_gate_fields(
@@ -1731,8 +1805,6 @@ class FairinoControlNode(Node):
                 "target_lock_state": target_lock_state,
                 "target_lock_locked": target_lock_locked,
                 "target_hold_timeout_ms": self.target_hold_timeout_ms,
-                "require_locked_target_before_motion": self.require_locked_target_before_motion,
-                "continue_with_last_locked_target_on_source_loss": self.continue_with_last_locked_target_on_source_loss,
             },
             "control_gate_decision": control_gate_decision,
         }
@@ -1834,9 +1906,12 @@ class FairinoControlNode(Node):
         self.last_valid_surface_normal_base = None
         self.last_valid_target_point_base_m = None
         self.last_valid_target_time = None
+        self.last_locked_target_message = None
+        self.locked_target_pose_received = False
         self._consecutive_valid_count = 0
         self._last_cold_start_target_m = None
         self.last_timer_publish_signature = None
+        self._completed_hold_console_logged = False
 
     def _target_displacement_from_completed_mm(self, target_point_base_m: list[float]) -> float | None:
         if self.completed_target_point_base_m is None:
@@ -1857,21 +1932,13 @@ class FairinoControlNode(Node):
             if new_order > current_order:
                 self.stage_latch = candidate_stage
 
-    def _mark_stage_progress_after_execution(
-        self,
-        candidate_stage: str | None,
-        *,
-        candidate_pose_mmdeg: list[float] | None = None,
-        pre_approach_pose_mmdeg: list[float] | None = None,
-    ) -> None:
+    def _mark_stage_progress_after_execution(self, candidate_stage: str | None) -> None:
         if not self._uses_staged_motion():
             return
         if candidate_stage == APPROACH_READY_STAGE:
             self.stage_progress = STAGE_PROGRESS_APPROACH_READY_DONE
         elif candidate_stage == PRE_APPROACH_STAGE:
-            remaining_mm = self._distance_between_pose_positions_mm(candidate_pose_mmdeg, pre_approach_pose_mmdeg)
-            if remaining_mm is not None and remaining_mm <= float(getattr(self, "stage_switch_buffer_mm", 5.0)):
-                self.stage_progress = STAGE_PROGRESS_PRE_APPROACH_DONE
+            self.stage_progress = STAGE_PROGRESS_PRE_APPROACH_DONE
         elif candidate_stage == FINAL_HOVER_STAGE:
             self.stage_progress = STAGE_PROGRESS_FINAL_HOVER_DONE
 
@@ -1891,57 +1958,6 @@ class FairinoControlNode(Node):
         if lhs_pose_mmdeg is None or rhs_pose_mmdeg is None or len(lhs_pose_mmdeg) < 3 or len(rhs_pose_mmdeg) < 3:
             return None
         return float(np.linalg.norm(np.asarray(lhs_pose_mmdeg[:3], dtype=np.float64) - np.asarray(rhs_pose_mmdeg[:3], dtype=np.float64)))
-
-    def _normal_alignment_error_for_decision(self, decision) -> float | None:
-        surface_normal_base = getattr(decision, "surface_normal_base", None)
-        if surface_normal_base is None:
-            return None
-        try:
-            return compute_normal_alignment_error_deg(
-                decision.current_tcp_pose_mmdeg,
-                surface_normal_base,
-                getattr(self, "flange_face_axis", "-Z"),
-            )
-        except Exception:
-            return None
-
-    def _force_reorient_at_current_pose_candidate(self, decision) -> str | None:
-        if decision.final_hover_pose_mmdeg is None:
-            return "final_hover_pose_unavailable"
-        reorient_pose_mmdeg = list(decision.current_tcp_pose_mmdeg)
-        if decision.pre_approach_pose_mmdeg is not None:
-            current = np.asarray(decision.current_tcp_pose_mmdeg[:3], dtype=np.float64)
-            pre_approach = np.asarray(decision.pre_approach_pose_mmdeg[:3], dtype=np.float64)
-            current_to_pre_approach_mm = float(np.linalg.norm(pre_approach - current))
-            if current_to_pre_approach_mm > 250.0:
-                step_mm = min(150.0, current_to_pre_approach_mm - 180.0)
-                if step_mm > 1.0:
-                    reorient_position = current + (pre_approach - current) * (step_mm / current_to_pre_approach_mm)
-                    reorient_pose_mmdeg[:3] = [float(value) for value in reorient_position]
-        reorient_pose_mmdeg[3:6] = list(decision.final_hover_pose_mmdeg[3:6])
-        self._force_staged_candidate(
-            decision,
-            candidate_stage=REORIENT_STAGE,
-            candidate_pose_mmdeg=reorient_pose_mmdeg,
-        )
-        return None
-
-    def _force_reorient_or_final_hover_candidate(self, decision) -> str | None:
-        if decision.final_hover_pose_mmdeg is None:
-            return "final_hover_pose_unavailable"
-        normal_alignment_error_deg = self._normal_alignment_error_for_decision(decision)
-        if (
-            normal_alignment_error_deg is not None
-            and normal_alignment_error_deg > float(getattr(self, "completion_normal_tolerance_deg", 5.0))
-        ):
-            return "pre_approach_reached_with_misaligned_tcp"
-        else:
-            self._force_staged_candidate(
-                decision,
-                candidate_stage=FINAL_HOVER_STAGE,
-                candidate_pose_mmdeg=decision.final_hover_pose_mmdeg,
-            )
-        return None
 
     def _target_lock_drift_warning_exceeded(self) -> bool:
         drift_warning_mm = self._target_lock_drift_warning_mm()
@@ -1963,7 +1979,7 @@ class FairinoControlNode(Node):
 
         self.stage_regression_blocked = False
 
-        if self._uses_approach_ready_stage() and not self._approach_ready_configured():
+        if not self._approach_ready_configured():
             if self.execute_motion:
                 return "approach_ready_not_configured", False
             return None, False
@@ -1971,86 +1987,29 @@ class FairinoControlNode(Node):
         changed = False
         original_candidate_stage = decision.candidate_stage
         progress = getattr(self, "stage_progress", STAGE_PROGRESS_NONE)
-        current_to_final = self._distance_between_pose_positions_mm(
-            decision.current_tcp_pose_mmdeg,
-            decision.final_hover_pose_mmdeg,
-        )
-        current_to_pre_approach = self._distance_between_pose_positions_mm(
-            decision.current_tcp_pose_mmdeg,
-            decision.pre_approach_pose_mmdeg,
-        )
-        pre_approach_to_final = self._distance_between_pose_positions_mm(
-            decision.pre_approach_pose_mmdeg,
-            decision.final_hover_pose_mmdeg,
-        )
-        normal_alignment_error_deg = self._normal_alignment_error_for_decision(decision)
-        normal_misaligned = (
-            normal_alignment_error_deg is not None
-            and normal_alignment_error_deg > float(getattr(self, "completion_normal_tolerance_deg", 5.0))
-        )
 
         if progress == STAGE_PROGRESS_NONE:
-            if self._uses_approach_ready_stage():
-                decision.candidate_stage = APPROACH_READY_STAGE
-                decision.candidate_pose_mmdeg = list(decision.current_tcp_pose_mmdeg)
-                decision.step_distance_mm = None
-            else:
-                if decision.pre_approach_pose_mmdeg is None:
-                    return "pre_approach_pose_unavailable", False
-                if normal_misaligned:
-                    error_message = self._force_reorient_at_current_pose_candidate(decision)
-                    if error_message is not None:
-                        return error_message, False
-                elif (
-                    decision.final_hover_pose_mmdeg is not None
-                    and current_to_final is not None
-                    and current_to_pre_approach is not None
-                    and pre_approach_to_final is not None
-                    and current_to_final < current_to_pre_approach
-                    and current_to_final <= pre_approach_to_final
-                    and current_to_final <= float(getattr(self, "pre_approach_distance_mm", pre_approach_to_final))
-                ):
-                    self.stage_progress = STAGE_PROGRESS_PRE_APPROACH_DONE
-                    error_message = self._force_reorient_or_final_hover_candidate(decision)
-                    if error_message is not None:
-                        return error_message, False
-                else:
-                    self._force_staged_candidate(
-                        decision,
-                        candidate_stage=PRE_APPROACH_STAGE,
-                        candidate_pose_mmdeg=decision.pre_approach_pose_mmdeg,
-                    )
+            decision.candidate_stage = APPROACH_READY_STAGE
+            decision.candidate_pose_mmdeg = list(decision.current_tcp_pose_mmdeg)
+            decision.step_distance_mm = None
             changed = True
         elif progress == STAGE_PROGRESS_APPROACH_READY_DONE:
             if decision.pre_approach_pose_mmdeg is None:
                 return "pre_approach_pose_unavailable", False
-            if normal_misaligned:
-                error_message = self._force_reorient_at_current_pose_candidate(decision)
-                if error_message is not None:
-                    return error_message, False
-                changed = True
-            if (
-                not normal_misaligned
-                and
-                decision.candidate_stage == PRE_APPROACH_STAGE
-                and decision.candidate_pose_mmdeg is not None
-            ):
-                self._force_staged_candidate(
-                    decision,
-                    candidate_stage=PRE_APPROACH_STAGE,
-                    candidate_pose_mmdeg=decision.pre_approach_pose_mmdeg,
-                )
-            elif not normal_misaligned:
-                self._force_staged_candidate(
-                    decision,
-                    candidate_stage=PRE_APPROACH_STAGE,
-                    candidate_pose_mmdeg=decision.pre_approach_pose_mmdeg,
-                )
+            self._force_staged_candidate(
+                decision,
+                candidate_stage=PRE_APPROACH_STAGE,
+                candidate_pose_mmdeg=decision.pre_approach_pose_mmdeg,
+            )
             changed = True
         elif progress == STAGE_PROGRESS_PRE_APPROACH_DONE:
-            error_message = self._force_reorient_or_final_hover_candidate(decision)
-            if error_message is not None:
-                return error_message, False
+            if decision.final_hover_pose_mmdeg is None:
+                return "final_hover_pose_unavailable", False
+            self._force_staged_candidate(
+                decision,
+                candidate_stage=FINAL_HOVER_STAGE,
+                candidate_pose_mmdeg=decision.final_hover_pose_mmdeg,
+            )
             changed = True
         elif progress == STAGE_PROGRESS_FINAL_HOVER_DONE:
             if decision.final_hover_pose_mmdeg is not None:
@@ -2067,15 +2026,10 @@ class FairinoControlNode(Node):
             if original_order < selected_order:
                 self.stage_regression_blocked = True
 
-        if (
-            self.execute_motion
-            and self._uses_staged_motion()
-            and not self._uses_approach_ready_stage()
-            and decision.candidate_stage == PRE_APPROACH_STAGE
-            and current_to_pre_approach is not None
-            and current_to_pre_approach > self.max_direct_final_hover_distance_mm
-        ):
-            return "current_tcp_too_far_for_pre_approach", False
+        current_to_final = self._distance_between_pose_positions_mm(
+            decision.current_tcp_pose_mmdeg,
+            decision.final_hover_pose_mmdeg,
+        )
         if (
             self.execute_motion
             and decision.candidate_stage == FINAL_HOVER_STAGE
@@ -2097,40 +2051,34 @@ class FairinoControlNode(Node):
             TRACKING_ACTIVE: "tracking_active",
         }.get(tracking_state, "tracking_status_update")
 
-    def _record_internal_error(self, *, event: str, exc: BaseException) -> None:
-        payload = {
-            "event": event,
-            "error_message": repr(exc),
-            "traceback": traceback.format_exc(),
-            "execute_motion": getattr(self, "execute_motion", None),
-            "motion_strategy": getattr(self, "motion_strategy", None),
-            "stage_progress": getattr(self, "stage_progress", None),
-            "stage_latch": getattr(self, "stage_latch", None),
-            "control_backend": getattr(self, "control_backend", None),
-            "stamp_unix_s": time.time(),
-        }
-        try:
-            self.get_logger().error(json.dumps(payload, ensure_ascii=False))
-        except Exception:
-            pass
-        try:
-            if self.control_trace_path is not None:
-                self.control_trace_path.parent.mkdir(parents=True, exist_ok=True)
-                with self.control_trace_path.open("a", encoding="utf-8") as trace_file:
-                    trace_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
+    def _should_replay_locked_target_for_stage_progress(self) -> bool:
+        """Advance a static locked target when no fresh Pose callback is arriving."""
+        return bool(
+            self.static_target_after_lock
+            and self.target_pose_topic == DEFAULT_LOCKED_TARGET_POSE_TOPIC
+            and self.locked_target_pose_received
+            and self.last_locked_target_message is not None
+            and self.stage_progress == STAGE_PROGRESS_PRE_APPROACH_DONE
+            and not self.tracking_episode_completed
+            and not self.motion_in_progress
+            and not (
+                self.force_worker is not None
+                and self.force_worker.is_alive()
+            )
+        )
 
-    def _guarded_status_timer_callback(self) -> None:
-        try:
-            self._status_timer_callback()
-        except Exception as exc:
-            self._record_internal_error(event="control_status_timer_failed", exc=exc)
+    def _force_worker_is_active(self) -> bool:
+        return bool(self.force_worker is not None and self.force_worker.is_alive())
 
     def _status_timer_callback(self) -> None:
         if self.motion_in_progress:
             return
         if self._run_startup_approach_ready_if_needed():
+            return
+        if self._startup_approach_ready_failed():
+            return
+        if self._should_replay_locked_target_for_stage_progress():
+            self._target_callback(deepcopy(self.last_locked_target_message))
             return
 
         now = self.get_clock().now()
@@ -2266,26 +2214,54 @@ class FairinoControlNode(Node):
         selected_source_status = self._selected_source_status(assume_valid=True)
         now = self.get_clock().now()
 
-        if not self._target_message_allowed_for_motion():
-            tracking_fields = self._tracking_fields(
-                tracking_state=TRACKING_IDLE,
-                completion_reason=REASON_NO_VALID_TARGET,
-                current_tcp_pose_mmdeg=self.last_status_fields.get("current_tcp_pose_mmdeg"),
-                marker_visibility_status=marker_visibility_status,
-                transform_validity_status=transform_validity_status,
-                selected_source_status=selected_source_status,
-                target_loss_reason="target_lock_not_locked",
-                control_gate_decision="waiting_for_target_lock",
-                now=now,
-            )
-            self._publish_status(
-                event="control_waiting_for_target_lock",
-                error_message="Locked target pose received before target_lock_locked=true.",
-                check_passed=False,
-                target_point_base_m=target_point_base_m,
-                raw_target_pose_base_mmdeg=raw_target_pose_base_mmdeg,
-                **tracking_fields,
-            )
+        if self._startup_approach_ready_failed():
+            return
+
+        if self._force_worker_is_active():
+            if not self._force_motion_owns_control_logged:
+                self._force_motion_owns_control_logged = True
+                tracking_fields = self._tracking_fields(
+                    tracking_state=TRACKING_ACTIVE,
+                    completion_reason=None,
+                    current_tcp_pose_mmdeg=self.last_status_fields.get("current_tcp_pose_mmdeg"),
+                    marker_visibility_status=marker_visibility_status,
+                    transform_validity_status=transform_validity_status,
+                    selected_source_status=selected_source_status,
+                    now=now,
+                    control_gate_decision="force_motion_owns_control",
+                )
+                self._publish_status(
+                    event="force_motion_owns_control",
+                    error_message="Force worker owns robot motion; visual target ignored for motion.",
+                    check_passed=True,
+                    target_point_base_m=target_point_base_m,
+                    raw_target_pose_base_mmdeg=raw_target_pose_base_mmdeg,
+                    **tracking_fields,
+                )
+            return
+
+        if self.force_control_terminal:
+            if not self._force_control_terminal_logged:
+                self._force_control_terminal_logged = True
+                tracking_fields = self._tracking_fields(
+                    tracking_state=TRACKING_ACTIVE,
+                    completion_reason=self.last_completion_reason,
+                    current_tcp_pose_mmdeg=self.last_status_fields.get("current_tcp_pose_mmdeg"),
+                    marker_visibility_status=marker_visibility_status,
+                    transform_validity_status=transform_validity_status,
+                    selected_source_status=selected_source_status,
+                    now=now,
+                    control_gate_decision="force_control_terminal",
+                )
+                self._publish_status(
+                    event="force_control_terminal",
+                    error_message="Force control ended; visual target ignored until a new run.",
+                    check_passed=False,
+                    target_point_base_m=target_point_base_m,
+                    raw_target_pose_base_mmdeg=raw_target_pose_base_mmdeg,
+                    force_control_terminal=True,
+                    **tracking_fields,
+                )
             return
 
         if self.motion_in_progress:
@@ -2353,6 +2329,8 @@ class FairinoControlNode(Node):
         try:
             current_tcp_pose_mmdeg = self._get_current_tcp_pose_mmdeg()
             current_joint_deg = self._safe_get_current_joint_deg() if self._uses_staged_motion() else None
+            if self.force_start_joint_deg is None:
+                self.force_start_joint_deg = current_joint_deg or self._safe_get_current_joint_deg()
 
             if (
                 self.stage_latch is not None
@@ -2380,7 +2358,6 @@ class FairinoControlNode(Node):
                 pre_approach_distance_mm=self.pre_approach_distance_mm,
                 max_step_distance_mm=self.max_step_distance_mm,
                 min_safe_z_mm=self.min_safe_z_mm,
-                min_plane_clearance_mm=self.min_plane_clearance_mm,
                 workspace_min_mm=self.workspace_min_mm,
                 workspace_max_mm=self.workspace_max_mm,
                 stage_switch_buffer_mm=self.stage_switch_buffer_mm,
@@ -2419,6 +2396,12 @@ class FairinoControlNode(Node):
             return
 
         if decision.check_passed:
+            if (
+                self.static_target_after_lock
+                and self.target_pose_topic == DEFAULT_LOCKED_TARGET_POSE_TOPIC
+            ):
+                self.last_locked_target_message = deepcopy(message)
+                self.locked_target_pose_received = True
             self._update_last_valid_target_cache(target_point_base_m, decision, now)
 
         current_tcp_for_status = list(decision.current_tcp_pose_mmdeg)
@@ -2644,42 +2627,24 @@ class FairinoControlNode(Node):
             )
             return
 
+        force_worker_started = False
         try:
             self.motion_in_progress = True
             assert decision.candidate_pose_mmdeg is not None
-            executed_candidate_pose_mmdeg = self._execute_move(decision.candidate_pose_mmdeg, decision.candidate_stage)
-            self.last_executed_candidate_pose_mmdeg = list(executed_candidate_pose_mmdeg)
-            common_status["executed_candidate_pose_mmdeg"] = list(executed_candidate_pose_mmdeg)
-            common_status["move_j_pose_backoff"] = getattr(self, "last_move_j_pose_backoff", None)
+            self._execute_move(decision.candidate_pose_mmdeg, decision.candidate_stage)
+            self.last_executed_candidate_pose_mmdeg = list(decision.candidate_pose_mmdeg)
             self.previous_stage = self.last_executed_stage
             self.last_executed_stage = decision.candidate_stage
             self._update_stage_latch(decision.candidate_stage)
-            self._mark_stage_progress_after_execution(
-                decision.candidate_stage,
-                candidate_pose_mmdeg=executed_candidate_pose_mmdeg,
-                pre_approach_pose_mmdeg=decision.pre_approach_pose_mmdeg,
-            )
+            self._mark_stage_progress_after_execution(decision.candidate_stage)
 
             post_move_tcp_pose_mmdeg = self._safe_get_current_tcp_pose_mmdeg() or current_tcp_for_status
             common_status["current_tcp_pose_mmdeg"] = post_move_tcp_pose_mmdeg
-            common_status["current_tcp_to_final_hover_mm"] = self._distance_between_pose_positions_mm(
-                post_move_tcp_pose_mmdeg,
-                decision.final_hover_pose_mmdeg,
-            )
-            common_status["current_tcp_to_pre_approach_mm"] = self._distance_between_pose_positions_mm(
-                post_move_tcp_pose_mmdeg,
-                decision.pre_approach_pose_mmdeg,
-            )
             self.last_status_fields["current_tcp_pose_mmdeg"] = post_move_tcp_pose_mmdeg
-            self.last_status_fields["current_tcp_to_final_hover_mm"] = common_status["current_tcp_to_final_hover_mm"]
-            self.last_status_fields["current_tcp_to_pre_approach_mm"] = common_status["current_tcp_to_pre_approach_mm"]
 
             position_error_mm, normal_alignment_error_deg = self._compute_completion_metrics(post_move_tcp_pose_mmdeg)
             tracking_state = TRACKING_WAITING_NEXT_FRAME
-            if decision.candidate_stage == FINAL_HOVER_STAGE and self._final_hover_completion_reached(
-                position_error_mm,
-                normal_alignment_error_deg,
-            ):
+            if decision.candidate_stage == FINAL_HOVER_STAGE and self._completion_allowed():
                 tracking_state = TRACKING_SUCCEEDED_VISIBLE
             elif self._completion_reached(position_error_mm, normal_alignment_error_deg):
                 tracking_state = TRACKING_SUCCEEDED_VISIBLE
@@ -2693,12 +2658,13 @@ class FairinoControlNode(Node):
                 selected_source_status=selected_source_status,
                 now=self.get_clock().now(),
             )
+            if decision.candidate_stage == FINAL_HOVER_STAGE and self._force_stage_requested():
+                self._start_force_worker(decision.final_hover_pose_mmdeg or decision.candidate_pose_mmdeg)
+                force_worker_started = True
+                tracking_state = TRACKING_ACTIVE
+                completion_reason = None
             if tracking_state == TRACKING_SUCCEEDED_VISIBLE:
                 self._mark_tracking_episode_completed(tracking_state)
-                if self.execute_motion:
-                    common_status["robot_release_result"] = self._release_robot_control()
-                    common_status["execute_motion_disabled_after_success"] = True
-                    self.execute_motion = False
             self._publish_status(
                 event="control_executed",
                 error_message="",
@@ -2708,10 +2674,6 @@ class FairinoControlNode(Node):
                 **tracking_fields,
             )
         except Exception as exc:
-            release_result = self._release_robot_control()
-            self.motion_execution_faulted = True
-            self.execute_motion = False
-            common_status["move_j_pose_backoff"] = getattr(self, "last_move_j_pose_backoff", None)
             tracking_fields = self._tracking_fields(
                 tracking_state=TRACKING_ACTIVE,
                 completion_reason=None,
@@ -2724,33 +2686,32 @@ class FairinoControlNode(Node):
             self._publish_status(
                 event="control_execute_failed",
                 error_message=repr(exc),
-                check_passed=True,
-                robot_release_result=release_result,
-                execute_motion_disabled_after_fault=True,
+                check_passed=False,
                 **common_status,
                 **tracking_fields,
             )
         finally:
-            self.motion_in_progress = False
-
-    def destroy_node(self) -> bool:
-        try:
-            self._release_robot_control()
-        except BaseException as exc:
-            self._record_internal_error(event="control_destroy_release_failed", exc=exc)
-        return super().destroy_node()
+            if not force_worker_started:
+                self.motion_in_progress = False
 
 
 def main(args: list[str] | None = None) -> None:
     rclpy.init(args=args)
     node = FairinoControlNode()
+    previous_sigint = signal.getsignal(signal.SIGINT)
+
+    def _sigint_handler(signum, frame) -> None:
+        del frame
+        node._request_robot_stop(f"signal_{signum}")
+        rclpy.shutdown()
+
+    signal.signal(signal.SIGINT, _sigint_handler)
     try:
         rclpy.spin(node)
     except ExternalShutdownException:
         pass
-    except Exception as exc:
-        node._record_internal_error(event="control_spin_failed", exc=exc)
     finally:
+        signal.signal(signal.SIGINT, previous_sigint)
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

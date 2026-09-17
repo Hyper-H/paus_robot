@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import time
 
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PointStamped, PoseStamped
@@ -32,6 +34,7 @@ class TargetTransformNode(Node):
         self.declare_parameter("target_pose_topic", "/target_pose_base")
         self.declare_parameter("target_point_topic", "/target_point_base")
         self.declare_parameter("status_topic", "/transform_status")
+        self.declare_parameter("run_dir", "")
 
         config_path = self.get_parameter("config_path").get_parameter_value().string_value
         extrinsics_path = self.get_parameter("extrinsics_path").get_parameter_value().string_value
@@ -39,6 +42,12 @@ class TargetTransformNode(Node):
         target_pose_topic = self.get_parameter("target_pose_topic").get_parameter_value().string_value
         target_point_topic = self.get_parameter("target_point_topic").get_parameter_value().string_value
         status_topic = self.get_parameter("status_topic").get_parameter_value().string_value
+        run_dir_param = self.get_parameter("run_dir").get_parameter_value().string_value.strip()
+        self.run_dir = Path(run_dir_param) if run_dir_param else None
+        self.trace_path = self.run_dir / "transform_trace.jsonl" if self.run_dir is not None else None
+        self.status_latest_path = self.run_dir / "transform_status_latest.json" if self.run_dir is not None else None
+        self.target_pose_topic = target_pose_topic
+        self.target_point_topic = target_point_topic
 
         self.config = load_config(config_path)
         self.eye_to_hand_solution = load_eye_to_hand_solution(extrinsics_path)
@@ -60,15 +69,41 @@ class TargetTransformNode(Node):
         self._publish_status(
             "ready" if self.eye_to_hand_solution.success else "missing_extrinsic",
             self.eye_to_hand_solution.message,
+            {
+                "event": "target_transform_node_started",
+                "target_pose_topic": self.target_pose_topic,
+                "target_point_topic": self.target_point_topic,
+                "run_dir": str(self.run_dir) if self.run_dir is not None else None,
+                "extrinsics_path": self.eye_to_hand_solution.source_path,
+                "extrinsics_artifact_kind": self.eye_to_hand_solution.artifact_kind,
+                "extrinsics_dummy": self.eye_to_hand_solution.is_dummy,
+            },
         )
 
     def _publish_status(self, status: str, message: str, extra: dict[str, object] | None = None) -> None:
-        payload = {"status": status, "message": message}
+        payload = {
+            "source": "target_transform",
+            "status": status,
+            "message": message,
+            "stamp_unix_s": time.time(),
+        }
         if extra:
             payload.update(extra)
         status_message = String()
         status_message.data = json.dumps(payload, ensure_ascii=False)
         self.status_publisher.publish(status_message)
+        self._write_transform_log(payload)
+
+    def _write_transform_log(self, payload: dict[str, object]) -> None:
+        if self.trace_path is None or self.status_latest_path is None:
+            return
+        try:
+            self.trace_path.parent.mkdir(parents=True, exist_ok=True)
+            self.status_latest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            with self.trace_path.open("a", encoding="utf-8") as trace_file:
+                trace_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            self.get_logger().warning(json.dumps({"event": "transform_trace_write_failed", "error": repr(exc)}, ensure_ascii=False))
 
     def _validate_target_translation(self, translation_mm: np.ndarray) -> tuple[bool, str]:
         if not np.all(np.isfinite(translation_mm)):
@@ -79,12 +114,28 @@ class TargetTransformNode(Node):
         return True, ""
 
     def _marker_pose_callback(self, message: PoseStamped) -> None:
+        input_frame_id = str(message.header.frame_id)
+        input_stamp_ns = int(message.header.stamp.sec) * 1_000_000_000 + int(message.header.stamp.nanosec)
         if not self.eye_to_hand_solution.success or self.eye_to_hand_solution.base_to_camera is None:
-            self._publish_status("missing_extrinsic", "base_to_camera is unavailable.")
+            self._publish_status(
+                "missing_extrinsic",
+                "base_to_camera is unavailable.",
+                {
+                    "event": "target_transform_missing_extrinsic",
+                    "input_frame_id": input_frame_id,
+                    "input_stamp_ns": input_stamp_ns,
+                    "target_pose_topic": self.target_pose_topic,
+                    "target_point_topic": self.target_point_topic,
+                    "extrinsics_path": self.eye_to_hand_solution.source_path,
+                    "extrinsics_artifact_kind": self.eye_to_hand_solution.artifact_kind,
+                    "extrinsics_dummy": self.eye_to_hand_solution.is_dummy,
+                },
+            )
             return
 
+        marker_position_camera_m = [message.pose.position.x, message.pose.position.y, message.pose.position.z]
         camera_to_marker = make_transform_matrix(
-            [message.pose.position.x, message.pose.position.y, message.pose.position.z],
+            marker_position_camera_m,
             quaternion_xyzw_to_rotation_matrix(
                 [
                     message.pose.orientation.x,
@@ -108,8 +159,15 @@ class TargetTransformNode(Node):
                 "target_filtered",
                 f"Target transform rejected: {reject_reason}",
                 {
+                    "event": "target_transform_rejected",
+                    "input_frame_id": input_frame_id,
+                    "input_stamp_ns": input_stamp_ns,
+                    "marker_position_camera_m": [float(value) for value in marker_position_camera_m],
                     "target_point_base_mm": [float(value) for value in translation_mm.tolist()],
+                    "reject_reason": reject_reason,
                     "max_target_distance_mm": self.max_target_distance_mm,
+                    "target_pose_topic": self.target_pose_topic,
+                    "target_point_topic": self.target_point_topic,
                 },
             )
             return
@@ -117,7 +175,7 @@ class TargetTransformNode(Node):
         transform = make_transform_struct(translation_m, rotation, "robot_base", "target_region")
 
         pose_message = PoseStamped()
-        pose_message.header = message.header
+        pose_message.header.stamp = message.header.stamp
         pose_message.header.frame_id = "robot_base"
         pose_message.pose.position.x = transform.translation_m[0]
         pose_message.pose.position.y = transform.translation_m[1]
@@ -129,7 +187,8 @@ class TargetTransformNode(Node):
         self.target_pose_publisher.publish(pose_message)
 
         point_message = PointStamped()
-        point_message.header = pose_message.header
+        point_message.header.stamp = pose_message.header.stamp
+        point_message.header.frame_id = pose_message.header.frame_id
         point_message.point.x = transform.translation_m[0]
         point_message.point.y = transform.translation_m[1]
         point_message.point.z = transform.translation_m[2]
@@ -139,8 +198,14 @@ class TargetTransformNode(Node):
             "ok",
             "Target transform published successfully.",
             {
+                "event": "target_transform_published",
+                "input_frame_id": input_frame_id,
+                "input_stamp_ns": input_stamp_ns,
+                "marker_position_camera_m": [float(value) for value in marker_position_camera_m],
                 "target_point_base": transform.translation_m,
                 "target_point_base_mm": [float(value) for value in translation_mm.tolist()],
+                "target_pose_topic": self.target_pose_topic,
+                "target_point_topic": self.target_point_topic,
             },
         )
 

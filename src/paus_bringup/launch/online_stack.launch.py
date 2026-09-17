@@ -19,6 +19,10 @@ def _resolve_default_config_path(bringup_share: Path) -> Path:
     return source_config if source_config.exists() else bringup_share / "configs" / "default.yaml"
 
 
+def _resolve_workspace_root(bringup_share: Path) -> Path:
+    return bringup_share.parents[3]
+
+
 def _launch_setup(context, *args, **kwargs):
     del args, kwargs
     marker_share = Path(get_package_share_directory("paus_marker_ros2"))
@@ -39,19 +43,33 @@ def _launch_setup(context, *args, **kwargs):
     final_hover_servo_cmd_t_s = LaunchConfiguration("final_hover_servo_cmd_t_s").perform(context).strip()
     final_hover_servo_max_step_mm = LaunchConfiguration("final_hover_servo_max_step_mm").perform(context).strip()
     final_hover_servo_max_step_deg = LaunchConfiguration("final_hover_servo_max_step_deg").perform(context).strip()
+    logging_output_dir_arg = LaunchConfiguration("logging_output_dir").perform(context).strip()
+    workspace_root = _resolve_workspace_root(Path(get_package_share_directory("paus_bringup")))
     config = load_config(config_path)
     extrinsics_path, extrinsics_status = resolve_extrinsics_path(config, config_path, execute_motion=execute_motion_enabled)
     neck_cfg = config.get("neck_surface", {})
     targeting_cfg = config.get("targeting", {})
     target_lock_cfg = config.get("target_lock", {})
-    enable_neck_surface = bool(neck_cfg.get("enabled", False))
-    enable_neck_eval = bool(neck_cfg.get("eval_enabled", False))
     targeting_mode = LaunchConfiguration("targeting_mode").perform(context).strip() or str(targeting_cfg.get("mode", "markerless_neck"))
+    enable_neck_surface_configured = bool(neck_cfg.get("enabled", False))
+    enable_neck_surface = enable_neck_surface_configured and targeting_mode != "marker"
+    enable_neck_eval = bool(neck_cfg.get("eval_enabled", False)) and enable_neck_surface
+    static_target_after_lock_arg = LaunchConfiguration("static_target_after_lock").perform(context).strip().lower()
     source_timeout_ms = int(targeting_cfg.get("source_timeout_ms", 500))
     target_lock_enabled = bool(target_lock_cfg.get("enabled", True))
+    static_target_after_lock = (
+        bool(target_lock_cfg.get("static_target_after_lock", False))
+        if static_target_after_lock_arg == ""
+        else static_target_after_lock_arg == "true"
+    )
     if not run_id:
         run_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    neck_session_root = _resolve_neck_session_root(neck_cfg, run_id)
+    neck_session_root = _resolve_neck_session_root(
+        neck_cfg,
+        run_id,
+        workspace_root=workspace_root,
+        logging_output_dir_override=logging_output_dir_arg,
+    )
     markerless_target_pose_topic = "/markerless_neck_target_pose_base"
     marker_target_pose_topic = "/marker_target_pose_base"
     selected_target_pose_topic = "/selected_target_pose_base"
@@ -84,9 +102,9 @@ def _launch_setup(context, *args, **kwargs):
                 "config_path": config_path,
                 "execute_motion": execute_motion_enabled,
                 **extrinsics_status,
+                "neck_surface_configured": enable_neck_surface_configured,
                 "neck_surface_enabled": enable_neck_surface,
                 "neck_eval_enabled": enable_neck_eval,
-                "neck_surface_target_mode": neck_cfg.get("target_mode", "refined_surface"),
                 "targeting_mode": targeting_mode,
                 "targeting_source_timeout_ms": source_timeout_ms,
                 "camera_bridge_enable_depth": enable_neck_surface,
@@ -98,6 +116,7 @@ def _launch_setup(context, *args, **kwargs):
                 "selected_target_pose_topic": selected_target_pose_topic,
                 "selector_status_topic": selector_status_topic,
                 "target_lock_enabled": target_lock_enabled,
+                "static_target_after_lock": static_target_after_lock,
                 "locked_target_pose_topic": locked_target_pose_topic,
                 "target_lock_status_topic": target_lock_status_topic,
                 "control_target_pose_topic": control_target_pose_topic,
@@ -189,6 +208,27 @@ def _launch_setup(context, *args, **kwargs):
                     ],
                 )
             )
+    control_params = {
+        "config_path": config_path,
+        "execute_motion": execute_motion_enabled,
+        "target_pose_topic": control_target_pose_topic,
+        "selector_status_topic": selector_status_topic,
+        "target_lock_status_topic": target_lock_status_topic,
+        "static_target_after_lock": "true" if static_target_after_lock else "false",
+        "targeting_mode": targeting_mode,
+        "run_dir": str(neck_session_root),
+    }
+    for name, value in (
+        ("max_execution_stage", max_execution_stage),
+        ("approach_ready_vel", approach_ready_vel),
+        ("pre_approach_vel", pre_approach_vel),
+        ("final_hover_vel", final_hover_vel),
+        ("final_hover_servo_cmd_t_s", final_hover_servo_cmd_t_s),
+        ("final_hover_servo_max_step_mm", final_hover_servo_max_step_mm),
+        ("final_hover_servo_max_step_deg", final_hover_servo_max_step_deg),
+    ):
+        if value:
+            control_params[name] = value if name == "max_execution_stage" else float(value)
     nodes.append(
         Node(
             package="paus_marker_ros2",
@@ -228,30 +268,6 @@ def _launch_setup(context, *args, **kwargs):
                 ],
             )
         )
-    control_params = {
-        "config_path": config_path,
-        "execute_motion": execute_motion_enabled,
-        "target_pose_topic": control_target_pose_topic,
-        "selector_status_topic": selector_status_topic,
-        "target_lock_status_topic": target_lock_status_topic,
-        "targeting_mode": targeting_mode,
-        "run_dir": str(neck_session_root),
-    }
-    if max_execution_stage:
-        control_params["max_execution_stage"] = max_execution_stage
-    if approach_ready_vel:
-        control_params["approach_ready_vel"] = float(approach_ready_vel)
-    if pre_approach_vel:
-        control_params["pre_approach_vel"] = float(pre_approach_vel)
-    if final_hover_vel:
-        control_params["final_hover_vel"] = float(final_hover_vel)
-    if final_hover_servo_cmd_t_s:
-        control_params["final_hover_servo_cmd_t_s"] = float(final_hover_servo_cmd_t_s)
-    if final_hover_servo_max_step_mm:
-        control_params["final_hover_servo_max_step_mm"] = float(final_hover_servo_max_step_mm)
-    if final_hover_servo_max_step_deg:
-        control_params["final_hover_servo_max_step_deg"] = float(final_hover_servo_max_step_deg)
-
     nodes.append(
         Node(
             package="paus_motion_ros2",
@@ -264,9 +280,19 @@ def _launch_setup(context, *args, **kwargs):
     return nodes
 
 
-def _resolve_neck_session_root(neck_cfg: dict, run_id: str) -> Path:
-    configured = Path(str(neck_cfg.get("logging_output_dir", "/mnt/data/projects/paus_robot/runs/markerless-neck-surface-design/neck_surface")))
-    run_root = configured.parent if configured.name == "neck_surface" else configured
+def _resolve_neck_session_root(
+    neck_cfg: dict,
+    run_id: str,
+    *,
+    workspace_root: Path,
+    logging_output_dir_override: str = "",
+) -> Path:
+    configured_value = logging_output_dir_override or str(neck_cfg.get("logging_output_dir", "")).strip()
+    if configured_value:
+        configured = Path(configured_value)
+        run_root = configured.parent if configured.name == "neck_surface" else configured
+    else:
+        run_root = Path("/mnt/data/projects/paus_robot/runs") / workspace_root.name
     return run_root / run_id
 
 
@@ -307,45 +333,27 @@ def generate_launch_description() -> LaunchDescription:
                 description="Optional runtime session directory name. Defaults to a timestamp.",
             ),
             DeclareLaunchArgument(
+                "logging_output_dir",
+                default_value="",
+                description="Optional runtime log root. Empty derives /mnt/data/projects/paus_robot/runs/<worktree-name>.",
+            ),
+            DeclareLaunchArgument(
                 "targeting_mode",
                 default_value="",
                 description="Target selector mode. Empty uses targeting.mode from config.",
             ),
             DeclareLaunchArgument(
-                "max_execution_stage",
+                "static_target_after_lock",
                 default_value="",
-                description="Optional staged motion limit: approach_ready, pre_approach, reorient, or final_hover. Empty uses config.",
+                description="Keep using the locked target after live Marker visibility is lost.",
             ),
-            DeclareLaunchArgument(
-                "approach_ready_vel",
-                default_value="",
-                description="Optional override for approach_ready MoveJ velocity.",
-            ),
-            DeclareLaunchArgument(
-                "pre_approach_vel",
-                default_value="",
-                description="Optional override for pre_approach/reorient MoveJ velocity.",
-            ),
-            DeclareLaunchArgument(
-                "final_hover_vel",
-                default_value="",
-                description="Optional override for final_hover velocity when MoveL is used.",
-            ),
-            DeclareLaunchArgument(
-                "final_hover_servo_cmd_t_s",
-                default_value="",
-                description="Optional ServoCart command period override for final_hover.",
-            ),
-            DeclareLaunchArgument(
-                "final_hover_servo_max_step_mm",
-                default_value="",
-                description="Optional ServoCart max translation step override for final_hover.",
-            ),
-            DeclareLaunchArgument(
-                "final_hover_servo_max_step_deg",
-                default_value="",
-                description="Optional ServoCart max rotation step override for final_hover.",
-            ),
+            DeclareLaunchArgument("max_execution_stage", default_value="", description="Override configured final stage."),
+            DeclareLaunchArgument("approach_ready_vel", default_value="", description="Override ready velocity."),
+            DeclareLaunchArgument("pre_approach_vel", default_value="", description="Override pre-approach velocity."),
+            DeclareLaunchArgument("final_hover_vel", default_value="", description="Override final-hover velocity."),
+            DeclareLaunchArgument("final_hover_servo_cmd_t_s", default_value="", description="Override hover servo period."),
+            DeclareLaunchArgument("final_hover_servo_max_step_mm", default_value="", description="Override hover servo translation step."),
+            DeclareLaunchArgument("final_hover_servo_max_step_deg", default_value="", description="Override hover servo rotation step."),
             DeclareLaunchArgument(
                 "python_exec",
                 default_value="/home/chen_lab/miniconda3/envs/paus_robot/bin/python3",

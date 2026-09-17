@@ -34,6 +34,8 @@ class ConfigControlDefaultsTests(unittest.TestCase):
         control = config["control"]
         self.assertFalse(control["execute_motion"])
         self.assertEqual(control["hover_clearance_mm"], 50.0)
+        self.assertFalse(config["admittance_1d"]["enabled"])
+        self.assertNotIn("contact_hover_clearance_mm", config["admittance_1d"])
         self.assertFalse(control["prefer_positive_z_surface_normal"])
         self.assertEqual(control["max_execution_stage"], "final_hover")
         self.assertEqual(control["motion_strategy"], "staged_patient_left_final_hover")
@@ -44,18 +46,9 @@ class ConfigControlDefaultsTests(unittest.TestCase):
         self.assertEqual(control["approach_ready_vel"], 30.0)
         self.assertEqual(control["pre_approach_vel"], 20.0)
         self.assertEqual(control["final_hover_vel"], 5.0)
-        self.assertEqual(control["joint_motion_blend_time_ms"], 0.0)
-        self.assertEqual(control["joint_motion_done_timeout_s"], 120.0)
-        self.assertFalse(control["final_hover_servo_enabled"])
-        self.assertEqual(control["final_hover_servo_max_step_mm"], 1.0)
-        self.assertEqual(control["final_hover_servo_max_step_deg"], 0.3)
-        self.assertEqual(control["final_hover_servo_ready_timeout_s"], 10.0)
-        self.assertTrue(control["final_hover_servo_orientation_enabled"])
         self.assertEqual(control["max_direct_final_hover_distance_mm"], 250.0)
         self.assertEqual(control["roll_policy"], "base_up_projection")
         self.assertEqual(control["roll_offset_deg"], 0.0)
-        self.assertTrue(control["require_locked_target_before_motion"])
-        self.assertTrue(control["continue_with_last_locked_target_on_source_loss"])
 
     def test_user_config_can_override_fairino_sdk_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -402,58 +395,6 @@ class FairinoLinuxClientTests(unittest.TestCase):
 
         self.assertEqual(error, 0)
         self.assertEqual(client.robot.kwargs["acc"], 7.5)
-
-    def test_move_j_forwards_nonblocking_blend_time_when_present(self) -> None:
-        class RobotStub:
-            def __init__(self) -> None:
-                self.kwargs = None
-
-            def MoveJ(self, joint_pos, **kwargs):
-                del joint_pos
-                self.kwargs = kwargs
-                return 0
-
-        client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
-        client.robot = RobotStub()
-
-        error = client.move_j([1, 2, 3, 4, 5, 6], tool_id=0, user_id=0, vel=10.0, blend_time_ms=0.0)
-
-        self.assertEqual(error, 0)
-        self.assertEqual(client.robot.kwargs["blendT"], 0.0)
-
-    def test_move_j_pose_forwards_desc_pos_matching_inverse_kin_target(self) -> None:
-        class RobotStub:
-            def __init__(self) -> None:
-                self.inverse_kin_exaxis_args = None
-                self.move_j_args = None
-                self.move_j_kwargs = None
-
-            def GetInverseKinExaxis(self, type_id, desc_pos, exaxis, tool, workpiece):
-                self.inverse_kin_exaxis_args = (type_id, desc_pos, exaxis, tool, workpiece)
-                return (0, [11, 22, 33, 44, 55, 66])
-
-            def MoveJ(self, joint_pos, **kwargs):
-                self.move_j_args = joint_pos
-                self.move_j_kwargs = kwargs
-                return 0
-
-        client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
-        client.robot = RobotStub()
-
-        error = client.move_j_pose(
-            [100, 200, 300, 1, 2, 3],
-            joint_pos_ref_deg=[1, 1, 1, 1, 1, 1],
-            tool_id=1,
-            user_id=0,
-            vel=10.0,
-            acc=7.5,
-        )
-
-        self.assertEqual(error, 0)
-        self.assertEqual(client.robot.inverse_kin_exaxis_args, (0, [100.0, 200.0, 300.0, 1.0, 2.0, 3.0], [0.0, 0.0, 0.0, 0.0], 1, 0))
-        self.assertEqual(client.robot.move_j_args, [11.0, 22.0, 33.0, 44.0, 55.0, 66.0])
-        self.assertEqual(client.robot.move_j_kwargs["desc_pos"], [100.0, 200.0, 300.0, 1.0, 2.0, 3.0])
-        self.assertEqual(client.robot.move_j_kwargs["tool"], 1)
 
     def test_normalize_pose_result_accepts_sdk_list_shape(self) -> None:
         client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")

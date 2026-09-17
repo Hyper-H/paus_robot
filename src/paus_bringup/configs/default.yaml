@@ -100,7 +100,7 @@ neck_surface:
   latched_pose_timeout_s: 0.5
   max_rgb_depth_delta_ms: 200.0
   logging_enabled: true
-  logging_output_dir: "/mnt/data/projects/paus_robot/runs/markerless-neck-surface-design"
+  logging_output_dir: ""
   log_every_n_frames: 1
   log_only_ok_frames: false
   max_logged_frames: 200
@@ -186,3 +186,36 @@ control:
   min_consecutive_detections: 2
   use_mock_pose: false
   mock_current_tcp_pose_mmdeg: [0.0, 0.0, 300.0, 180.0, 0.0, -180.0]
+
+admittance_1d:
+  enabled: false
+  contact_detect_force_n: 1.0
+  target_force_n: 2.0
+  release_force_n: 0.2
+  hold_s: 10.0
+  deadband_n: 0.2
+  gain_mm_s_n: 0.2
+  max_speed_mm_s: 0.3
+  contact_speed_mm_s: 0.05
+  contact_direction_sign: -1.0
+  release_speed_mm_s: 0.3
+  max_press_mm: 10.0
+  max_release_mm: 2.0
+  force_filter_s: 0.25
+  force_stable_s: 1.0
+  loop_hz: 20.0
+  servo_cmd_t: 0.008
+  max_control_cycle_s: 0.15
+  max_servo_call_s: 0.15
+  contact_timeout_s: 20.0
+  settling_timeout_s: 20.0
+  release_timeout_s: 10.0
+  force_hard_limit_n: 5.0
+  lateral_force_quality_limit_n: 1.0
+  lateral_force_hard_limit_n: 2.0
+  torque_hard_limit_nm: 0.5
+  stroke_enabled: false
+  stroke_axes: []
+  stroke_distances_mm: []
+  stroke_speed_mm_s: 0.3
+  stroke_return_to_origin: true
