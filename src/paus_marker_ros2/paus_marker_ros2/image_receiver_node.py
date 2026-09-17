@@ -4,15 +4,19 @@ import json
 import socket
 import threading
 
-import cv2
 import numpy as np
+import cv2
 from cv_bridge import CvBridge
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 
 from paus_perception import camera_info_payload_summary, decompress_payload, recv_frame_packet
+
+
+CAMERA_QOS = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
 
 
 def timestamp_ns_from_header(header: dict[str, object]) -> int | None:
@@ -20,6 +24,12 @@ def timestamp_ns_from_header(header: dict[str, object]) -> int | None:
     if isinstance(timestamp_ns, bool) or not isinstance(timestamp_ns, int) or timestamp_ns <= 0:
         return None
     return int(timestamp_ns)
+
+
+def has_complete_jpeg_markers(payload: bytes) -> bool:
+    if len(payload) < 4 or not payload.startswith(b"\xff\xd8") or not payload.endswith(b"\xff\xd9"):
+        return False
+    return True
 
 
 class ImageReceiverNode(Node):
@@ -43,10 +53,10 @@ class ImageReceiverNode(Node):
         self.default_frame_id = self.get_parameter("frame_id").get_parameter_value().string_value
 
         self.bridge = CvBridge()
-        self.image_publisher = self.create_publisher(Image, self.image_topic, 10)
+        self.image_publisher = self.create_publisher(Image, self.image_topic, CAMERA_QOS)
         self.camera_info_publisher = self.create_publisher(CameraInfo, self.camera_info_topic, 10)
-        self.depth_publisher = self.create_publisher(Image, self.depth_topic, 10)
-        self.preview_publisher = self.create_publisher(CompressedImage, self.preview_topic, 10)
+        self.depth_publisher = self.create_publisher(Image, self.depth_topic, CAMERA_QOS)
+        self.preview_publisher = self.create_publisher(CompressedImage, self.preview_topic, CAMERA_QOS)
 
         self._latest_rgb_frame: tuple[dict[str, object], np.ndarray] | None = None
         self._latest_depth_frame: tuple[dict[str, object], np.ndarray] | None = None
@@ -110,6 +120,11 @@ class ImageReceiverNode(Node):
                             continue
 
                         if frame_type == "preview_jpeg" and encoding == "jpeg":
+                            # recv_frame_packet already reads the exact payload
+                            # length; marker checks reject malformed packets
+                            # without decoding the preview a second time.
+                            if not has_complete_jpeg_markers(payload):
+                                continue
                             self._publish_preview_frame(header, payload)
                             continue
 

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import copy
 import json
 import math
+import os
 from pathlib import Path
+import shutil
+import tempfile
+import threading
 from typing import Any
 
 import yaml
@@ -16,6 +21,9 @@ from .operator_messages import classify_operator_message
 
 
 class SessionStore:
+    SESSION_METADATA_FILENAME = "metadata.yaml"
+    MAX_DISPLAY_NAME_LENGTH = 120
+
     def __init__(
         self,
         *,
@@ -28,17 +36,33 @@ class SessionStore:
         self.trajectory_path = Path(trajectory_path)
         self.max_reprojection_error_px = float(max_reprojection_error_px)
         self.min_board_margin_px = float(min_board_margin_px)
+        self._cache_lock = threading.RLock()
+        self._list_sessions_cache_key: tuple[Any, ...] | None = None
+        self._list_sessions_cache: list[dict[str, Any]] | None = None
+        self._samples_cache: dict[str, tuple[tuple[Any, ...], list[dict[str, Any]]]] = {}
+        self._events_cache: dict[str, tuple[tuple[Any, ...], list[dict[str, Any]]]] = {}
+        self._waypoints_cache: dict[tuple[str, str], tuple[tuple[Any, ...], list[dict[str, Any]]]] = {}
+        self._report_cache: dict[str, tuple[tuple[Any, ...], dict[str, Any]]] = {}
 
     def list_sessions(self) -> list[dict[str, Any]]:
         if not self.session_root_path.exists():
             return []
+        entries = self._session_entries()
+        cache_key = tuple(
+            (session_id, str(path), self._session_file_signature(path))
+            for session_id, path in entries
+        )
+        with self._cache_lock:
+            if cache_key == self._list_sessions_cache_key and self._list_sessions_cache is not None:
+                return copy.deepcopy(self._list_sessions_cache)
         sessions: list[dict[str, Any]] = []
-        for session_id, path in self._session_entries():
+        for session_id, path in entries:
             report_path = path / "report.yaml"
             samples_path = path / "samples.jsonl"
+            metadata = self._read_session_metadata(path)
             report = self._read_yaml(report_path)
-            samples = self._read_jsonl(samples_path)
-            events = self._read_jsonl(path / "run.log")
+            samples = self._read_samples_for_path(path)
+            events = self._read_run_events_for_path(path)
             counts = self._counts_for_session(path=path, report=report, samples=samples, events=events)
             report_error = report.get("error")
             trajectory_error = counts.get("trajectory_error")
@@ -48,6 +72,7 @@ class SessionStore:
             sessions.append(
                 {
                     "id": session_id,
+                    "display_name": self._display_name_from_metadata(metadata),
                     "path": str(path),
                     "report_path": str(report_path),
                     "sample_count": counts["sample_count"],
@@ -66,6 +91,9 @@ class SessionStore:
                     "empty_reason": invalid_reason or (None if has_report else "该 session 暂无 report.yaml。"),
                 }
             )
+        with self._cache_lock:
+            self._list_sessions_cache_key = cache_key
+            self._list_sessions_cache = copy.deepcopy(sessions)
         return sessions
 
     def latest_valid_session_id(self) -> str | None:
@@ -78,12 +106,99 @@ class SessionStore:
                 return str(session["id"])
         return None
 
+    def rename_session(self, session_id: str, display_name: str) -> dict[str, Any]:
+        session_path = self._session_path(session_id)
+        normalized_name = self._normalize_display_name(display_name)
+        metadata_path = session_path / self.SESSION_METADATA_FILENAME
+        metadata = self._read_yaml(metadata_path)
+        if "error" in metadata:
+            metadata = {}
+        metadata["display_name"] = normalized_name
+        self._write_yaml_atomically(metadata_path, metadata)
+        return {
+            "session_id": session_id,
+            "display_name": normalized_name,
+        }
+
+    def delete_session(self, session_id: str) -> dict[str, Any]:
+        session_path = self._session_path(session_id)
+        self._delete_session_path(session_id, session_path)
+        return {
+            "session_id": session_id,
+            "deleted": True,
+        }
+
+    def delete_sessions(self, session_ids: list[str]) -> dict[str, Any]:
+        normalized_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for session_id in session_ids:
+            if not isinstance(session_id, str):
+                raise ValueError("Session IDs must be strings.")
+            normalized_id = session_id.strip()
+            if not normalized_id or normalized_id in seen_ids:
+                continue
+            normalized_ids.append(normalized_id)
+            seen_ids.add(normalized_id)
+        if not normalized_ids:
+            raise ValueError("At least one session ID is required.")
+
+        deleted: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        for session_id in normalized_ids:
+            try:
+                session_path = self._session_path(session_id)
+                self._delete_session_path(session_id, session_path)
+            except (FileNotFoundError, OSError, ValueError) as exc:
+                failed.append({"session_id": session_id, "message": str(exc)})
+            else:
+                deleted.append({"session_id": session_id, "deleted": True})
+
+        return {
+            "deleted": deleted,
+            "failed": failed,
+            "deleted_session_ids": [item["session_id"] for item in deleted],
+            "deleted_count": len(deleted),
+            "failed_count": len(failed),
+        }
+
+    def _delete_session_path(self, session_id: str, session_path: Path) -> None:
+        session_root = self.session_root_path.resolve()
+        resolved_session_path = session_path.resolve()
+        if resolved_session_path == session_root:
+            raise ValueError("Refusing to delete the session root directory.")
+        try:
+            resolved_session_path.relative_to(session_root)
+        except ValueError as exc:
+            raise ValueError("Session path is outside the configured session root.") from exc
+        if session_path.is_symlink():
+            raise ValueError("Refusing to delete a symlink session.")
+        shutil.rmtree(session_path)
+        with self._cache_lock:
+            self._list_sessions_cache_key = None
+            self._list_sessions_cache = None
+            session_cache_key = str(resolved_session_path)
+            self._samples_cache.pop(session_cache_key, None)
+            self._events_cache.pop(session_cache_key, None)
+            self._report_cache.pop(session_cache_key, None)
+            self._waypoints_cache = {
+                key: value
+                for key, value in self._waypoints_cache.items()
+                if key[0] != session_cache_key
+            }
+
     def read_report(self, session_id: str) -> dict[str, Any]:
         session_path = self._session_path(session_id)
+        cache_key = str(session_path.resolve())
+        file_signature = self._session_file_signature(session_path)
+        with self._cache_lock:
+            cached = self._report_cache.get(cache_key)
+            if cached is not None and cached[0] == file_signature:
+                return copy.deepcopy(cached[1])
         report_path = session_path / "report.yaml"
+        metadata = self._read_session_metadata(session_path)
         report = self._read_yaml(report_path)
-        samples = self._read_samples_without_report_fallback(session_path)
-        events = self._read_jsonl(session_path / "run.log")
+        samples = self._read_samples_for_path(session_path)
+        events = self._read_run_events_for_path(session_path)
         counts = self._counts_for_session(path=session_path, report=report, samples=samples, events=events)
         raw_residuals = report.get("raw_residuals", {}) if isinstance(report.get("raw_residuals"), dict) else {}
         corrected_residuals = report.get("corrected_residuals", {}) if isinstance(report.get("corrected_residuals"), dict) else {}
@@ -102,6 +217,7 @@ class SessionStore:
         shaped.update(
             {
                 "session_id": session_id,
+                "display_name": self._display_name_from_metadata(metadata),
                 "session_dir": str(session_path),
                 "report_path": str(report_path),
                 "has_report": has_report,
@@ -121,10 +237,24 @@ class SessionStore:
                 "empty_reason": invalid_reason or (None if has_solution else ("report.yaml 存在，但该 session 尚未完成求解。" if has_report else "该 session 暂无 report.yaml。")),
             }
         )
+        with self._cache_lock:
+            self._report_cache[cache_key] = (file_signature, copy.deepcopy(shaped))
         return shaped
 
     def read_samples(self, session_id: str) -> list[dict[str, Any]]:
         session_path = self._session_path(session_id)
+        return self._read_samples_for_path(session_path)
+
+    def _read_samples_for_path(self, session_path: Path) -> list[dict[str, Any]]:
+        cache_key = str(session_path.resolve())
+        file_signature = self._session_file_signature(
+            session_path,
+            filenames=("samples.jsonl", "report.yaml", "images"),
+        )
+        with self._cache_lock:
+            cached = self._samples_cache.get(cache_key)
+            if cached is not None and cached[0] == file_signature:
+                return copy.deepcopy(cached[1])
         samples = self._read_samples_without_report_fallback(session_path)
         if not samples and (session_path / "report.yaml").exists():
             report_samples = self._read_yaml(session_path / "report.yaml").get("samples", [])
@@ -150,10 +280,20 @@ class SessionStore:
             sample["thresholds"] = self._quality_flags(sample.get("reprojection_error_px"), sample.get("board_margin_px"))
             sample["observation_mode"] = sample.get("observation_mode") or _sample_observation_mode(sample)
             sample["quality_payload"] = sample.get("sample_quality") or sample.get("record_quality") or sample.get("quality")
+        with self._cache_lock:
+            self._samples_cache[cache_key] = (file_signature, copy.deepcopy(samples))
         return samples
 
     def per_sample_residuals(self, session_id: str) -> list[dict[str, Any]]:
         session_path = self._session_path(session_id)
+        return self._per_sample_residuals_for_path(session_path)
+
+    def _per_sample_residuals_for_path(
+        self,
+        session_path: Path,
+        *,
+        samples: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         report = self._read_yaml(session_path / "report.yaml")
         base_to_camera = report.get("base_to_camera")
         tool_to_board_cfg = report.get("estimated_tool_to_board") or report.get("tool_to_board")
@@ -166,7 +306,8 @@ class SessionStore:
         tool_to_board_matrix = _build_4x4_from_transform(tool_to_board_cfg)
         if base_to_camera_matrix is None or tool_to_board_matrix is None:
             return []
-        samples = self.read_samples(session_id)
+        if samples is None:
+            samples = self._read_samples_for_path(session_path)
         result: list[dict[str, Any]] = []
         for sample in samples:
             base_to_tool = _parse_4x4(sample.get("base_to_tool_matrix"))
@@ -189,19 +330,50 @@ class SessionStore:
         return result
 
     def sample_for_row(self, session_id: str, row_index: int) -> dict[str, Any] | None:
-        samples = self.read_samples(session_id)
+        session_path = self._session_path(session_id)
+        samples = self._read_samples_for_path(session_path)
         if row_index < 1 or row_index > len(samples):
             return None
         return samples[row_index - 1]
 
     def read_run_events(self, session_id: str) -> list[dict[str, Any]]:
-        return self._read_jsonl(self._session_path(session_id) / "run.log")
+        return self._read_run_events_for_path(self._session_path(session_id))
+
+    def _read_run_events_for_path(self, session_path: Path) -> list[dict[str, Any]]:
+        cache_key = str(session_path.resolve())
+        file_signature = self._session_file_signature(session_path, filenames=("run.log",))
+        with self._cache_lock:
+            cached = self._events_cache.get(cache_key)
+            if cached is not None and cached[0] == file_signature:
+                return copy.deepcopy(cached[1])
+        events = self._read_jsonl(session_path / "run.log")
+        with self._cache_lock:
+            self._events_cache[cache_key] = (file_signature, copy.deepcopy(events))
+        return events
 
     def read_session_waypoints(self, session_id: str) -> list[dict[str, Any]]:
         session_path = self._session_path(session_id)
+        return self._read_session_waypoints_for_path(session_path, session_id=session_id)
+
+    def _read_session_waypoints_for_path(
+        self,
+        session_path: Path,
+        *,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        session_id = session_id or session_path.name
+        cache_key = (str(session_path.resolve()), session_id)
+        file_signature = self._session_file_signature(
+            session_path,
+            filenames=("trajectory_used.yaml", "samples.jsonl", "report.yaml", "run.log", "images"),
+        )
+        with self._cache_lock:
+            cached = self._waypoints_cache.get(cache_key)
+            if cached is not None and cached[0] == file_signature:
+                return copy.deepcopy(cached[1])
         trajectory = self._read_waypoints_from_path(self._trajectory_path_for_session(session_path))
-        samples = self.read_samples(session_id)
-        sample_residuals = self.per_sample_residuals(session_id)
+        samples = self._read_samples_for_path(session_path)
+        sample_residuals = self._per_sample_residuals_for_path(session_path, samples=samples)
         residuals_by_row: dict[int, dict[str, Any]] = {}
         for res in sample_residuals:
             row_index = res.get("row_index")
@@ -235,7 +407,7 @@ class SessionStore:
                 board_margin_px=record_quality.get("board_margin_px"),
             )
 
-        events = self.read_run_events(session_id)
+        events = self._read_run_events_for_path(session_path)
         active_waypoint_name: str | None = None
         terminal_session_event: dict[str, Any] | None = None
         session_terminal_events = {
@@ -432,7 +604,10 @@ class SessionStore:
                     )
                 )
 
-        return list(records.values())
+        result = list(records.values())
+        with self._cache_lock:
+            self._waypoints_cache[cache_key] = (file_signature, copy.deepcopy(result))
+        return result
 
     def read_waypoints(self) -> dict[str, Any]:
         return self._read_waypoints_from_path(self.trajectory_path)
@@ -646,7 +821,7 @@ class SessionStore:
         }
 
     def _counts_for_session(self, *, path: Path, report: dict[str, Any], samples: list[dict[str, Any]], events: list[dict[str, Any]]) -> dict[str, int]:
-        waypoint_records = self.read_session_waypoints(path.name)
+        waypoint_records = self._read_session_waypoints_for_path(path)
         accepted = sum(1 for record in waypoint_records if record.get("status") == "accepted")
         skipped = sum(1 for record in waypoint_records if record.get("status") == "skipped")
         failed = sum(1 for record in waypoint_records if record.get("status") == "failed")
@@ -748,6 +923,51 @@ class SessionStore:
             raise FileNotFoundError(f"Session does not exist: {path}")
         return path
 
+    def _normalize_display_name(self, display_name: str) -> str:
+        if not isinstance(display_name, str):
+            raise ValueError("Session display name must be a string.")
+        normalized = display_name.strip()
+        if not normalized:
+            raise ValueError("Session display name cannot be empty.")
+        if len(normalized) > self.MAX_DISPLAY_NAME_LENGTH:
+            raise ValueError(
+                f"Session display name must be at most {self.MAX_DISPLAY_NAME_LENGTH} characters."
+            )
+        if any(ord(character) < 32 for character in normalized):
+            raise ValueError("Session display name cannot contain control characters.")
+        if "/" in normalized or "\\" in normalized:
+            raise ValueError("Session display name cannot contain path separators.")
+        return normalized
+
+    def _display_name_from_metadata(self, metadata: dict[str, Any]) -> str | None:
+        display_name = metadata.get("display_name")
+        if not isinstance(display_name, str):
+            return None
+        normalized = display_name.strip()
+        return normalized or None
+
+    def _read_session_metadata(self, session_path: Path) -> dict[str, Any]:
+        return self._read_yaml(session_path / self.SESSION_METADATA_FILENAME)
+
+    def _write_yaml_atomically(self, path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path: Path | None = None
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=str(path.parent),
+        )
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+                yaml.safe_dump(payload, handle, sort_keys=False, allow_unicode=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+
     def _session_entries(self) -> list[tuple[str, Path]]:
         paths = list(self._iter_session_paths())
         name_counts: dict[str, int] = {}
@@ -760,6 +980,30 @@ class SessionStore:
                 session_id = f"{path.parent.name}__{path.name}"
             entries.append((session_id, path))
         return entries
+
+    def _session_file_signature(
+        self,
+        session_path: Path,
+        *,
+        filenames: tuple[str, ...] = (
+            "metadata.yaml",
+            "report.yaml",
+            "samples.jsonl",
+            "run.log",
+            "trajectory_used.yaml",
+            "images",
+        ),
+    ) -> tuple[Any, ...]:
+        signature: list[tuple[str, bool, int, int]] = []
+        for filename in filenames:
+            path = session_path / filename
+            try:
+                stat = path.stat()
+            except OSError:
+                signature.append((filename, False, 0, 0))
+            else:
+                signature.append((filename, True, int(stat.st_mtime_ns), int(stat.st_size)))
+        return tuple(signature)
 
     def _iter_session_paths(self) -> list[Path]:
         if not self.session_root_path.exists():

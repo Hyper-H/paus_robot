@@ -4,6 +4,7 @@ from collections import deque
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import socket
 import threading
 import time
 from typing import Any
@@ -13,7 +14,6 @@ from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 import numpy as np
 import rclpy
-from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -33,7 +33,15 @@ from .session_store import SessionStore
 
 
 STATUS_QOS = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+CAMERA_QOS = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
 CAMERA_FRESHNESS_S = 3.0
+DEPTH_RELEASE_STATUSES = {
+    "semi_auto_finished",
+    "semi_auto_finished_with_skips",
+    "semi_auto_failed",
+    "semi_auto_stopped",
+    "semi_auto_insufficient_samples",
+}
 
 
 @dataclass
@@ -92,6 +100,9 @@ class UiRosBridge(Node):
 
         self.declare_parameter("observation_mode", str(calibration_cfg.get("observation_mode", RGB_PNP_MODE)))
         self.declare_parameter("depth_topic", str(calibration_cfg.get("depth_topic", "/camera/depth_aligned")))
+        self.declare_parameter("camera_control_host", "127.0.0.1")
+        self.declare_parameter("camera_control_port", 5002)
+        self.declare_parameter("camera_depth_initially_enabled", False)
 
         self.declare_parameter("board_rows", int(calibration_cfg.get("board_rows", 6)))
         self.declare_parameter("board_cols", int(calibration_cfg.get("board_cols", 9)))
@@ -101,6 +112,9 @@ class UiRosBridge(Node):
         self.declare_parameter("max_reprojection_error_px", float(calibration_cfg.get("max_reprojection_error_px", 0.0)))
         self.declare_parameter("min_board_margin_px", float(calibration_cfg.get("min_board_margin_px", 10.0)))
         self.declare_parameter("execute_motion", bool(control_cfg.get("execute_motion", False)))
+        self.declare_parameter("move_vel", float(control_cfg.get("move_vel", 20.0)))
+        self.declare_parameter("move_acc", float(control_cfg.get("move_acc", 20.0)))
+        self.declare_parameter("global_speed", float(control_cfg.get("global_speed", 100.0)))
 
         self.ui_host = self.get_parameter("ui_host").get_parameter_value().string_value
         self.ui_port = int(self.get_parameter("ui_port").get_parameter_value().integer_value)
@@ -110,6 +124,11 @@ class UiRosBridge(Node):
         self.status_topic = self.get_parameter("status_topic").get_parameter_value().string_value
         self.observation_mode = normalize_observation_mode(self.get_parameter("observation_mode").get_parameter_value().string_value)
         self.depth_topic = self.get_parameter("depth_topic").get_parameter_value().string_value
+        self.camera_control_host = self.get_parameter("camera_control_host").get_parameter_value().string_value
+        self.camera_control_port = int(self.get_parameter("camera_control_port").get_parameter_value().integer_value)
+        camera_depth_initially_enabled = bool(
+            self.get_parameter("camera_depth_initially_enabled").get_parameter_value().bool_value
+        )
         self.supported_observation_modes = [RGB_PNP_MODE, DEPTH_ALIGNED_MODE]
         self.board_rows = int(self.get_parameter("board_rows").get_parameter_value().integer_value)
         self.board_cols = int(self.get_parameter("board_cols").get_parameter_value().integer_value)
@@ -122,6 +141,9 @@ class UiRosBridge(Node):
         self.max_reprojection_error_px = float(self.get_parameter("max_reprojection_error_px").get_parameter_value().double_value)
         self.min_board_margin_px = float(self.get_parameter("min_board_margin_px").get_parameter_value().double_value)
         self.execute_motion = bool(self.get_parameter("execute_motion").get_parameter_value().bool_value)
+        self.local_move_vel = float(self.get_parameter("move_vel").get_parameter_value().double_value)
+        self.local_move_acc = float(self.get_parameter("move_acc").get_parameter_value().double_value)
+        self.local_global_speed = float(self.get_parameter("global_speed").get_parameter_value().double_value)
         self.local_camera_config_path = self.camera_config_path
         self.local_board_rows = self.board_rows
         self.local_board_cols = self.board_cols
@@ -157,14 +179,24 @@ class UiRosBridge(Node):
         self._run_lock = threading.Lock()
         self._run_thread: threading.Thread | None = None
         self._last_command_result: dict[str, Any] | None = None
+        self._camera_depth_command_lock = threading.Lock()
+        self._camera_depth_status_lock = threading.Lock()
+        self._camera_depth_status: dict[str, Any] = {
+            "requested": camera_depth_initially_enabled,
+            "active": camera_depth_initially_enabled,
+            "depth_sequence": 0,
+            "last_error": None,
+        }
+        self._camera_depth_disable_lock = threading.Lock()
+        self._camera_depth_disable_thread: threading.Thread | None = None
         self._raw_jpeg_cache_lock = threading.Lock()
         self._raw_jpeg_cache_sequence: int | None = None
         self._raw_jpeg_cache_bytes: bytes | None = None
         self._overlay_cache: dict[tuple[int, str, bool], bytes] = {}
         self._overlay_cache_lock = threading.Lock()
 
-        self.create_subscription(Image, self.image_topic, self._image_callback, 10)
-        self.create_subscription(CompressedImage, self.preview_image_topic, self._preview_image_callback, 10)
+        self.create_subscription(Image, self.image_topic, self._image_callback, CAMERA_QOS)
+        self.create_subscription(CompressedImage, self.preview_image_topic, self._preview_image_callback, CAMERA_QOS)
         self.create_subscription(String, self.status_topic, self._status_callback, STATUS_QOS)
         self._parameter_clients = {
             "eye_to_hand": self.create_client(SetParameters, "/eye_to_hand_calibration_node/set_parameters"),
@@ -221,6 +253,11 @@ class UiRosBridge(Node):
         if not isinstance(payload, dict):
             payload = {"status": "invalid_status", "message": str(payload)}
         shaped = self._shape_status_payload(payload)
+        # A backend status is newer than the command result that triggered it.
+        # Clear an older error so a successful retry does not keep showing the
+        # previous failure in the command banner.
+        if payload.get("status") not in {"invalid_json", "invalid_status"}:
+            self._last_command_result = None
         with self._last_status_lock:
             self._last_status = payload
             self._last_status_time_s = time.monotonic()
@@ -233,6 +270,8 @@ class UiRosBridge(Node):
                 "dedupe_key": self._event_dedupe_key("eye_to_hand_status", payload),
             }
         )
+        if str(payload.get("status", "")) in DEPTH_RELEASE_STATUSES:
+            self._disable_camera_depth_async()
 
     def _sync_backend_state(self, last_status: dict[str, Any] | None = None, last_status_age_s: float | None = None) -> dict[str, Any]:
         if last_status is None and last_status_age_s is None:
@@ -371,6 +410,7 @@ class UiRosBridge(Node):
     def get_status(self) -> dict[str, Any]:
         latest_meta = self._latest_image_meta()
         preview_meta = self._latest_preview_meta()
+        camera_depth = self._camera_depth_snapshot()
         with self._last_status_lock:
             last_status = dict(self._last_status) if self._last_status else None
             last_status_age_s = (time.monotonic() - self._last_status_time_s) if self._last_status_time_s else None
@@ -423,6 +463,7 @@ class UiRosBridge(Node):
                 "stream_source": "preview_jpeg" if preview_age_s is not None and preview_age_s < CAMERA_FRESHNESS_S else "raw_image",
                 "camera_config_path": str(self.camera_config_path),
                 "camera_config_exists": self.camera_config_path.exists(),
+                "depth_control": camera_depth,
             },
             "handeye": {
                 "status_topic": self.status_topic,
@@ -694,6 +735,88 @@ class UiRosBridge(Node):
         self._sync_backend_state()
         return {"session_id": self.session_store.latest_valid_session_id()}
 
+    def rename_session(self, session_id: str, display_name: str) -> dict[str, Any]:
+        self._sync_backend_state()
+        try:
+            payload = self.session_store.rename_session(session_id, display_name)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            result = self._shape_command_result("rename_session", False, str(exc))
+        else:
+            result = self._shape_command_result(
+                "rename_session",
+                True,
+                "Session display name updated.",
+                extra=payload,
+            )
+        self._publish_ui_command_result(result)
+        return result
+
+    def delete_session(self, session_id: str) -> dict[str, Any]:
+        backend_state = self._sync_backend_state()
+        if backend_state["run_active"]:
+            result = self._shape_command_result(
+                "delete_session",
+                False,
+                "Cannot delete a session while calibration is running.",
+            )
+            self._publish_ui_command_result(result)
+            return result
+        try:
+            payload = self.session_store.delete_session(session_id)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            result = self._shape_command_result("delete_session", False, str(exc))
+        else:
+            result = self._shape_command_result(
+                "delete_session",
+                True,
+                "Session deleted.",
+                extra=payload,
+            )
+        self._publish_ui_command_result(result)
+        return result
+
+    def delete_sessions(self, session_ids: list[str]) -> dict[str, Any]:
+        backend_state = self._sync_backend_state()
+        if backend_state["run_active"]:
+            failed = [
+                {"session_id": session_id, "message": "Cannot delete a session while calibration is running."}
+                for session_id in session_ids
+            ]
+            result = self._shape_command_result(
+                "delete_sessions",
+                False,
+                "Cannot delete sessions while calibration is running.",
+                extra={
+                    "deleted": [],
+                    "failed": failed,
+                    "deleted_session_ids": [],
+                    "deleted_count": 0,
+                    "failed_count": len(failed),
+                    "run_active": True,
+                },
+            )
+            self._publish_ui_command_result(result)
+            return result
+        try:
+            payload = self.session_store.delete_sessions(session_ids)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            result = self._shape_command_result("delete_sessions", False, str(exc))
+        else:
+            deleted_count = int(payload.get("deleted_count", 0))
+            failed_count = int(payload.get("failed_count", 0))
+            if failed_count:
+                message = f"Deleted {deleted_count} session(s); {failed_count} failed."
+            else:
+                message = f"Deleted {deleted_count} session(s)."
+            result = self._shape_command_result(
+                "delete_sessions",
+                failed_count == 0 and deleted_count > 0,
+                message,
+                extra=payload,
+            )
+        self._publish_ui_command_result(result)
+        return result
+
     def read_session_report(self, session_id: str) -> dict[str, Any]:
         self._sync_backend_state()
         return self.session_store.read_report(session_id)
@@ -756,6 +879,31 @@ class UiRosBridge(Node):
                 result = self._shape_command_result("run_semi_auto", False, "Semi-auto calibration is already running.")
                 self._last_command_result = result
                 return result
+            uses_depth = self.observation_mode == DEPTH_ALIGNED_MODE
+            depth_required = uses_depth and bool(backend_state["execute_motion"])
+            depth_status = self._camera_depth_snapshot()
+            if depth_required:
+                depth_response = self._set_camera_depth_enabled(True)
+                if not depth_response.get("success"):
+                    result = self._shape_command_result(
+                        "run_semi_auto",
+                        False,
+                        str(depth_response.get("message", "Failed to start depth capture.")),
+                        extra={"depth_required": True, "depth_active": bool(depth_response.get("active", False))},
+                    )
+                    self._publish_ui_command_result(result)
+                    return result
+            elif bool(depth_status.get("requested", False)) or bool(depth_status.get("active", False)):
+                depth_response = self._set_camera_depth_enabled(False)
+                if not depth_response.get("success"):
+                    result = self._shape_command_result(
+                        "run_semi_auto",
+                        False,
+                        str(depth_response.get("message", "Failed to stop depth capture.")),
+                        extra={"depth_required": False, "depth_active": bool(depth_response.get("active", False))},
+                    )
+                    self._publish_ui_command_result(result)
+                    return result
             client = self._service_clients["run_semi_auto"]
             if not client.wait_for_service(timeout_sec=2.0):
                 result = self._shape_command_result("run_semi_auto", False, f"Service is unavailable: {client.srv_name}")
@@ -775,17 +923,49 @@ class UiRosBridge(Node):
 
     def set_observation_mode(self, mode: str) -> dict[str, Any]:
         normalized_mode = normalize_observation_mode(mode)
-        if normalized_mode == self.observation_mode:
+        current_mode = getattr(self, "observation_mode", RGB_PNP_MODE)
+        run_thread = getattr(self, "_run_thread", None)
+        if run_thread is not None and run_thread.is_alive():
+            result = self._shape_command_result(
+                "set_observation_mode",
+                False,
+                "Observation mode cannot change while semi-auto calibration is running.",
+            )
+            self._publish_ui_command_result(result)
+            return result
+        if normalized_mode == current_mode:
             result = self._shape_command_result(
                 "set_observation_mode",
                 True,
                 f"Observation mode already set to {normalized_mode}.",
-                extra={"mode": normalized_mode, "observation_mode": normalized_mode, "depth_topic": self.depth_topic},
+                extra={
+                    "mode": normalized_mode,
+                    "observation_mode": normalized_mode,
+                    "depth_topic": self.depth_topic,
+                    "depth_control": self._camera_depth_snapshot(),
+                },
             )
             self._last_command_result = result
             return result
+        depth_was_enabled = False
+        if normalized_mode == RGB_PNP_MODE:
+            depth_status = self._camera_depth_snapshot()
+            depth_was_enabled = bool(depth_status.get("requested", False)) or bool(depth_status.get("active", False))
+            if depth_was_enabled:
+                depth_response = self._set_camera_depth_enabled(False)
+                if not depth_response.get("success"):
+                    result = self._shape_command_result(
+                        "set_observation_mode",
+                        False,
+                        str(depth_response.get("message", "Failed to stop depth capture.")),
+                        extra={"depth_control": depth_response},
+                    )
+                    self._publish_ui_command_result(result)
+                    return result
         client = self._set_parameters_client
         if not client.wait_for_service(timeout_sec=2.0):
+            if depth_was_enabled:
+                self._set_camera_depth_enabled(True)
             result = self._shape_command_result("set_observation_mode", False, f"Service is unavailable: {client.srv_name}")
             self._last_command_result = result
             return result
@@ -795,6 +975,8 @@ class UiRosBridge(Node):
         done = threading.Event()
         future.add_done_callback(lambda _: done.set())
         if not done.wait(timeout=5.0):
+            if depth_was_enabled:
+                self._set_camera_depth_enabled(True)
             result = self._shape_command_result("set_observation_mode", False, "Timed out while switching observation mode.")
             self._last_command_result = result
             return result
@@ -810,13 +992,97 @@ class UiRosBridge(Node):
                     "set_observation_mode",
                     True,
                     f"Observation mode switched to {normalized_mode}.",
-                    extra={"mode": normalized_mode, "observation_mode": normalized_mode, "depth_topic": self.depth_topic},
+                    extra={
+                        "mode": normalized_mode,
+                        "observation_mode": normalized_mode,
+                        "depth_topic": self.depth_topic,
+                        "depth_control": self._camera_depth_snapshot(),
+                    },
                 )
             else:
                 reasons = [getattr(item, 'reason', '') for item in getattr(response, 'results', []) if not getattr(item, 'successful', False)]
                 result = self._shape_command_result("set_observation_mode", False, "; ".join(reason for reason in reasons if reason) or "Failed to switch observation mode.")
+        if not result.get("success") and depth_was_enabled and normalized_mode == RGB_PNP_MODE:
+            self._set_camera_depth_enabled(True)
         self._last_command_result = result
         self.events.push({"type": "ui_command_result", "command": "set_observation_mode", "result": result, "operator_message": result["operator_message"], "dedupe_key": self._event_dedupe_key("ui_command_result", result)})
+        return result
+
+    def set_motion_config(self, *, move_vel: Any, move_acc: Any, global_speed: Any) -> dict[str, Any]:
+        values = {
+            "move_vel": _to_float(move_vel),
+            "move_acc": _to_float(move_acc),
+            "global_speed": _to_float(global_speed),
+        }
+        invalid = [
+            name
+            for name, value in values.items()
+            if value is None or value < 1.0 or value > 100.0
+        ]
+        if invalid:
+            result = self._shape_command_result(
+                "set_motion_config",
+                False,
+                f"Motion parameters must be within [1, 100]: {', '.join(invalid)}.",
+            )
+            self._last_command_result = result
+            return result
+
+        client = self._set_parameters_client
+        if not client.wait_for_service(timeout_sec=2.0):
+            result = self._shape_command_result("set_motion_config", False, f"Service is unavailable: {client.srv_name}")
+            self._last_command_result = result
+            return result
+
+        request = SetParameters.Request()
+        request.parameters = [
+            Parameter(name, Parameter.Type.DOUBLE, float(value)).to_parameter_msg()
+            for name, value in values.items()
+        ]
+        future = client.call_async(request)
+        done = threading.Event()
+        future.add_done_callback(lambda _: done.set())
+        if not done.wait(timeout=5.0):
+            result = self._shape_command_result("set_motion_config", False, "Timed out while applying motion parameters.")
+            self._last_command_result = result
+            return result
+        try:
+            response = future.result()
+        except Exception as exc:
+            result = self._shape_command_result("set_motion_config", False, repr(exc))
+        else:
+            ok = bool(response.results) and all(getattr(item, "successful", False) for item in response.results)
+            if ok:
+                self.local_move_vel = float(values["move_vel"])
+                self.local_move_acc = float(values["move_acc"])
+                self.local_global_speed = float(values["global_speed"])
+                result = self._shape_command_result(
+                    "set_motion_config",
+                    True,
+                    "Motion parameters applied.",
+                    extra={"motion_config": self._local_motion_config()},
+                )
+            else:
+                reasons = [
+                    getattr(item, "reason", "")
+                    for item in getattr(response, "results", [])
+                    if not getattr(item, "successful", False)
+                ]
+                result = self._shape_command_result(
+                    "set_motion_config",
+                    False,
+                    "; ".join(reason for reason in reasons if reason) or "Failed to apply motion parameters.",
+                )
+        self._last_command_result = result
+        self.events.push(
+            {
+                "type": "ui_command_result",
+                "command": "set_motion_config",
+                "result": result,
+                "operator_message": result["operator_message"],
+                "dedupe_key": self._event_dedupe_key("ui_command_result", result),
+            }
+        )
         return result
 
     def stop_run(self) -> dict[str, Any]:
@@ -832,7 +1098,107 @@ class UiRosBridge(Node):
 
     def _run_semi_auto_worker(self) -> None:
         self.events.push({"type": "ui_command", "command": "run_semi_auto", "message": "Semi-auto service call started.", "operator_message": "半自动标定请求已发送。"})
-        self._call_trigger("run_semi_auto", timeout_s=3600.0)
+        result = self._call_trigger("run_semi_auto", timeout_s=3600.0)
+        if not result.get("success"):
+            self._disable_camera_depth_async()
+
+    def _camera_depth_snapshot(self) -> dict[str, Any]:
+        with getattr(self, "_camera_depth_status_lock", threading.Lock()):
+            return dict(getattr(self, "_camera_depth_status", {}))
+
+    def _set_camera_depth_enabled(self, enabled: bool, *, timeout_s: float = 20.0) -> dict[str, Any]:
+        host = str(getattr(self, "camera_control_host", "127.0.0.1"))
+        port = int(getattr(self, "camera_control_port", 5002))
+        timeout_s = max(0.1, float(timeout_s))
+        deadline = time.monotonic() + timeout_s
+        payload = {
+            "command": "set_depth_enabled",
+            "enabled": bool(enabled),
+            "timeout_s": timeout_s,
+        }
+        try:
+            with getattr(self, "_camera_depth_command_lock", threading.Lock()):
+                response_line = b""
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0.0:
+                        raise TimeoutError(f"Timed out connecting to camera depth control at {host}:{port}.")
+                    connected = False
+                    try:
+                        with socket.create_connection((host, port), timeout=min(1.0, remaining)) as connection:
+                            connected = True
+                            connection.settimeout(timeout_s + 1.0)
+                            connection.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+                            response_line = connection.makefile("rb").readline()
+                        break
+                    except OSError:
+                        if connected:
+                            raise
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+            if not response_line:
+                raise RuntimeError("Camera depth control returned an empty response.")
+            response = json.loads(response_line.decode("utf-8"))
+            if not isinstance(response, dict):
+                raise RuntimeError("Camera depth control returned an invalid response.")
+        except Exception as exc:
+            response = {
+                "success": False,
+                "enabled": bool(enabled),
+                "active": False,
+                "message": f"Camera depth control unavailable: {exc!r}",
+            }
+        with getattr(self, "_camera_depth_status_lock", threading.Lock()):
+            current = dict(getattr(self, "_camera_depth_status", {}))
+            current.update(response)
+            current["requested"] = bool(response.get("requested", enabled if response.get("success") else current.get("requested", False)))
+            current["active"] = bool(response.get("active", current.get("active", False)))
+            self._camera_depth_status = current
+        return response
+
+    def _camera_depth_command_result(self, enabled: bool) -> dict[str, Any]:
+        response = self._set_camera_depth_enabled(enabled)
+        result = self._shape_command_result(
+            "camera_depth",
+            bool(response.get("success")),
+            str(response.get("message", "Camera depth command completed.")),
+            extra={
+                "enabled": bool(enabled),
+                "active": bool(response.get("active", False)),
+                "depth_sequence": response.get("depth_sequence"),
+            },
+        )
+        self._publish_ui_command_result(result)
+        return result
+
+    def _disable_camera_depth_async(self) -> None:
+        with getattr(self, "_camera_depth_disable_lock", threading.Lock()):
+            status = self._camera_depth_snapshot()
+            if not bool(status.get("requested", False)) and not bool(status.get("active", False)):
+                return
+            thread = getattr(self, "_camera_depth_disable_thread", None)
+            if thread is not None and thread.is_alive():
+                return
+
+            def worker() -> None:
+                result = self._camera_depth_command_result(False)
+                if not result.get("success"):
+                    self.events.push(
+                        {
+                            "type": "camera_depth_release_failed",
+                            "operator_message": result.get("operator_message", result.get("message", "")),
+                            "result": result,
+                            "dedupe_key": self._event_dedupe_key("camera_depth_release_failed", result),
+                        }
+                    )
+
+            self._camera_depth_disable_thread = threading.Thread(
+                target=worker,
+                daemon=True,
+                name="camera-depth-disable",
+            )
+            self._camera_depth_disable_thread.start()
 
     def _set_eye_to_hand_string_parameter(self, name: str, value: str, *, timeout_s: float) -> dict[str, Any]:
         client = self._parameter_clients["eye_to_hand"]
@@ -840,10 +1206,7 @@ class UiRosBridge(Node):
             return {"success": False, "message": f"Service is unavailable: {client.srv_name}"}
         request = SetParameters.Request()
         request.parameters = [
-            Parameter(
-                name=name,
-                value=ParameterValue(type=ParameterType.PARAMETER_STRING, string_value=value),
-            )
+            Parameter(name=name, type_=Parameter.Type.STRING, value=value).to_parameter_msg()
         ]
         future = client.call_async(request)
         done = threading.Event()
@@ -883,6 +1246,18 @@ class UiRosBridge(Node):
         self._last_command_result = result
         self.events.push({"type": "ui_command_result", "command": key, "result": result, "operator_message": result["operator_message"], "dedupe_key": self._event_dedupe_key("ui_command_result", result)})
         return result
+
+    def _publish_ui_command_result(self, result: dict[str, Any]) -> None:
+        self._last_command_result = result
+        self.events.push(
+            {
+                "type": "ui_command_result",
+                "command": result.get("command"),
+                "result": result,
+                "operator_message": result.get("operator_message", result.get("message", "")),
+                "dedupe_key": self._event_dedupe_key("ui_command_result", result),
+            }
+        )
 
     def _latest_image_copy(self) -> CachedImage | None:
         with self._image_lock:
@@ -1008,6 +1383,8 @@ class UiRosBridge(Node):
             "waypoint_recorded": ("recorded", "已记录当前点"),
             "record_waypoint_failed": ("error", "记录点失败"),
             "waypoint_deleted": ("recorded", "已删除上一个点"),
+            "motion_preparation": ("movej", "机械臂运动准备完成"),
+            "motion_preparation_failed": ("error", "机械臂运动准备失败"),
             "semi_auto_started": ("movej", "半自动标定已启动"),
             "semi_auto_dry_run_waypoint": ("dry_run", "Dry-run 检查中"),
             "waypoint_dry_run_complete": ("dry_run", "Dry-run"),
@@ -1051,15 +1428,33 @@ class UiRosBridge(Node):
         waypoints = trajectory.get("waypoints", []) if isinstance(trajectory.get("waypoints"), list) else []
         defaults = trajectory.get("defaults", {}) if isinstance(trajectory.get("defaults"), dict) else {}
         motions = {str(item.get("motion", defaults.get("motion", "movej"))).lower() for item in waypoints if isinstance(item, dict)}
+        motion_config = last_status.get("motion_config") if isinstance(last_status, dict) else None
+        if not isinstance(motion_config, dict):
+            motion_config = self._local_motion_config()
+        configured_vel = _to_float(motion_config.get("move_vel"))
+        configured_acc = _to_float(motion_config.get("move_acc"))
+        configured_global_speed = _to_float(motion_config.get("global_speed"))
         return {
             "execute_motion": self.effective_execute_motion,
             "waypoint_count": len(waypoints),
             "motion": ",".join(sorted(motions)) if motions else str(defaults.get("motion", "movej")),
-            "vel": defaults.get("vel"),
-            "acc": defaults.get("acc"),
+            "vel": configured_vel if configured_vel is not None else defaults.get("vel"),
+            "acc": configured_acc if configured_acc is not None else defaults.get("acc"),
+            "global_speed": configured_global_speed,
+            "blend_time_ms": motion_config.get("blend_time_ms", -1.0),
+            "speed_override": bool(motion_config.get("speed_override", True)),
             "dwell_s": defaults.get("dwell_s"),
             "trajectory_path": str(self.effective_trajectory_path),
             "trajectory_error": trajectory.get("error"),
+        }
+
+    def _local_motion_config(self) -> dict[str, Any]:
+        return {
+            "move_vel": float(getattr(self, "local_move_vel", 20.0)),
+            "move_acc": float(getattr(self, "local_move_acc", 20.0)),
+            "global_speed": float(getattr(self, "local_global_speed", 100.0)),
+            "blend_time_ms": -1.0,
+            "speed_override": True,
         }
 
     def _quality_schema(self, observation_mode: str) -> dict[str, Any]:
@@ -1144,8 +1539,18 @@ class UiRosBridge(Node):
         success_messages = {
             "record_waypoint": "当前 waypoint 已记录。",
             "delete_last_waypoint": "已删除上一个 waypoint。",
+            "rename_session": "session 名称已更新。",
+            "delete_session": "session 已永久删除。",
         }
-        operator_message = info["message"] if not success else success_messages.get(command, message or "操作已完成。")
+        if command == "delete_sessions" and extra:
+            deleted_count = int(extra.get("deleted_count", 0))
+            failed_count = int(extra.get("failed_count", 0))
+            if failed_count:
+                operator_message = f"已删除 {deleted_count} 个 session，{failed_count} 个失败。"
+            else:
+                operator_message = f"已永久删除 {deleted_count} 个 session。"
+        else:
+            operator_message = info["message"] if not success else success_messages.get(command, message or "操作已完成。")
         result = {
             "command": command,
             "success": bool(success),

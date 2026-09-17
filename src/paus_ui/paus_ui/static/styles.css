@@ -372,6 +372,11 @@ p {
   background: var(--teal);
 }
 
+.seg-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .axis-toggle {
   display: inline-flex;
   align-items: center;
@@ -389,6 +394,7 @@ p {
 }
 
 .image-stage img,
+.image-stage canvas,
 .preview-stage img {
   width: 100%;
   height: 100%;
@@ -410,6 +416,25 @@ p {
   padding: 0;
   background: rgba(255, 255, 255, 0.88);
   cursor: pointer;
+}
+
+.session-action-button {
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  color: var(--ink);
+  background: #fff;
+  font-size: 17px;
+  line-height: 1;
+}
+
+.session-action-button.destructive {
+  color: var(--red);
+}
+
+.session-action-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .stage-empty {
@@ -579,6 +604,7 @@ p {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  overflow: auto;
 }
 
 .action {
@@ -810,7 +836,7 @@ tbody tr.selected td {
 }
 
 .result-panel .session-actions {
-  flex: 0 0 190px;
+  flex: 0 1 340px;
 }
 
 .session-select {
@@ -825,9 +851,21 @@ tbody tr.selected td {
 }
 
 .result-panel .session-select {
+  flex: 1 1 auto;
   width: 100%;
   min-width: 0;
   max-width: none;
+}
+
+.session-batch-button {
+  flex: 0 0 auto;
+  min-height: 32px;
+  white-space: nowrap;
+}
+
+.session-batch-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .waypoint-actions {
@@ -974,8 +1012,59 @@ tbody tr.selected td {
   gap: 8px;
 }
 
+.control-group + .control-group {
+  order: -1;
+}
+
 .control-group.hidden {
   display: none;
+}
+
+.motion-config {
+  display: none;
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+  padding-top: 10px;
+  gap: 8px;
+}
+
+.advanced-mode .motion-config {
+  display: grid;
+}
+
+.motion-config-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.motion-config-grid label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.motion-config-grid input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 0 7px;
+  color: var(--ink);
+  background: #fff;
+}
+
+.motion-config-grid input:focus {
+  outline: 2px solid rgba(0, 139, 134, 0.22);
+  border-color: var(--teal);
+}
+
+.field-hint {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .modal-overlay {
@@ -1028,6 +1117,241 @@ tbody tr.selected td {
   text-align: right;
 }
 
+.batch-session-card {
+  width: min(92vw, 620px);
+}
+
+.batch-modal-header,
+.batch-session-selection,
+.batch-session-footer,
+.batch-session-tools,
+.batch-session-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.batch-modal-header,
+.batch-session-selection,
+.batch-session-footer {
+  justify-content: space-between;
+}
+
+.batch-session-card h2 {
+  margin-bottom: 0;
+}
+
+.batch-session-selection {
+  margin-top: 16px;
+  border: 1px solid rgba(0, 139, 134, 0.22);
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: rgba(0, 139, 134, 0.1);
+}
+
+.batch-session-selection strong {
+  font-size: 13px;
+}
+
+.batch-session-selection p {
+  margin-top: 4px;
+}
+
+.batch-session-tools {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.batch-session-count {
+  color: var(--teal);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.batch-session-list,
+.batch-session-confirm-list {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: auto;
+}
+
+.batch-session-list {
+  max-height: min(44vh, 360px);
+}
+
+.batch-session-row {
+  min-height: 66px;
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+}
+
+.batch-session-row + .batch-session-row,
+.batch-session-confirm-row + .batch-session-confirm-row {
+  border-top: 1px solid var(--line);
+}
+
+.batch-session-row.selected {
+  background: rgba(0, 139, 134, 0.1);
+}
+
+.batch-session-row input {
+  width: 17px;
+  height: 17px;
+  margin: 0;
+  accent-color: var(--teal);
+}
+
+.batch-session-main {
+  min-width: 0;
+}
+
+.batch-session-name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.batch-session-name > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-session-status {
+  flex: 0 0 auto;
+  border-radius: 4px;
+  padding: 2px 5px;
+  font-size: 10px;
+}
+
+.batch-session-status.solved {
+  color: var(--green);
+  background: rgba(22, 134, 77, 0.1);
+}
+
+.batch-session-status.unsolved {
+  color: var(--amber);
+  background: rgba(185, 107, 15, 0.1);
+}
+
+.batch-session-status.invalid {
+  color: var(--red);
+  background: rgba(208, 68, 55, 0.09);
+}
+
+.batch-session-current {
+  flex: 0 0 auto;
+  border-radius: 4px;
+  padding: 2px 5px;
+  color: var(--teal);
+  background: rgba(0, 139, 134, 0.1);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.batch-session-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 10px;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.batch-session-inspect {
+  border: 0;
+  padding: 5px 0 5px 8px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.batch-session-inspect:hover {
+  color: var(--teal);
+}
+
+.batch-session-footer {
+  margin-top: 16px;
+  align-items: flex-end;
+}
+
+.batch-session-footer p {
+  max-width: 330px;
+  margin: 0;
+}
+
+.batch-session-footer.confirm {
+  margin-top: 16px;
+}
+
+.batch-session-footer .action.danger {
+  border-color: var(--red);
+  background: var(--red);
+}
+
+.batch-session-warning {
+  margin-top: 16px;
+  border: 1px solid rgba(208, 68, 55, 0.28);
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: rgba(208, 68, 55, 0.09);
+  color: #91362d;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.batch-session-confirm-list {
+  max-height: 220px;
+}
+
+.batch-session-confirm-row {
+  padding: 9px 11px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.batch-session-confirm-row strong {
+  font-size: 12px;
+}
+
+.batch-session-confirm-row code {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.batch-session-result {
+  margin-top: 14px;
+  border: 1px solid rgba(22, 134, 77, 0.28);
+  border-radius: 6px;
+  padding: 12px;
+  background: rgba(22, 134, 77, 0.08);
+  color: var(--green);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.batch-session-result.bad {
+  border-color: rgba(208, 68, 55, 0.28);
+  background: rgba(208, 68, 55, 0.09);
+  color: var(--red);
+}
+
+.batch-session-result ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
 @media (max-width: 1280px) {
   body {
     overflow: auto;
@@ -1053,5 +1377,89 @@ tbody tr.selected td {
 
   .image-stage {
     min-height: 360px;
+  }
+
+  .result-panel .session-actions {
+    width: 100%;
+    flex-basis: 100%;
+  }
+}
+
+@media (max-height: 860px) and (min-width: 1281px) {
+  .dashboard {
+    padding: 8px;
+    gap: 8px;
+  }
+
+  .panel-header {
+    min-height: 42px;
+    padding: 7px 10px;
+  }
+
+  .panel-header.compact {
+    min-height: 38px;
+  }
+
+  .current-panel .split-panel {
+    overflow: auto;
+    padding: 8px;
+    gap: 6px;
+  }
+
+  .current-panel .control-stack {
+    overflow: visible;
+    gap: 5px;
+  }
+
+  .current-panel .control-group {
+    gap: 5px;
+  }
+
+  .current-panel .action {
+    min-height: 32px;
+    padding: 5px 8px;
+  }
+
+  .current-panel .notice {
+    min-height: 36px;
+    padding: 6px 8px;
+  }
+}
+
+@media (max-width: 520px) {
+  .motion-config-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .result-panel .session-actions {
+    flex-basis: 100%;
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .batch-modal-header,
+  .batch-session-selection,
+  .batch-session-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .batch-session-tools,
+  .batch-session-footer-actions {
+    width: 100%;
+  }
+
+  .batch-session-footer-actions .action.danger {
+    flex: 1;
+  }
+
+  .batch-session-row {
+    grid-template-columns: 20px minmax(0, 1fr);
+  }
+
+  .batch-session-inspect {
+    grid-column: 2;
+    justify-self: start;
+    padding-left: 0;
   }
 }

@@ -20,7 +20,10 @@ const state = {
   imageWsConnected: false,
   liveImageObjectUrl: "",
   liveImagePendingUrl: "",
+  liveImageActiveUrl: "",
   liveImageLoading: false,
+  liveImageLoadGeneration: 0,
+  liveImageHttpController: null,
   liveImageFallbackTimer: null,
   liveImageWatchdogTimer: null,
   liveImageReconnectTimer: null,
@@ -29,10 +32,14 @@ const state = {
   liveImageLastFrameAt: 0,
   thumbObserver: null,
   refreshInFlight: null,
+  waypointsRefreshKey: "",
+  waypointsRefreshInFlight: null,
   fullRefreshTimer: null,
   eventReconnectTimer: null,
   eventReconnectDelay: 5000,
   eventDedupe: new Map(),
+  advancedMode: false,
+  batchSelectedSessionIds: new Set(),
 };
 
 const els = {
@@ -43,6 +50,11 @@ const els = {
   nodeChip: document.getElementById("node-chip"),
   extrinsicsChip: document.getElementById("extrinsics-chip"),
   motionChip: document.getElementById("motion-chip"),
+  moveVelInput: document.getElementById("move-vel-input"),
+  moveAccInput: document.getElementById("move-acc-input"),
+  globalSpeedInput: document.getElementById("global-speed-input"),
+  applyMotionConfigBtn: document.getElementById("apply-motion-config-btn"),
+  motionConfigStatus: document.getElementById("motion-config-status"),
   imageChip: document.getElementById("image-chip"),
   modeChip: document.getElementById("mode-chip"),
   observationModeToggle: document.getElementById("observation-mode-toggle"),
@@ -74,10 +86,30 @@ const els = {
   eventLog: document.getElementById("event-log"),
   eventMode: document.getElementById("event-mode"),
   deleteBtn: document.getElementById("delete-btn"),
+  renameSessionBtn: document.getElementById("rename-session-btn"),
+  deleteSessionBtn: document.getElementById("delete-session-btn"),
+  batchSessionBtn: document.getElementById("batch-session-btn"),
+  batchSessionModal: document.getElementById("batch-session-modal"),
+  batchSessionClose: document.getElementById("batch-session-close"),
+  batchSessionSelection: document.getElementById("batch-session-selection"),
+  batchSessionCount: document.getElementById("batch-session-count"),
+  batchSessionSelectAll: document.getElementById("batch-session-select-all"),
+  batchSessionClearAll: document.getElementById("batch-session-clear-all"),
+  batchSessionList: document.getElementById("batch-session-list"),
+  batchSessionResult: document.getElementById("batch-session-result"),
+  batchSessionFooter: document.getElementById("batch-session-footer"),
+  batchSessionCancel: document.getElementById("batch-session-cancel"),
+  batchSessionDelete: document.getElementById("batch-session-delete"),
+  batchSessionResultClose: document.getElementById("batch-session-result-close"),
+  batchSessionConfirmModal: document.getElementById("batch-session-confirm-modal"),
+  batchSessionConfirmList: document.getElementById("batch-session-confirm-list"),
+  batchSessionConfirmCancel: document.getElementById("batch-session-confirm-cancel"),
+  batchSessionConfirmDelete: document.getElementById("batch-session-confirm-delete"),
   newTrajectoryBtn: document.getElementById("new-trajectory-btn"),
   trajectoryControls: document.getElementById("trajectory-controls"),
   runControls: document.getElementById("run-controls"),
   loadSessionTrajectoryBtn: document.getElementById("load-session-trajectory-btn"),
+  advancedToggle: document.getElementById("advanced-toggle"),
 };
 
 const QUALITY_SCHEMAS = {
@@ -280,6 +312,33 @@ function setNotice(message, tone = "") {
   els.commandResult.className = `notice ${tone}`.trim();
 }
 
+function syncMotionControls(motion = {}) {
+  const values = {
+    moveVelInput: Number(motion.vel),
+    moveAccInput: Number(motion.acc),
+    globalSpeedInput: Number(motion.global_speed),
+  };
+  Object.entries(values).forEach(([key, value]) => {
+    const input = els[key];
+    if (!input || !Number.isFinite(value) || document.activeElement === input) return;
+    input.value = String(Math.round(value));
+  });
+  if (els.motionConfigStatus) {
+    const vel = Number.isFinite(values.moveVelInput) ? Math.round(values.moveVelInput) : "--";
+    const acc = Number.isFinite(values.moveAccInput) ? Math.round(values.moveAccInput) : "--";
+    const globalSpeed = Number.isFinite(values.globalSpeedInput) ? Math.round(values.globalSpeedInput) : "--";
+    els.motionConfigStatus.textContent = `当前运行参数 ${vel} / ${acc} / ${globalSpeed}`;
+  }
+}
+
+function setAdvancedMode(enabled) {
+  state.advancedMode = Boolean(enabled);
+  document.body.classList.toggle("advanced-mode", state.advancedMode);
+  if (els.advancedToggle) {
+    els.advancedToggle.checked = state.advancedMode;
+  }
+}
+
 function commandTone(result) {
   if (result?.success) return "good";
   if (result?.accepted || result?.queued) return "";
@@ -307,6 +366,26 @@ async function postJson(url, body = {}) {
   return response.json();
 }
 
+async function patchJson(url, body = {}) {
+  const response = await fetch(url, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  return response.json();
+}
+
+async function deleteJson(url, body = {}) {
+  const response = await fetch(url, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  return response.json();
+}
+
 function setLiveImageStatus(label, tone = "neutral") {
   if (els.imageChip) {
     setChip(els.imageChip, label, tone);
@@ -314,9 +393,19 @@ function setLiveImageStatus(label, tone = "neutral") {
 }
 
 function clearLiveImageObjectUrl() {
+  state.liveImageLoadGeneration += 1;
+  state.liveImageLoading = false;
+  if (state.liveImageHttpController) {
+    state.liveImageHttpController.abort();
+    state.liveImageHttpController = null;
+  }
   if (state.liveImageObjectUrl) {
     URL.revokeObjectURL(state.liveImageObjectUrl);
     state.liveImageObjectUrl = "";
+  }
+  if (state.liveImageActiveUrl) {
+    URL.revokeObjectURL(state.liveImageActiveUrl);
+    state.liveImageActiveUrl = "";
   }
   if (state.liveImagePendingUrl) {
     URL.revokeObjectURL(state.liveImagePendingUrl);
@@ -339,30 +428,92 @@ function markLiveImageFrameReceived() {
   hideLivePlaceholder();
 }
 
-function refreshLiveImageHttp(force = false) {
+async function refreshLiveImageHttp(force = false) {
   if (state.imageWsConnected && !force) return;
-  state.liveImageLoading = false;
-  els.liveImage.src = `/api/image/latest.jpg?mode=raw&axes=false&t=${Date.now()}`;
+  if (state.liveImageHttpController) return;
+  const controller = new AbortController();
+  state.liveImageHttpController = controller;
+  try {
+    const response = await fetch(`/api/image/latest.jpg?mode=raw&axes=false&t=${Date.now()}`, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    const blob = await response.blob();
+    if (state.imageWsConnected && !force) return;
+    displayLiveImageUrl(URL.createObjectURL(blob));
+  } catch (error) {
+    if (error?.name !== "AbortError") showLivePlaceholder("图像加载失败");
+  } finally {
+    if (state.liveImageHttpController === controller) {
+      state.liveImageHttpController = null;
+    }
+  }
 }
 
 function displayLiveImageUrl(nextUrl) {
-  if (state.liveImageLoading) {
-    if (state.liveImagePendingUrl) URL.revokeObjectURL(state.liveImagePendingUrl);
-    state.liveImagePendingUrl = nextUrl;
-    return;
-  }
-  const previousUrl = state.liveImageObjectUrl;
-  state.liveImageObjectUrl = nextUrl;
+  if (!nextUrl) return;
+  if (state.liveImagePendingUrl) URL.revokeObjectURL(state.liveImagePendingUrl);
+  state.liveImagePendingUrl = nextUrl;
+  if (state.liveImageLoading) return;
+
+  const generation = ++state.liveImageLoadGeneration;
+  const url = state.liveImagePendingUrl;
+  state.liveImagePendingUrl = "";
+  state.liveImageActiveUrl = url;
   state.liveImageLoading = true;
-  els.liveImage.src = nextUrl;
-  if (previousUrl) {
-    window.setTimeout(() => URL.revokeObjectURL(previousUrl), 0);
-  }
+  const stagingImage = new Image();
+  stagingImage.decoding = "async";
+  stagingImage.onload = () => {
+    if (generation !== state.liveImageLoadGeneration) {
+      if (state.liveImageActiveUrl === url) state.liveImageActiveUrl = "";
+      URL.revokeObjectURL(url);
+      state.liveImageLoading = false;
+      flushPendingLiveImage();
+      return;
+    }
+    const width = stagingImage.naturalWidth || stagingImage.width;
+    const height = stagingImage.naturalHeight || stagingImage.height;
+    const context = els.liveImage.getContext("2d", { alpha: false });
+    if (!context || width <= 0 || height <= 0) {
+      if (state.liveImageActiveUrl === url) state.liveImageActiveUrl = "";
+      URL.revokeObjectURL(url);
+      state.liveImageLoading = false;
+      showLivePlaceholder("图像显示初始化失败");
+      flushPendingLiveImage();
+      return;
+    }
+    // Canvas drawing is one main-thread commit. The browser cannot paint
+    // between the resize and draw calls, so a decoded frame is not shown
+    // partially over a previous frame.
+    if (els.liveImage.width !== width || els.liveImage.height !== height) {
+      els.liveImage.width = width;
+      els.liveImage.height = height;
+    }
+    context.drawImage(stagingImage, 0, 0, width, height);
+    if (state.liveImageActiveUrl === url) state.liveImageActiveUrl = "";
+    URL.revokeObjectURL(url);
+    state.liveImageLoading = false;
+    markLiveImageFrameReceived();
+    flushPendingLiveImage();
+  };
+  stagingImage.onerror = () => {
+    if (state.liveImageActiveUrl === url) state.liveImageActiveUrl = "";
+    URL.revokeObjectURL(url);
+    if (generation !== state.liveImageLoadGeneration) {
+      state.liveImageLoading = false;
+      return;
+    }
+    state.liveImageLoading = false;
+    showLivePlaceholder("图像加载失败");
+    flushPendingLiveImage();
+  };
+  stagingImage.src = url;
 }
 
 function flushPendingLiveImage() {
-  state.liveImageLoading = false;
   if (!state.liveImagePendingUrl) return;
+  if (state.liveImageLoading) return;
   const nextUrl = state.liveImagePendingUrl;
   state.liveImagePendingUrl = "";
   displayLiveImageUrl(nextUrl);
@@ -379,6 +530,10 @@ function stopLiveImageFallback() {
   if (state.liveImageFallbackTimer) {
     window.clearInterval(state.liveImageFallbackTimer);
     state.liveImageFallbackTimer = null;
+  }
+  if (state.liveImageHttpController) {
+    state.liveImageHttpController.abort();
+    state.liveImageHttpController = null;
   }
 }
 
@@ -449,7 +604,6 @@ function connectLiveImageStream() {
     const blob = new Blob([payload], { type: "image/jpeg" });
     const nextUrl = URL.createObjectURL(blob);
     displayLiveImageUrl(nextUrl);
-    markLiveImageFrameReceived();
   });
   socket.addEventListener("error", () => {
     // error is followed by close; handled there.
@@ -491,6 +645,25 @@ async function refreshStatus() {
   const dryRunBtn = document.getElementById("dry-run-btn");
   const stopBtn = document.getElementById("stop-btn");
   const runActive = Boolean(handeye.run_active);
+  document.querySelectorAll('[data-observation-mode]').forEach((button) => {
+    button.disabled = runActive;
+  });
+  const depthControl = camera.depth_control || {};
+  if (observationMode === "depth_aligned") {
+    setChip(
+      els.modeChip,
+      depthControl.active ? "Depth Align / 深度已启用" : "Depth Align / 开始时启用",
+      depthControl.active ? "good" : "neutral",
+    );
+  } else {
+    setChip(els.modeChip, "RGB PnP", "good");
+  }
+  updateSessionActionState();
+  syncMotionControls(motion);
+  const motionControlsDisabled = runActive || !handeye.calibration_node_connected;
+  [els.moveVelInput, els.moveAccInput, els.globalSpeedInput, els.applyMotionConfigBtn].forEach((input) => {
+    if (input) input.disabled = motionControlsDisabled;
+  });
   if (handeye.execute_motion) {
     runBtn.textContent = "开始标定（真机）";
     runBtn.title = "机械臂将真实运动！确认工作空间安全后操作。";
@@ -544,14 +717,17 @@ async function refreshStatus() {
   } else if (!handeye.run_active && state.autoSelectedSession) {
     state.autoSelectedSession = false;
   }
+  const currentStage = workflow.stage || "";
   const result = handeye.last_command_result;
-  if (result) {
+  const liveWorkflowStages = new Set(["movej", "wait_stable", "capture", "detect", "solve", "dry_run"]);
+  if (liveWorkflowStages.has(currentStage) && handeye.operator_message) {
+    setNotice(handeye.operator_message);
+  } else if (result) {
     setNotice(result.operator_message || result.message, commandTone(result));
   }
   if (motion.trajectory_path && (!state.selectedSession || state.selectedSession === session.session_id || state.currentTrajectorySelected)) {
     els.trajectoryPath.textContent = motion.trajectory_path;
   }
-  const currentStage = workflow.stage || "";
   if ((currentStage === "finished" || currentStage === "error") && !completionShown) {
     const sessionId = session.session_id || state.selectedSession;
     refreshReport().then(() => {
@@ -591,6 +767,10 @@ function renderQualityMetrics(quality = {}) {
 async function refreshSessions() {
   const sessions = await getJson("/api/sessions", []);
   state.sessions = sessions;
+  const sessionIds = new Set(sessions.map((session) => session.id));
+  state.batchSelectedSessionIds = new Set(
+    [...state.batchSelectedSessionIds].filter((sessionId) => sessionIds.has(sessionId))
+  );
   const selectedStillExists = sessions.some((session) => session.id === state.selectedSession);
   if (state.selectedSession && !selectedStillExists) {
     state.selectedSession = "";
@@ -611,11 +791,14 @@ async function refreshSessions() {
   const options = ['<option value="">\u5f53\u524d\u5c06\u8fd0\u884c\u7684\u8f68\u8ff9</option>'];
   options.push(...sessions.map((session) => {
     const suffix = session.has_solution ? "" : session.has_report ? " / unsolved" : " / no report";
-    const label = `\u5386\u53f2 session ${session.id} (${session.sample_count || 0})${suffix}`;
+    const displayName = session.display_name ? `${session.display_name} / ` : "";
+    const label = `\u5386\u53f2 session ${displayName}${session.id} (${session.sample_count || 0})${suffix}`;
     return `<option value="${escapeHtml(session.id)}">${escapeHtml(label)}</option>`;
   }));
   els.sessionSelect.innerHTML = options.join("");
   els.sessionSelect.value = state.selectedSession || "";
+  updateSessionActionState();
+  updateBatchSessionControls();
   updateLoadSessionTrajectoryButton();
 }
 async function refreshReport() {
@@ -699,6 +882,24 @@ function clearWaypointView(message = "正在加载 waypoints...") {
 async function refreshWaypoints() {
   const sessionId = state.selectedSession || "";
   const selectionVersion = state.selectionVersion;
+  const requestKey = `${selectionVersion}:${sessionId}`;
+  if (state.waypointsRefreshInFlight && state.waypointsRefreshKey === requestKey) {
+    return state.waypointsRefreshInFlight;
+  }
+  const request = refreshWaypointsImpl(sessionId, selectionVersion);
+  state.waypointsRefreshKey = requestKey;
+  state.waypointsRefreshInFlight = request;
+  try {
+    return await request;
+  } finally {
+    if (state.waypointsRefreshInFlight === request) {
+      state.waypointsRefreshInFlight = null;
+      state.waypointsRefreshKey = "";
+    }
+  }
+}
+
+async function refreshWaypointsImpl(sessionId, selectionVersion) {
   let waypoints = [];
   let trajectoryLoadError = "";
   if (sessionId) {
@@ -897,6 +1098,212 @@ function updateDeleteButtonState() {
   els.deleteBtn.title = state.selectedSession ? "\u5386\u53f2 session \u4e0d\u5141\u8bb8\u5220\u9664 waypoint" : (canDelete ? `\u5220\u9664 ${selected.name}` : "\u5148\u5728\u5f53\u524d\u8f68\u8ff9\u5217\u8868\u4e2d\u9009\u62e9 waypoint");
 }
 
+function updateSessionActionState() {
+  const selected = state.sessions.find((session) => session.id === state.selectedSession);
+  const runActive = Boolean(state.status?.handeye?.run_active);
+  const canManage = Boolean(selected && !runActive);
+  const displayName = selected?.display_name || selected?.id || "";
+  if (els.renameSessionBtn) {
+    els.renameSessionBtn.disabled = !canManage;
+    els.renameSessionBtn.title = canManage
+      ? `重命名 ${displayName}`
+      : runActive
+        ? "标定运行中，暂时不能修改 session"
+        : "请先选择历史 session";
+  }
+  if (els.deleteSessionBtn) {
+    els.deleteSessionBtn.disabled = !canManage;
+    els.deleteSessionBtn.title = canManage
+      ? `永久删除 ${displayName}`
+      : runActive
+        ? "标定运行中，暂时不能删除 session"
+        : "请先选择历史 session";
+  }
+  if (els.batchSessionBtn) {
+    const canBatchManage = Boolean(state.sessions.length && !runActive);
+    els.batchSessionBtn.disabled = !canBatchManage;
+    els.batchSessionBtn.title = canBatchManage
+      ? "批量管理历史 session"
+      : runActive
+        ? "标定运行中，暂时不能删除 session"
+        : "当前没有历史 session";
+  }
+}
+
+function batchSessionStatus(session) {
+  if (session.is_invalid) return { className: "invalid", label: "无效" };
+  if (session.has_solution) return { className: "solved", label: "已求解" };
+  if (session.has_report) return { className: "unsolved", label: "未求解" };
+  return { className: "unsolved", label: "无报告" };
+}
+
+function renderBatchSessionList() {
+  if (!els.batchSessionList) return;
+  if (!state.sessions.length) {
+    els.batchSessionList.innerHTML = '<div class="empty-card">当前没有可管理的历史 session。</div>';
+    return;
+  }
+  els.batchSessionList.innerHTML = state.sessions.map((session) => {
+    const status = batchSessionStatus(session);
+    const checked = state.batchSelectedSessionIds.has(session.id);
+    const current = session.id === state.selectedSession ? '<span class="batch-session-current">当前</span>' : "";
+    const displayName = session.display_name || session.id;
+    return `
+      <div class="batch-session-row${checked ? " selected" : ""}">
+        <input
+          class="batch-session-checkbox"
+          type="checkbox"
+          data-session-id="${escapeHtml(session.id)}"
+          ${checked ? "checked" : ""}
+          aria-label="选择 ${escapeHtml(displayName)}"
+        />
+        <div class="batch-session-main">
+          <div class="batch-session-name">
+            <span>${escapeHtml(displayName)}</span>
+            <span class="batch-session-status ${status.className}">${status.label}</span>
+            ${current}
+          </div>
+          <div class="batch-session-meta">
+            <span>${escapeHtml(session.id)}</span>
+            <span>${session.sample_count || 0} samples</span>
+            <span>${session.accepted_count || 0} accepted</span>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join("");
+  els.batchSessionList.querySelectorAll(".batch-session-checkbox").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const sessionId = checkbox.dataset.sessionId || "";
+      if (checkbox.checked) {
+        state.batchSelectedSessionIds.add(sessionId);
+      } else {
+        state.batchSelectedSessionIds.delete(sessionId);
+      }
+      checkbox.closest(".batch-session-row")?.classList.toggle("selected", checkbox.checked);
+      updateBatchSessionControls();
+    });
+  });
+}
+
+function updateBatchSessionControls() {
+  if (!els.batchSessionCount || !els.batchSessionDelete) return;
+  const count = state.batchSelectedSessionIds.size;
+  els.batchSessionCount.textContent = `已选 ${count} 个`;
+  els.batchSessionDelete.textContent = `永久删除 ${count} 个`;
+  els.batchSessionDelete.disabled = count === 0;
+  if (els.batchSessionSelectAll) els.batchSessionSelectAll.disabled = !state.sessions.length;
+  if (els.batchSessionClearAll) els.batchSessionClearAll.disabled = count === 0;
+}
+
+function resetBatchSessionModal() {
+  state.batchSelectedSessionIds.clear();
+  els.batchSessionSelection?.classList.remove("hidden");
+  els.batchSessionList?.classList.remove("hidden");
+  els.batchSessionFooter?.classList.remove("hidden");
+  els.batchSessionResult?.classList.add("hidden");
+  els.batchSessionResultClose?.classList.add("hidden");
+  if (els.batchSessionResult) els.batchSessionResult.innerHTML = "";
+  renderBatchSessionList();
+  updateBatchSessionControls();
+}
+
+function openBatchSessionModal() {
+  if (state.status?.handeye?.run_active) {
+    setNotice("标定运行中，暂时不能批量删除 session。", "bad");
+    return;
+  }
+  resetBatchSessionModal();
+  els.batchSessionModal?.classList.remove("hidden");
+}
+
+function closeBatchSessionModal() {
+  els.batchSessionModal?.classList.add("hidden");
+  resetBatchSessionModal();
+}
+
+function openBatchSessionConfirm() {
+  const selectedSessions = state.sessions.filter((session) => state.batchSelectedSessionIds.has(session.id));
+  if (!selectedSessions.length) {
+    setNotice("请先选择要删除的历史 session。", "bad");
+    return;
+  }
+  els.batchSessionConfirmList.innerHTML = selectedSessions.map((session) => {
+    const displayName = session.display_name || session.id;
+    return `<div class="batch-session-confirm-row"><strong>${escapeHtml(displayName)}</strong><code>${escapeHtml(session.id)}</code></div>`;
+  }).join("");
+  els.batchSessionModal?.classList.add("hidden");
+  els.batchSessionConfirmModal?.classList.remove("hidden");
+}
+
+function closeBatchSessionConfirm(returnToSelection = true) {
+  els.batchSessionConfirmModal?.classList.add("hidden");
+  if (returnToSelection) els.batchSessionModal?.classList.remove("hidden");
+}
+
+function renderBatchSessionResult(result, requestedSessions) {
+  const deletedIds = new Set(result.deleted_session_ids || []);
+  const failed = Array.isArray(result.failed) ? result.failed : [];
+  const deletedCount = Number(result.deleted_count || deletedIds.size);
+  const failedCount = Number(result.failed_count || failed.length);
+  const deletedNames = requestedSessions
+    .filter((session) => deletedIds.has(session.id))
+    .map((session) => session.display_name || session.id);
+  const failedRows = failed.map((item) => {
+    const session = requestedSessions.find((candidate) => candidate.id === item.session_id);
+    const name = session?.display_name || item.session_id;
+    return `<li>${escapeHtml(name)}：${escapeHtml(item.message || "删除失败")}</li>`;
+  }).join("");
+  const deletedText = deletedNames.length
+    ? `已删除：${deletedNames.map((name) => escapeHtml(name)).join("、")}`
+    : "没有 session 被删除。";
+  const tone = failedCount || (!deletedCount && !failedCount) ? " bad" : "";
+  els.batchSessionResult.className = `batch-session-result${tone}`;
+  els.batchSessionResult.innerHTML = [
+    `<strong>${escapeHtml(result.operator_message || result.message || "批量删除完成。")}</strong>`,
+    `<div>${deletedText}</div>`,
+    failedRows ? `<ul>${failedRows}</ul>` : "",
+  ].join("");
+  els.batchSessionSelection?.classList.add("hidden");
+  els.batchSessionList?.classList.add("hidden");
+  els.batchSessionFooter?.classList.add("hidden");
+  els.batchSessionResult?.classList.remove("hidden");
+  els.batchSessionResultClose?.classList.remove("hidden");
+}
+
+async function deleteSelectedSessions() {
+  const sessionIds = [...state.batchSelectedSessionIds];
+  const requestedSessions = state.sessions.filter((session) => sessionIds.includes(session.id));
+  if (!sessionIds.length || !requestedSessions.length) {
+    setNotice("请先选择要删除的历史 session。", "bad");
+    return;
+  }
+  try {
+    setNotice("正在删除选中的 session...");
+    const result = await deleteJson("/api/sessions", {
+      session_ids: sessionIds,
+      confirmed: true,
+    });
+    const deletedIds = new Set(result.deleted_session_ids || []);
+    if (deletedIds.has(state.selectedSession)) {
+      state.selectedSession = "";
+      state.userSelectedSession = false;
+      state.currentTrajectorySelected = false;
+      state.autoSelectedSession = false;
+      state.selectedWaypointName = "";
+      state.selectedSampleRow = null;
+      state.selectionVersion += 1;
+    }
+    state.batchSelectedSessionIds.clear();
+    setNotice(result.operator_message || result.message || "批量删除完成。", commandTone(result));
+    await refreshAll();
+    renderBatchSessionResult(result, requestedSessions);
+    els.batchSessionModal?.classList.remove("hidden");
+  } catch (error) {
+    setNotice(`批量删除 session 失败: ${error.message}`, "bad");
+  }
+}
+
 function updateLoadSessionTrajectoryButton() {
   if (!els.loadSessionTrajectoryBtn) return;
   const sessionId = state.selectedSession || "";
@@ -1041,8 +1448,7 @@ async function refreshAll() {
   state.refreshInFlight = (async () => {
     await refreshStatus();
     await refreshSessions();
-    await refreshReport();
-    await refreshWaypoints();
+    await Promise.all([refreshReport(), refreshWaypoints()]);
   })();
   try {
     await state.refreshInFlight;
@@ -1090,6 +1496,28 @@ async function runCommand(label, url, body = {}) {
   }
 }
 
+let runRequestInFlight = false;
+
+async function applyMotionConfig() {
+  const values = {
+    move_vel: Number(els.moveVelInput?.value),
+    move_acc: Number(els.moveAccInput?.value),
+    global_speed: Number(els.globalSpeedInput?.value),
+  };
+  if (Object.values(values).some((value) => !Number.isFinite(value) || value < 1 || value > 100)) {
+    setNotice("速度、加速度和全局倍率都必须在 1 到 100 之间。", "bad");
+    return;
+  }
+  const result = await runCommand("应用运动参数", "/api/handeye/motion-config", values);
+  if (result?.success) {
+    syncMotionControls({
+      vel: values.move_vel,
+      acc: values.move_acc,
+      global_speed: values.global_speed,
+    });
+  }
+}
+
 async function deleteSelectedWaypoint() {
   const selected = state.waypoints.find((item) => item.name === state.selectedWaypointName);
   if (state.selectedSession) {
@@ -1101,6 +1529,67 @@ async function deleteSelectedWaypoint() {
     return;
   }
   await runCommand("删除选中", "/api/handeye/delete_waypoint", { waypoint_name: selected.name });
+}
+
+async function renameSelectedSession() {
+  const sessionId = state.selectedSession || "";
+  const selected = state.sessions.find((session) => session.id === sessionId);
+  if (!selected) {
+    setNotice("请先选择历史 session。", "bad");
+    return;
+  }
+  const currentName = selected.display_name || selected.id;
+  const nextName = window.prompt("请输入 session 名称：", currentName);
+  if (nextName === null) return;
+  if (!nextName.trim()) {
+    setNotice("session 名称不能为空。", "bad");
+    return;
+  }
+  try {
+    setNotice("正在更新 session 名称...");
+    const result = await patchJson(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+      display_name: nextName,
+    });
+    setNotice(result.operator_message || result.message || "session 名称已更新。", commandTone(result));
+    await refreshAll();
+  } catch (error) {
+    setNotice(`重命名 session 失败: ${error.message}`, "bad");
+  }
+}
+
+async function deleteSelectedSession() {
+  const sessionId = state.selectedSession || "";
+  const selected = state.sessions.find((session) => session.id === sessionId);
+  if (!selected) {
+    setNotice("请先选择历史 session。", "bad");
+    return;
+  }
+  const displayName = selected.display_name || selected.id;
+  const confirmed = window.confirm(
+    [
+      `确定永久删除 session「${displayName}」吗？`,
+      `session ID：${sessionId}`,
+      "该操作会删除报告、图片、日志和轨迹，且无法恢复。",
+    ].join("\n")
+  );
+  if (!confirmed) return;
+  try {
+    setNotice("正在删除 session...");
+    const result = await deleteJson(`/api/sessions/${encodeURIComponent(sessionId)}`, { confirmed: true });
+    if (result.success) {
+      state.selectedSession = "";
+      state.userSelectedSession = false;
+      state.currentTrajectorySelected = false;
+      state.autoSelectedSession = false;
+      state.selectedWaypointName = "";
+      state.selectedSampleRow = null;
+      state.selectionVersion += 1;
+    }
+    setNotice(result.operator_message || result.message || "session 已永久删除。", commandTone(result));
+    await refreshAll();
+  } catch (error) {
+    setNotice(`删除 session 失败: ${error.message}`, "bad");
+  }
 }
 
 async function saveTrajectoryIfDirty() {
@@ -1214,8 +1703,10 @@ async function pollEvents() {
       scheduleFullRefresh("terminal-poll-event");
     } else {
       refreshStatus();
-      refreshWaypoints();
-      refreshReport();
+      if (!state.userSelectedSession) {
+        refreshWaypoints();
+        refreshReport();
+      }
     }
   }
 }
@@ -1248,8 +1739,10 @@ function connectEvents() {
           scheduleFullRefresh("terminal-ws-event");
         } else {
           refreshStatus();
-          refreshWaypoints();
-          refreshReport();
+          if (!state.userSelectedSession) {
+            refreshWaypoints();
+            refreshReport();
+          }
         }
       }
     } catch (parseError) {
@@ -1267,20 +1760,18 @@ function connectEvents() {
 }
 
 function bindUi() {
-  els.liveImage.addEventListener("load", () => {
-    hideLivePlaceholder();
-    flushPendingLiveImage();
-  });
-  els.liveImage.addEventListener("error", () => {
-    state.liveImageLoading = false;
-    showLivePlaceholder(state.imageWsConnected ? "图像加载失败" : "等待相机图像");
-    flushPendingLiveImage();
+  els.advancedToggle?.addEventListener("change", () => {
+    setAdvancedMode(els.advancedToggle.checked);
   });
   document.querySelectorAll('[data-observation-mode]').forEach((button) => {
     button.addEventListener('click', async () => {
       const mode = button.dataset.observationMode;
       if (!mode || mode === state.observationMode) return;
-      setNotice(`正在切换观测模式到 ${mode}...`);
+      setNotice(
+        mode === "depth_aligned"
+          ? "正在选择 Depth Align；深度采集会在开始标定时启动..."
+          : "正在切换到 RGB PnP，并停止深度采集...",
+      );
       const result = await runCommand('切换观测模式', '/api/handeye/observation-mode', { mode });
       if (result?.success) {
         state.observationMode = result.observation_mode || result.mode || mode;
@@ -1300,8 +1791,34 @@ function bindUi() {
   });
   document.getElementById("record-btn").addEventListener("click", () => runCommand("记录当前点", "/api/handeye/record_waypoint"));
   els.deleteBtn.addEventListener("click", deleteSelectedWaypoint);
+  els.renameSessionBtn?.addEventListener("click", renameSelectedSession);
+  els.deleteSessionBtn?.addEventListener("click", deleteSelectedSession);
+  els.batchSessionBtn?.addEventListener("click", openBatchSessionModal);
+  els.batchSessionClose?.addEventListener("click", closeBatchSessionModal);
+  els.batchSessionCancel?.addEventListener("click", closeBatchSessionModal);
+  els.batchSessionSelectAll?.addEventListener("click", () => {
+    state.batchSelectedSessionIds = new Set(state.sessions.map((session) => session.id));
+    renderBatchSessionList();
+    updateBatchSessionControls();
+  });
+  els.batchSessionClearAll?.addEventListener("click", () => {
+    state.batchSelectedSessionIds.clear();
+    renderBatchSessionList();
+    updateBatchSessionControls();
+  });
+  els.batchSessionDelete?.addEventListener("click", openBatchSessionConfirm);
+  els.batchSessionResultClose?.addEventListener("click", closeBatchSessionModal);
+  els.batchSessionConfirmCancel?.addEventListener("click", () => closeBatchSessionConfirm(true));
+  els.batchSessionConfirmDelete?.addEventListener("click", deleteSelectedSessions);
+  els.batchSessionModal?.addEventListener("click", (event) => {
+    if (event.target === els.batchSessionModal) closeBatchSessionModal();
+  });
+  els.batchSessionConfirmModal?.addEventListener("click", (event) => {
+    if (event.target === els.batchSessionConfirmModal) closeBatchSessionConfirm(true);
+  });
   els.newTrajectoryBtn?.addEventListener("click", newTrajectory);
   els.loadSessionTrajectoryBtn?.addEventListener("click", loadSelectedSessionTrajectory);
+  els.applyMotionConfigBtn?.addEventListener("click", applyMotionConfig);
   updateDeleteButtonState();
   updateLoadSessionTrajectoryButton();
   document.getElementById("save-trajectory-btn").addEventListener("click", () => runCommand("保存轨迹", "/api/handeye/save_trajectory"));
@@ -1319,32 +1836,41 @@ function bindUi() {
     await runCommand("Dry-run", "/api/handeye/run", { confirmed: false });
   });
   document.getElementById("run-btn").addEventListener("click", async () => {
-    const handeye = state.status?.handeye || {};
-    const motion = handeye.motion || {};
-    if (handeye.requires_motion_confirmation) {
-      const modeWarning = handeye.execute_motion
-        ? "⚠ 真机模式：将真实驱动机械臂执行标定！请确认工作空间安全。"
-        : "当前为 dry-run 模式，机械臂不会运动。";
-      const message = [
-        modeWarning,
-        `waypoint 数量：${motion.waypoint_count ?? "--"}`,
-        `运动模式：${motion.motion || "movej"}`,
-        `速度/加速度：${motion.vel ?? "--"} / ${motion.acc ?? "--"}`,
-        `轨迹文件：${motion.trajectory_path || handeye.trajectory_path || "--"}`,
-        "",
-        handeye.execute_motion ? "输入 'YES' 确认开始真机标定：" : "确认标定板、线缆和工作空间安全后继续。",
-      ].join("\n");
-      if (handeye.execute_motion) {
-        if (window.prompt(message) !== "YES") {
-          setNotice("真机标定已取消。", "warn");
-          return;
+    if (runRequestInFlight) return;
+    runRequestInFlight = true;
+    document.getElementById("run-btn").disabled = true;
+    try {
+      const handeye = state.status?.handeye || {};
+      const motion = handeye.motion || {};
+      if (handeye.requires_motion_confirmation) {
+        const modeWarning = handeye.execute_motion
+          ? "⚠ 真机模式：将真实驱动机械臂执行标定！请确认工作空间安全。"
+          : "当前为 dry-run 模式，机械臂不会运动。";
+        const message = [
+          modeWarning,
+          `waypoint 数量：${motion.waypoint_count ?? "--"}`,
+          `运动模式：${motion.motion || "movej"}`,
+          `速度/加速度/全局倍率：${motion.vel ?? "--"} / ${motion.acc ?? "--"} / ${motion.global_speed ?? "--"}`,
+          `到位方式：blocking MoveJ (blendT=${motion.blend_time_ms ?? -1})`,
+          `轨迹文件：${motion.trajectory_path || handeye.trajectory_path || "--"}`,
+          "",
+          handeye.execute_motion ? "输入 'YES' 确认开始真机标定：" : "确认标定板、线缆和工作空间安全后继续。",
+        ].join("\n");
+        if (handeye.execute_motion) {
+          if (window.prompt(message) !== "YES") {
+            setNotice("真机标定已取消。", "warn");
+            return;
+          }
+        } else {
+          if (!window.confirm(message)) return;
         }
-      } else {
-        if (!window.confirm(message)) return;
       }
+      if (!await saveTrajectoryIfDirty()) return;
+      await runCommand("开始标定", "/api/handeye/run", { confirmed: Boolean(handeye.requires_motion_confirmation) });
+    } finally {
+      runRequestInFlight = false;
+      document.getElementById("run-btn").disabled = false;
     }
-    if (!await saveTrajectoryIfDirty()) return;
-    await runCommand("开始标定", "/api/handeye/run", { confirmed: Boolean(handeye.requires_motion_confirmation) });
   });
   document.getElementById("stop-btn").addEventListener("click", () => runCommand("停止", "/api/handeye/stop"));
   document.getElementById("refresh-btn").addEventListener("click", refreshAll);
@@ -1358,6 +1884,7 @@ function bindUi() {
     state.selectedSampleRow = null;
     state.selectionVersion += 1;
     clearWaypointView(selectedSession ? "正在加载历史 session waypoints..." : "正在加载当前轨迹 waypoints...");
+    updateSessionActionState();
     updateDeleteButtonState();
     updateLoadSessionTrajectoryButton();
     refreshReport();
@@ -1377,6 +1904,7 @@ function bindUi() {
 }
 
 bindUi();
+setAdvancedMode(false);
 initPreviewErrorHandler();
 renderTableHeader();
 showLivePlaceholder("等待相机图像");

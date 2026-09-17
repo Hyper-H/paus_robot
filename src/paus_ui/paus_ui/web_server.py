@@ -4,13 +4,13 @@ import asyncio
 import time
 from pathlib import Path
 import threading
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from .ros_bridge import UiRosBridge
 
 
-def _parse_confirmed_flag(body: dict[str, Any] | None) -> bool:
+def _parse_confirmed_flag(body: Optional[dict[str, Any]]) -> bool:
     if body is None:
         return False
     if not isinstance(body, dict):
@@ -119,12 +119,26 @@ def create_app(bridge: "UiRosBridge"):
         return await asyncio.to_thread(bridge.get_latest_quality)
 
     @app.post("/api/handeye/observation-mode")
-    async def observation_mode(body: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+    async def observation_mode(body: Optional[dict[str, Any]] = Body(default=None)) -> dict[str, Any]:
         payload = body or {}
         mode = payload.get("mode", payload.get("observation_mode", ""))
         if not isinstance(mode, str) or not mode.strip():
             raise HTTPException(status_code=422, detail="mode must be provided.")
         return await asyncio.to_thread(bridge.set_observation_mode, mode.strip())
+
+    @app.post("/api/handeye/motion-config")
+    async def motion_config(body: Optional[dict[str, Any]] = Body(default=None)) -> dict[str, Any]:
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=422, detail="move_vel, move_acc, and global_speed are required.")
+        required = ("move_vel", "move_acc", "global_speed")
+        if any(name not in body for name in required):
+            raise HTTPException(status_code=422, detail="move_vel, move_acc, and global_speed are required.")
+        return await asyncio.to_thread(
+            bridge.set_motion_config,
+            move_vel=body["move_vel"],
+            move_acc=body["move_acc"],
+            global_speed=body["global_speed"],
+        )
 
     @app.get("/api/handeye/waypoints")
     async def waypoints() -> dict[str, Any]:
@@ -139,7 +153,7 @@ def create_app(bridge: "UiRosBridge"):
         return await asyncio.to_thread(bridge.delete_last_waypoint)
 
     @app.post("/api/handeye/delete_waypoint")
-    async def delete_waypoint(body: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+    async def delete_waypoint(body: Optional[dict[str, Any]] = Body(default=None)) -> dict[str, Any]:
         if not isinstance(body, dict):
             raise HTTPException(status_code=422, detail="waypoint_name must be provided in a JSON object.")
         waypoint_name = str(body.get("waypoint_name", "")).strip()
@@ -156,7 +170,7 @@ def create_app(bridge: "UiRosBridge"):
         return await asyncio.to_thread(bridge.new_trajectory)
 
     @app.post("/api/handeye/run")
-    async def run_handeye(body: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+    async def run_handeye(body: Optional[dict[str, Any]] = Body(default=None)) -> dict[str, Any]:
         try:
             confirmed = _parse_confirmed_flag(body)
         except ValueError as exc:
@@ -174,6 +188,56 @@ def create_app(bridge: "UiRosBridge"):
     @app.get("/api/sessions/latest")
     async def latest_session() -> dict[str, Any]:
         return await asyncio.to_thread(bridge.latest_session)
+
+    @app.delete("/api/sessions")
+    async def delete_sessions(body: Optional[dict[str, Any]] = Body(default=None)) -> dict[str, Any]:
+        try:
+            confirmed = _parse_confirmed_flag(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if not confirmed:
+            raise HTTPException(status_code=409, detail="Permanent session deletion requires confirmation.")
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=422, detail="session_ids must be provided in a JSON object.")
+        session_ids = body.get("session_ids")
+        if not isinstance(session_ids, list) or not session_ids or any(not isinstance(item, str) for item in session_ids):
+            raise HTTPException(status_code=422, detail="session_ids must be a non-empty JSON list of strings.")
+        try:
+            result = await asyncio.to_thread(bridge.delete_sessions, session_ids)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if result.get("run_active"):
+            raise HTTPException(status_code=409, detail=result.get("operator_message") or result.get("message"))
+        return result
+
+    @app.patch("/api/sessions/{session_id}")
+    async def rename_session(session_id: str, body: Optional[dict[str, Any]] = Body(default=None)) -> dict[str, Any]:
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=422, detail="display_name must be provided in a JSON object.")
+        display_name = body.get("display_name")
+        if not isinstance(display_name, str):
+            raise HTTPException(status_code=422, detail="display_name must be a string.")
+        result = await asyncio.to_thread(bridge.rename_session, session_id, display_name)
+        if not result.get("success"):
+            message = str(result.get("message", "Failed to rename session."))
+            status_code = 404 if "does not exist" in message.lower() else 422
+            raise HTTPException(status_code=status_code, detail=message)
+        return result
+
+    @app.delete("/api/sessions/{session_id}")
+    async def delete_session(session_id: str, body: Optional[dict[str, Any]] = Body(default=None)) -> dict[str, Any]:
+        try:
+            confirmed = _parse_confirmed_flag(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if not confirmed:
+            raise HTTPException(status_code=409, detail="Permanent session deletion requires confirmation.")
+        result = await asyncio.to_thread(bridge.delete_session, session_id)
+        if not result.get("success"):
+            message = str(result.get("message", "Failed to delete session."))
+            status_code = 404 if "does not exist" in message.lower() else 422
+            raise HTTPException(status_code=status_code, detail=message)
+        return result
 
     @app.get("/api/sessions/{session_id}/report")
     async def session_report(session_id: str) -> dict[str, Any]:
@@ -242,7 +306,7 @@ def create_app(bridge: "UiRosBridge"):
     return app
 
 
-def main(args: list[str] | None = None) -> None:
+def main(args: Optional[list[str]] = None) -> None:
     import rclpy
     from rclpy.executors import MultiThreadedExecutor
 

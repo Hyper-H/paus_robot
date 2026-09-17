@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from paus_ui.session_store import SessionStore
@@ -112,6 +113,25 @@ def test_session_store_reads_report_samples_and_waypoint_events(tmp_path: Path) 
     assert waypoints[0]["board_angle_deg"] == 0.0
     assert waypoints[1]["status"] == "skipped"
     assert "not detected" in waypoints[1]["reason"]
+
+
+def test_session_store_deletes_multiple_sessions_and_reports_missing_entries(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
+    trajectory_path.write_text("waypoints: []\n", encoding="utf-8")
+    session_root = tmp_path / "calibration_sessions"
+    existing = session_root / "2026-09-04_202230"
+    existing.mkdir(parents=True)
+    (existing / "report.yaml").write_text("{}\n", encoding="utf-8")
+
+    store = SessionStore(session_root_path=session_root, trajectory_path=trajectory_path)
+
+    result = store.delete_sessions(["2026-09-04_202230", "missing-session"])
+
+    assert result["deleted_session_ids"] == ["2026-09-04_202230"]
+    assert result["deleted_count"] == 1
+    assert result["failed_count"] == 1
+    assert result["failed"][0]["session_id"] == "missing-session"
+    assert not existing.exists()
 
 
 def test_session_store_accepts_legacy_sample_captured_events(tmp_path: Path) -> None:
@@ -887,3 +907,39 @@ def test_session_store_expands_legacy_archive_wrappers(tmp_path: Path) -> None:
     assert sessions[0]["path"] == str(session_path)
     waypoints = store.read_session_waypoints("2026-05-21_160620")
     assert [waypoint["name"] for waypoint in waypoints] == ["waypoint_001"]
+
+
+def test_session_store_renames_and_deletes_session(tmp_path: Path) -> None:
+    trajectory_path = tmp_path / "eye_to_hand_trajectory.yaml"
+    trajectory_path.write_text(
+        yaml.safe_dump({"version": 1, "tool_id": 0, "user_id": 0, "waypoints": []}),
+        encoding="utf-8",
+    )
+    session_root = tmp_path / "calibration_sessions"
+    session_path = session_root / "2026-09-04_202230"
+    session_path.mkdir(parents=True)
+    (session_path / "report.yaml").write_text(yaml.safe_dump({"sample_count": 0}), encoding="utf-8")
+    (session_path / "samples.jsonl").write_text("", encoding="utf-8")
+
+    store = SessionStore(session_root_path=session_root, trajectory_path=trajectory_path)
+
+    assert store.list_sessions()[0]["display_name"] is None
+
+    renamed = store.rename_session("2026-09-04_202230", "法兰盘标定测试")
+
+    assert renamed == {"session_id": "2026-09-04_202230", "display_name": "法兰盘标定测试"}
+    assert store.list_sessions()[0]["display_name"] == "法兰盘标定测试"
+    assert store.read_report("2026-09-04_202230")["display_name"] == "法兰盘标定测试"
+    assert yaml.safe_load((session_path / "metadata.yaml").read_text(encoding="utf-8")) == {
+        "display_name": "法兰盘标定测试"
+    }
+
+    with pytest.raises(ValueError, match="cannot contain path separators"):
+        store.rename_session("2026-09-04_202230", "../outside")
+
+    deleted = store.delete_session("2026-09-04_202230")
+
+    assert deleted == {"session_id": "2026-09-04_202230", "deleted": True}
+    assert not session_path.exists()
+    with pytest.raises(FileNotFoundError):
+        store.read_report("2026-09-04_202230")
