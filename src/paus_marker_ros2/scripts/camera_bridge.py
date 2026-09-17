@@ -6,7 +6,9 @@ import json
 import signal
 import socket
 import sys
+import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -24,11 +26,142 @@ from paus_perception import (  # noqa: E402
     encode_bgr_frame_to_jpeg,
     open_camera_runtime,
     pack_frame_packet,
+    read_stream_transport_diagnostics,
     read_runtime_calibration,
     save_camera_calibration,
 )
 
 _SHUTDOWN_REQUESTED = False
+
+
+class _DepthReconfigureRequested(Exception):
+    """Exit the current SDK session so it can be reopened with new streams."""
+
+
+@dataclass
+class _DepthControl:
+    requested_enabled: bool
+
+    def __post_init__(self) -> None:
+        self.condition = threading.Condition()
+        self.active_enabled = False
+        self.depth_sequence = 0
+        self.last_error: str | None = None
+
+    def requested(self) -> bool:
+        with self.condition:
+            return bool(self.requested_enabled)
+
+    def mark_runtime(self, enabled: bool) -> None:
+        with self.condition:
+            self.active_enabled = bool(enabled)
+            self.condition.notify_all()
+
+    def mark_depth_frame(self) -> None:
+        with self.condition:
+            self.depth_sequence += 1
+            self.condition.notify_all()
+
+    def fail(self, message: str) -> None:
+        with self.condition:
+            self.last_error = str(message)
+            self.requested_enabled = False
+            self.active_enabled = False
+            self.condition.notify_all()
+
+    def status(self) -> dict[str, object]:
+        with self.condition:
+            return {
+                "requested": bool(self.requested_enabled),
+                "active": bool(self.active_enabled),
+                "depth_sequence": int(self.depth_sequence),
+                "last_error": self.last_error,
+            }
+
+    def request(self, enabled: bool, timeout_s: float) -> dict[str, object]:
+        enabled = bool(enabled)
+        timeout_s = max(0.1, float(timeout_s))
+        deadline = time.monotonic() + timeout_s
+        with self.condition:
+            previous_depth_sequence = self.depth_sequence
+            self.requested_enabled = enabled
+            self.last_error = None
+            self.condition.notify_all()
+            while True:
+                if self.last_error is not None:
+                    return {
+                        "success": False,
+                        "enabled": enabled,
+                        "active": bool(self.active_enabled),
+                        "message": self.last_error,
+                        **self.status(),
+                    }
+                active = bool(self.active_enabled)
+                fresh_depth = self.depth_sequence > previous_depth_sequence
+                if active == enabled and (not enabled or fresh_depth):
+                    return {
+                        "success": True,
+                        "enabled": enabled,
+                        "active": active,
+                        "message": "Depth capture enabled." if enabled else "Depth capture disabled.",
+                        **self.status(),
+                    }
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return {
+                        "success": False,
+                        "enabled": enabled,
+                        "active": active,
+                        "message": (
+                            "Timed out waiting for a fresh depth frame."
+                            if enabled
+                            else "Timed out waiting for depth capture to stop."
+                        ),
+                        **self.status(),
+                    }
+                self.condition.wait(timeout=remaining)
+
+
+def _serve_depth_control(control: _DepthControl, host: str, port: int) -> None:
+    try:
+        with socket.create_server((host, int(port)), reuse_port=False) as server:
+            server.settimeout(0.5)
+            _log_event(
+                {
+                    "event": "camera_depth_control_ready",
+                    "host": host,
+                    "port": int(port),
+                }
+            )
+            while not _SHUTDOWN_REQUESTED:
+                try:
+                    connection, _address = server.accept()
+                except socket.timeout:
+                    continue
+                with connection:
+                    connection.settimeout(30.0)
+                    try:
+                        request_line = connection.makefile("rb").readline()
+                        request = json.loads(request_line.decode("utf-8"))
+                        command = str(request.get("command", "")).strip()
+                        if command == "set_depth_enabled":
+                            enabled = request.get("enabled")
+                            if not isinstance(enabled, bool):
+                                raise ValueError("enabled must be a JSON boolean.")
+                            response = control.request(
+                                enabled,
+                                float(request.get("timeout_s", 20.0)),
+                            )
+                        elif command == "get_status":
+                            response = {"success": True, **control.status()}
+                        else:
+                            response = {"success": False, "message": f"Unsupported camera command: {command!r}"}
+                    except Exception as exc:
+                        response = {"success": False, "message": repr(exc), **control.status()}
+                    connection.sendall((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+    except Exception as exc:
+        control.fail(f"Camera depth control server failed to bind {host}:{int(port)}: {exc!r}")
+        _log_event({"event": "camera_depth_control_error", "error": repr(exc), "host": host, "port": int(port)})
 
 
 def _request_shutdown(signum=None, _frame=None) -> None:
@@ -84,9 +217,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preview-max-fps", type=float, default=8.0, help="Max preview JPEG FPS sent for the UI stream. 0 disables preview packets.")
     parser.add_argument("--preview-width", type=int, default=1280, help="Resize UI preview JPEG to this max width. 0 keeps source width.")
     parser.add_argument("--preview-jpeg-quality", type=int, default=80, help="JPEG quality for UI preview packets.")
+    parser.add_argument("--max-fps", type=float, default=8.0, help="Maximum RGB capture/send FPS. 0 disables throttling.")
     parser.add_argument("--reconnect-delay", type=float, default=1.0, help="Seconds to wait before reconnect.")
     parser.add_argument("--timeout-us", type=int, default=3_000_000, help="SDK capture timeout in microseconds.")
     parser.add_argument("--enable-depth", action="store_true", help="Also publish RGB-aligned depth frames from DkamSDK channel 1.")
+    parser.add_argument("--control-host", default="127.0.0.1", help="Local host for camera control commands.")
+    parser.add_argument("--control-port", type=int, default=5002, help="Local TCP port for camera control commands.")
     parser.add_argument("--point-channel", type=int, default=1, help="DkamSDK point cloud channel.")
     parser.add_argument("--rgb-channel", type=int, default=2, help="DkamSDK RGB channel.")
     parser.add_argument("--rgb-camera-count", type=int, default=1, help="Factory calibration camera_count for RGB intrinsics/extrinsics.")
@@ -111,8 +247,16 @@ def _make_preview_image(image_bgr: np.ndarray, *, max_width: int) -> np.ndarray:
 def main() -> int:
     args = parse_args()
     _install_signal_handlers()
-    depth_enabled = bool(args.enable_depth)
+    depth_control = _DepthControl(bool(args.enable_depth))
+    control_thread = threading.Thread(
+        target=_serve_depth_control,
+        args=(depth_control, args.control_host, int(args.control_port)),
+        daemon=True,
+        name="camera-depth-control",
+    )
+    control_thread.start()
     preview_interval_s = 0.0 if float(args.preview_max_fps) <= 0.0 else 1.0 / float(args.preview_max_fps)
+    capture_interval_s = 0.0 if float(args.max_fps) <= 0.0 else 1.0 / float(args.max_fps)
     _log_event(
         {
             "event": "camera_bridge_started",
@@ -123,11 +267,13 @@ def main() -> int:
             "camera_index": args.camera_index,
             "preview_max_fps": args.preview_max_fps,
             "preview_width": args.preview_width,
+            "max_fps": args.max_fps,
         }
     )
     try:
         while not _SHUTDOWN_REQUESTED:
-            runtime_opened = False
+            depth_enabled = depth_control.requested()
+            runtime_mode_marked = False
             try:
                 depth_config = None
                 capture_aligned_depth_frame = None
@@ -140,13 +286,18 @@ def main() -> int:
                         extrinsic_direction=args.extrinsic_direction,
                     )
                 with _open_camera_runtime_for_args(args, depth_enabled=depth_enabled) as runtime:
-                    runtime_opened = True
                     calibration = read_runtime_calibration(runtime, camera_count=args.rgb_camera_count)
                     camera_info_payload = camera_calibration_to_camera_info_payload(
                         calibration,
                         frame_id=args.frame_id,
                         rgb_camera_count=args.rgb_camera_count,
                         source="dkam_sdk",
+                    )
+                    _log_event(
+                        {
+                            "event": "camera_transport_ready",
+                            **read_stream_transport_diagnostics(runtime, args.rgb_channel),
+                        }
                     )
                     if args.camera_config_output:
                         save_camera_calibration(calibration, args.camera_config_output)
@@ -169,11 +320,33 @@ def main() -> int:
                                 "depth_enabled_runtime": bool(depth_enabled),
                             }
                         )
+                        depth_control.mark_runtime(depth_enabled)
+                        runtime_mode_marked = True
                         depth_error_count = 0
                         max_depth_capture_errors = 5
                         last_preview_sent_s = 0.0
+                        next_capture_time_s = 0.0
                         while not _SHUTDOWN_REQUESTED:
-                            image_bgr = capture_rgb_frame(runtime, timeout_us=args.timeout_us)
+                            if depth_control.requested() != depth_enabled:
+                                raise _DepthReconfigureRequested()
+                            if capture_interval_s > 0.0:
+                                now_s = time.monotonic()
+                                if next_capture_time_s > now_s:
+                                    time.sleep(next_capture_time_s - now_s)
+                                next_capture_time_s = time.monotonic() + capture_interval_s
+                            try:
+                                image_bgr = capture_rgb_frame(runtime, timeout_us=args.timeout_us)
+                            except Exception as exc:
+                                _log_event(
+                                    {
+                                        "event": "rgb_capture_error",
+                                        "error": repr(exc),
+                                        "transport": read_stream_transport_diagnostics(runtime, args.rgb_channel),
+                                    }
+                                )
+                                raise
+                            if depth_control.requested() != depth_enabled:
+                                raise _DepthReconfigureRequested()
                             depth_frame = None
                             if depth_enabled:
                                 try:
@@ -203,7 +376,10 @@ def main() -> int:
                                                 "consecutive_errors": depth_error_count,
                                             }
                                         )
-                                        depth_enabled = False
+                                        depth_control.fail(
+                                            f"Depth capture failed {depth_error_count} consecutive times: {exc!r}"
+                                        )
+                                        raise _DepthReconfigureRequested()
                             frame_timestamp_ns = time.time_ns()
                             payload = encode_bgr_frame_to_jpeg(image_bgr, jpeg_quality=args.jpeg_quality)
                             header = {
@@ -236,6 +412,7 @@ def main() -> int:
                                 connection.sendall(pack_frame_packet(preview_header, preview_payload))
                                 last_preview_sent_s = now_s
                             if depth_frame is not None:
+                                depth_control.mark_depth_frame()
                                 depth_map = np.ascontiguousarray(depth_frame.aligned_depth_m, dtype=np.float32)
                                 depth_payload = compress_payload(depth_map.tobytes(), level=args.depth_compression_level)
                                 depth_header = {
@@ -256,19 +433,22 @@ def main() -> int:
                                     "coverage_ratio": float(depth_frame.coverage_ratio),
                                 }
                                 connection.sendall(pack_frame_packet(depth_header, depth_payload))
+            except _DepthReconfigureRequested:
+                continue
             except KeyboardInterrupt:
                 _request_shutdown("KeyboardInterrupt")
                 break
             except Exception as exc:
                 if _SHUTDOWN_REQUESTED:
                     break
-                if bool(args.enable_depth) and depth_enabled and not runtime_opened:
+                if depth_enabled:
+                    depth_control.fail(f"Depth-enabled camera runtime failed: {exc!r}")
                     _log_event({"event": "camera_bridge_depth_fallback", "error": repr(exc)})
-                    depth_enabled = False
-                    time.sleep(float(args.reconnect_delay))
-                    continue
                 _log_event({"event": "camera_bridge_error", "error": repr(exc)})
                 time.sleep(float(args.reconnect_delay))
+            finally:
+                if runtime_mode_marked:
+                    depth_control.mark_runtime(False)
     finally:
         _log_event({"event": "camera_bridge_stopped"})
     return 0

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 import math
 from pathlib import Path
@@ -117,8 +117,8 @@ def _parse_waypoint(payload: dict[str, Any], defaults: dict[str, Any], index: in
             field_name=f"waypoints[{index}].expected_tcp_pose_mmdeg",
             length=6,
         ),
-        vel=float(payload.get("vel", defaults.get("vel", 10.0))),
-        acc=float(payload.get("acc", defaults.get("acc", 10.0))),
+        vel=float(payload.get("vel", defaults.get("vel", 20.0))),
+        acc=float(payload.get("acc", defaults.get("acc", 20.0))),
         dwell_s=float(payload.get("dwell_s", defaults.get("dwell_s", 0.5))),
         capture=_coerce_bool(payload.get("capture", True), field_name=f"waypoints[{index}].capture"),
         record_quality=payload.get("record_quality") if isinstance(payload.get("record_quality"), dict) else None,
@@ -163,10 +163,30 @@ def load_trajectory(path: str | Path) -> CalibrationTrajectory:
         tool_id=int(payload.get("tool_id", 0)),
         user_id=int(payload.get("user_id", 0)),
         default_motion=default_motion,
-        default_vel=float(defaults.get("vel", 10.0)),
-        default_acc=float(defaults.get("acc", 10.0)),
+        default_vel=float(defaults.get("vel", 20.0)),
+        default_acc=float(defaults.get("acc", 20.0)),
         default_dwell_s=float(defaults.get("dwell_s", 0.5)),
         waypoints=waypoints,
+    )
+
+
+def override_trajectory_motion(
+    trajectory: CalibrationTrajectory,
+    *,
+    vel: float,
+    acc: float,
+) -> CalibrationTrajectory:
+    """Apply the current motion profile to every waypoint for one run."""
+    velocity = float(vel)
+    acceleration = float(acc)
+    return replace(
+        trajectory,
+        default_vel=velocity,
+        default_acc=acceleration,
+        waypoints=[
+            replace(waypoint, vel=velocity, acc=acceleration)
+            for waypoint in trajectory.waypoints
+        ],
     )
 
 
@@ -219,11 +239,18 @@ def build_recorded_waypoint(
 def create_session_dir(root_path: str | Path, *, now: datetime | None = None) -> Path:
     timestamp = (now or datetime.now()).strftime("%Y-%m-%d_%H%M%S")
     root = Path(root_path)
-    candidate = root / timestamp
-    suffix = 2
-    while candidate.exists():
-        candidate = root / f"{timestamp}_{suffix:02d}"
-        suffix += 1
-    candidate.mkdir(parents=True, exist_ok=False)
-    (candidate / "images").mkdir(parents=True, exist_ok=True)
-    return candidate
+    root.mkdir(parents=True, exist_ok=True)
+
+    # Use mkdir itself as the uniqueness check. An exists()+mkdir sequence has
+    # a race window when two calibration processes start in the same second.
+    suffix = 0
+    while True:
+        name = timestamp if suffix == 0 else f"{timestamp}_{suffix + 1:02d}"
+        candidate = root / name
+        try:
+            candidate.mkdir(parents=False, exist_ok=False)
+        except FileExistsError:
+            suffix += 1
+            continue
+        (candidate / "images").mkdir(parents=True, exist_ok=True)
+        return candidate

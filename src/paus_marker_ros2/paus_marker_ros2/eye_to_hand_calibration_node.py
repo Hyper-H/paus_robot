@@ -52,6 +52,7 @@ from .semi_auto_calibration import (
     create_session_dir,
     empty_trajectory,
     load_trajectory,
+    override_trajectory_motion,
     sample_log_targets,
     save_trajectory,
     session_owner_matches,
@@ -76,6 +77,7 @@ from paus_perception import (
 
 
 STATUS_QOS = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+CAMERA_QOS = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
 
 
 def _normalize_solver_method(value: str) -> str:
@@ -158,13 +160,13 @@ class EyeToHandCalibrationNode(Node):
         # 声明节点参数。如果用户用 launch 文件覆盖参数，这些默认值就会被覆盖掉。
         self.declare_parameter("config_path", str(default_config_path))
         self.declare_parameter("camera_config_path", "/tmp/paus_robot/camera.yaml")
+        self.declare_parameter("camera_config_wait_timeout_s", 15.0)
         self.declare_parameter("image_topic", "/camera/image_bridge")
         self.declare_parameter("status_topic", "/eye_to_hand/status")
         self.declare_parameter("board_rows", 6)
         self.declare_parameter("board_cols", 9)
         self.declare_parameter("square_size_m", 0.01)
         self.declare_parameter("solver_method", "opencv_handeye_park")
-        self.declare_parameter("fresh_image_timeout_s", 2.0)
         self.declare_parameter("sample_log_path", "/tmp/paus_robot/eye_to_hand_samples.jsonl")
         self.declare_parameter("selected_waypoint_name", "")
         self.declare_parameter("tool_to_board.translation_m", [0.0, 0.0, 0.0])
@@ -177,6 +179,7 @@ class EyeToHandCalibrationNode(Node):
         self.config = load_config(self.config_path)
         calibration_cfg = self.config.get("calibration", {})
         control_cfg = self.config["control"]
+        self.declare_parameter("fresh_image_timeout_s", float(calibration_cfg.get("fresh_image_timeout_s", 5.0)))
         # 在拿到主配置后，再声明机器人相关参数，允许后续显式覆盖。
         self.declare_parameter("robot_ip", str(control_cfg["robot_ip"]))
         self.declare_parameter("linux_fairino_sdk_root", str(control_cfg["linux_fairino_sdk_root"]))#在你这台 Linux/Ubuntu 机器上，FAIRINO 提供的 Python SDK 文件放在这个目录里。
@@ -193,10 +196,22 @@ class EyeToHandCalibrationNode(Node):
         self.declare_parameter("max_board_model_fit_max_mm", float(calibration_cfg.get("max_board_model_fit_max_mm", 5.0)))
         self.declare_parameter("min_board_center_z_m", float(calibration_cfg.get("min_board_center_z_m", 0.20)))
         self.declare_parameter("max_board_center_z_m", float(calibration_cfg.get("max_board_center_z_m", 0.80)))
-        self.declare_parameter("tool_id", int(control_cfg.get("tool_id", 0)))
-        self.declare_parameter("user_id", int(control_cfg.get("user_id", 0)))
-        self.declare_parameter("move_vel", float(control_cfg.get("move_vel", 10.0)))
-        self.declare_parameter("move_acc", float(control_cfg.get("move_acc", 10.0)))
+        # The chessboard is mounted on the flange, so calibration uses tool 0.
+        # Samples use the flange reference. MoveJ uses the controller's
+        # configured active motion frame, which is tool 3 on this robot.
+        self.declare_parameter("tool_id", int(calibration_cfg.get("tool_id", 0)))
+        self.declare_parameter("user_id", int(calibration_cfg.get("user_id", 0)))
+        self.declare_parameter(
+            "motion_tool_id",
+            int(calibration_cfg.get("motion_tool_id", -1)),
+        )
+        self.declare_parameter(
+            "motion_user_id",
+            int(calibration_cfg.get("motion_user_id", -1)),
+        )
+        self.declare_parameter("move_vel", float(control_cfg.get("move_vel", 20.0)))
+        self.declare_parameter("move_acc", float(control_cfg.get("move_acc", 20.0)))
+        self.declare_parameter("global_speed", float(control_cfg.get("global_speed", 100.0)))
         self.declare_parameter("execute_motion", bool(control_cfg.get("execute_motion", False)))
         self.declare_parameter(
             "trajectory_path",
@@ -217,8 +232,15 @@ class EyeToHandCalibrationNode(Node):
         self.declare_parameter("post_motion_capture_delay_s", float(calibration_cfg.get("post_motion_capture_delay_s", 0.3)))
         self.declare_parameter("capture_retry_count", int(calibration_cfg.get("capture_retry_count", 8)))
         self.declare_parameter("capture_retry_delay_s", float(calibration_cfg.get("capture_retry_delay_s", 0.15)))
+        self.declare_parameter("motion_target_tolerance_deg", float(calibration_cfg.get("motion_target_tolerance_deg", 0.5)))
+        self.declare_parameter("motion_timeout_s", float(calibration_cfg.get("motion_timeout_s", 120.0)))
+        self.declare_parameter("motion_poll_interval_s", float(calibration_cfg.get("motion_poll_interval_s", 0.05)))
 
         camera_config_path = self.get_parameter("camera_config_path").get_parameter_value().string_value
+        self.camera_config_wait_timeout_s = max(
+            float(self.get_parameter("camera_config_wait_timeout_s").get_parameter_value().double_value),
+            0.0,
+        )
         self.image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
         self.depth_topic = self.get_parameter("depth_topic").get_parameter_value().string_value
         self.status_topic = self.get_parameter("status_topic").get_parameter_value().string_value
@@ -243,10 +265,16 @@ class EyeToHandCalibrationNode(Node):
         self.output_path = Path(self.get_parameter("output_path").get_parameter_value().string_value)
         self.robot_ip = self.get_parameter("robot_ip").get_parameter_value().string_value
         self.linux_fairino_sdk_root = self.get_parameter("linux_fairino_sdk_root").get_parameter_value().string_value
-        self.tool_id = int(self.get_parameter("tool_id").get_parameter_value().integer_value)
-        self.user_id = int(self.get_parameter("user_id").get_parameter_value().integer_value)
+        self.calibration_tool_id = int(self.get_parameter("tool_id").get_parameter_value().integer_value)
+        self.calibration_user_id = int(self.get_parameter("user_id").get_parameter_value().integer_value)
+        self.motion_tool_id = int(self.get_parameter("motion_tool_id").get_parameter_value().integer_value)
+        self.motion_user_id = int(self.get_parameter("motion_user_id").get_parameter_value().integer_value)
+        # Keep the old attribute names for the calibration-side code and external callers.
+        self.tool_id = self.calibration_tool_id
+        self.user_id = self.calibration_user_id
         self.move_vel = float(self.get_parameter("move_vel").get_parameter_value().double_value)
         self.move_acc = float(self.get_parameter("move_acc").get_parameter_value().double_value)
+        self.global_speed = float(self.get_parameter("global_speed").get_parameter_value().double_value)
         self.execute_motion = bool(self.get_parameter("execute_motion").get_parameter_value().bool_value)
         self.trajectory_path = Path(self.get_parameter("trajectory_path").get_parameter_value().string_value)
         self.session_root_path = Path(self.get_parameter("session_root_path").get_parameter_value().string_value)
@@ -261,6 +289,18 @@ class EyeToHandCalibrationNode(Node):
         self.post_motion_capture_delay_s = float(self.get_parameter("post_motion_capture_delay_s").get_parameter_value().double_value)
         self.capture_retry_count = max(1, int(self.get_parameter("capture_retry_count").get_parameter_value().integer_value))
         self.capture_retry_delay_s = float(self.get_parameter("capture_retry_delay_s").get_parameter_value().double_value)
+        self.motion_target_tolerance_deg = max(
+            float(self.get_parameter("motion_target_tolerance_deg").get_parameter_value().double_value),
+            0.05,
+        )
+        self.motion_timeout_s = max(
+            float(self.get_parameter("motion_timeout_s").get_parameter_value().double_value),
+            0.0,
+        )
+        self.motion_poll_interval_s = max(
+            float(self.get_parameter("motion_poll_interval_s").get_parameter_value().double_value),
+            0.01,
+        )
         self.session_dir: Path | None = None
         self.session_owner: str | None = None
         self.sample_log_path: Path | None = None
@@ -278,7 +318,7 @@ class EyeToHandCalibrationNode(Node):
         if not camera_config_path:
             raise RuntimeError("camera_config_path is required for eye-to-hand calibration.")
         # 加载相机内参。
-        self.camera_calibration = load_camera_calibration(camera_config_path)
+        self.camera_calibration = self._load_camera_calibration_when_ready(camera_config_path)
 
         # 创建图像桥接器。
         self.bridge = CvBridge()
@@ -298,8 +338,8 @@ class EyeToHandCalibrationNode(Node):
         self.linux_client.connect()
 
         # 创建图像订阅器与状态发布器。
-        self.image_subscription = self.create_subscription(Image, self.image_topic, self._image_callback, 10, callback_group=self.callback_group)
-        self.depth_subscription = self.create_subscription(Image, self.depth_topic, self._depth_callback, 10, callback_group=self.callback_group)
+        self.image_subscription = self.create_subscription(Image, self.image_topic, self._image_callback, CAMERA_QOS, callback_group=self.callback_group)
+        self.depth_subscription = self.create_subscription(Image, self.depth_topic, self._depth_callback, CAMERA_QOS, callback_group=self.callback_group)
         self.add_on_set_parameters_callback(self._on_parameters_changed)
         self.status_publisher = self.create_publisher(String, self.status_topic, STATUS_QOS)
 
@@ -335,6 +375,29 @@ class EyeToHandCalibrationNode(Node):
             },
         )
 
+    def _load_camera_calibration_when_ready(self, camera_config_path: str):
+        """Wait for camera_bridge to publish a complete, readable camera.yaml."""
+        timeout_s = float(getattr(self, "camera_config_wait_timeout_s", 15.0))
+        deadline = time.monotonic() + timeout_s
+        last_error: Exception | None = None
+        warned = False
+        while True:
+            try:
+                return load_camera_calibration(camera_config_path)
+            except Exception as exc:
+                last_error = exc
+                if not warned:
+                    self.get_logger().warning(
+                        f"Waiting for a valid camera calibration at {camera_config_path!r}: {exc!r}"
+                    )
+                    warned = True
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"Timed out after {timeout_s:.3f}s waiting for a valid camera calibration "
+                        f"at {camera_config_path!r}: {last_error!r}"
+                    ) from exc
+                time.sleep(0.1)
+
     def _uses_depth_observation(self) -> bool:
         return self.observation_mode in {DEPTH_ALIGNED_MODE, HYBRID_COMPARE_MODE}
 
@@ -365,12 +428,23 @@ class EyeToHandCalibrationNode(Node):
                     if not depth_topic:
                         raise ValueError("depth_topic cannot be empty.")
                     changed["depth_topic"] = depth_topic
+                elif parameter.name in {"move_vel", "move_acc", "global_speed"}:
+                    value = float(parameter.value)
+                    if not math.isfinite(value) or not 1.0 <= value <= 100.0:
+                        raise ValueError(f"{parameter.name} must be within [1, 100].")
+                    changed[parameter.name] = value
         except ValueError as exc:
             return SetParametersResult(successful=False, reason=str(exc))
 
         observation_mode_changed = False
         depth_topic_changed = False
+        motion_config_changed = False
         with self._parameter_update_lock:
+            if any(name in changed for name in ("move_vel", "move_acc", "global_speed")) and self._semi_auto_active:
+                return SetParametersResult(
+                    successful=False,
+                    reason="Motion parameters cannot change while semi-auto calibration is running.",
+                )
             if "observation_mode" in changed and changed["observation_mode"] != self.observation_mode:
                 self.observation_mode = str(changed["observation_mode"])
                 observation_mode_changed = True
@@ -382,7 +456,19 @@ class EyeToHandCalibrationNode(Node):
                         self.destroy_subscription(self.depth_subscription)
                 except Exception:
                     pass
-                self.depth_subscription = self.create_subscription(Image, self.depth_topic, self._depth_callback, 10, callback_group=self.callback_group)
+                self.depth_subscription = self.create_subscription(Image, self.depth_topic, self._depth_callback, CAMERA_QOS, callback_group=self.callback_group)
+            if "move_vel" in changed and float(changed["move_vel"]) != self.move_vel:
+                self.move_vel = float(changed["move_vel"])
+                motion_config_changed = True
+            if "move_acc" in changed and float(changed["move_acc"]) != self.move_acc:
+                self.move_acc = float(changed["move_acc"])
+                motion_config_changed = True
+            if "global_speed" in changed and float(changed["global_speed"]) != self.global_speed:
+                self.global_speed = float(changed["global_speed"])
+                motion_config_changed = True
+            if motion_config_changed:
+                self.recorded_trajectory.default_vel = float(self.move_vel)
+                self.recorded_trajectory.default_acc = float(self.move_acc)
 
         if observation_mode_changed or depth_topic_changed:
             self._append_run_log(
@@ -399,6 +485,14 @@ class EyeToHandCalibrationNode(Node):
                     "observation_mode": self.observation_mode,
                     "depth_topic": self.depth_topic,
                     "session_dir": str(self.session_dir) if self.session_dir else None,
+                },
+            )
+        if motion_config_changed:
+            self._publish_status(
+                "motion_config_changed",
+                "Motion parameters updated.",
+                {
+                    "motion_config": self._motion_config_payload(),
                 },
             )
         return SetParametersResult(successful=True)
@@ -442,6 +536,7 @@ class EyeToHandCalibrationNode(Node):
             "min_sample_count": self.min_sample_count,
             "solver_method": self.solver_method,
             "observation_mode": self.observation_mode,
+            "motion_config": self._motion_config_payload(),
         }
         if extra:
             payload.update(extra)
@@ -449,6 +544,15 @@ class EyeToHandCalibrationNode(Node):
         status_message.data = json.dumps(payload, ensure_ascii=False)
         self.status_publisher.publish(status_message)
         self.get_logger().info(status_message.data)
+
+    def _motion_config_payload(self) -> dict[str, object]:
+        return {
+            "move_vel": float(getattr(self, "move_vel", 20.0)),
+            "move_acc": float(getattr(self, "move_acc", 20.0)),
+            "global_speed": float(getattr(self, "global_speed", 100.0)),
+            "blend_time_ms": -1.0,
+            "speed_override": True,
+        }
 
     def _append_run_log(self, event: str, payload: dict[str, object] | None = None) -> None:
         run_log_path = getattr(self, "run_log_path", None)
@@ -491,12 +595,19 @@ class EyeToHandCalibrationNode(Node):
     def _load_or_create_trajectory_for_recording(self) -> CalibrationTrajectory:
         if self.trajectory_path.exists():
             try:
-                return load_trajectory(self.trajectory_path)
+                trajectory = load_trajectory(self.trajectory_path)
+                # A trajectory file describes calibration metadata, not the TCP
+                # used to execute MoveJ. Normalize old files to the flange tool.
+                trajectory.tool_id = self.calibration_tool_id
+                trajectory.user_id = self.calibration_user_id
+                trajectory.default_vel = float(self.move_vel)
+                trajectory.default_acc = float(self.move_acc)
+                return trajectory
             except TrajectoryValidationError as exc:
                 self.get_logger().warning(f"Existing trajectory is invalid and will not be used for recording cache: {exc}")
         return empty_trajectory(
-            tool_id=self.tool_id,
-            user_id=self.user_id,
+            tool_id=self.calibration_tool_id,
+            user_id=self.calibration_user_id,
             default_vel=self.move_vel,
             default_acc=self.move_acc,
             default_dwell_s=self.dwell_s,
@@ -522,10 +633,14 @@ class EyeToHandCalibrationNode(Node):
                 return self._delete_recorded_waypoint_by_index(index)
         return None
 
-    def _archive_current_trajectory(self) -> None:
+    def _archive_current_trajectory(self, trajectory: CalibrationTrajectory | None = None) -> None:
         if getattr(self, "session_dir", None) is None or not self.trajectory_path.exists():
             return
-        shutil.copy2(self.trajectory_path, self.session_dir / "trajectory_used.yaml")
+        destination = self.session_dir / "trajectory_used.yaml"
+        if trajectory is None:
+            shutil.copy2(self.trajectory_path, destination)
+            return
+        save_trajectory(trajectory, destination)
 
     def _reject_manual_service_if_semi_auto_active(
         self,
@@ -715,17 +830,27 @@ class EyeToHandCalibrationNode(Node):
             return BoardPoseEstimate(camera_to_board_matrix=depth_estimate.camera_to_board_matrix, quality=quality, corners_xy=depth_estimate.corners_xy)
         raise RuntimeError(f"Unsupported observation_mode: {self.observation_mode}")
 
-    # 通过 Linux SDK 直接读取 `base -> tool(TCP)` 位姿。
-    def _read_current_base_to_tool(self) -> tuple[np.ndarray, list[float], float, float]:
+    # The board is mounted on the flange. Read `base -> flange`, never the
+    # probe TCP, for both hand-eye samples and recorded calibration waypoints.
+    def _read_current_base_to_flange(self) -> tuple[np.ndarray, list[float], float, float]:
         read_start_time_s = time.monotonic_ns() * 1e-9
-        error, tcp_pose_mmdeg = self.linux_client.get_actual_tcp_pose()
+        error, flange_pose_mmdeg = self.linux_client.get_actual_tool_flange_pose()
         read_end_time_s = time.monotonic_ns() * 1e-9
         if error != 0:
-            raise RuntimeError(f"GetActualTCPPose failed with code {error}.")
+            raise RuntimeError(f"GetActualToolFlangePose failed with code {error}.")
         # SDK 返回单位是 mm / deg，而手眼矩阵这里统一按 m 计算。
-        translation_m = [float(value) / 1000.0 for value in tcp_pose_mmdeg[:3]]
-        rotation_matrix = rpy_deg_to_rotation_matrix(tcp_pose_mmdeg[3:6])
-        return make_transform_matrix(translation_m, rotation_matrix), [float(value) for value in tcp_pose_mmdeg], read_start_time_s, read_end_time_s
+        translation_m = [float(value) / 1000.0 for value in flange_pose_mmdeg[:3]]
+        rotation_matrix = rpy_deg_to_rotation_matrix(flange_pose_mmdeg[3:6])
+        return (
+            make_transform_matrix(translation_m, rotation_matrix),
+            [float(value) for value in flange_pose_mmdeg],
+            read_start_time_s,
+            read_end_time_s,
+        )
+
+    # Backward-compatible internal name. The returned "tool" is tool 0, the flange.
+    def _read_current_base_to_tool(self) -> tuple[np.ndarray, list[float], float, float]:
+        return self._read_current_base_to_flange()
 
     def _current_base_to_tool(self) -> np.ndarray:
         base_to_tool, _, _, _ = self._read_current_base_to_tool()
@@ -852,7 +977,10 @@ class EyeToHandCalibrationNode(Node):
             "tcp_read_start_time_s": sample.tcp_read_start_time_s,
             "tcp_read_end_time_s": sample.tcp_read_end_time_s,
             "image_to_tcp_midpoint_age_ms": (tcp_mid_time_s - sample.image_received_time_s) * 1000.0,
+            # Historical key retained; this value is the flange pose because
+            # tool 0 is the calibration reference for this setup.
             "tcp_pose_mmdeg": sample.tcp_pose_mmdeg,
+            "flange_pose_mmdeg": sample.tcp_pose_mmdeg,
             "observation_mode": sample.observation_mode,
             "sample_quality": sample.sample_quality,
             "image_path": sample.image_path,
@@ -962,7 +1090,7 @@ class EyeToHandCalibrationNode(Node):
         captured_depth = None
         if self._uses_depth_observation():
             captured_depth = self._wait_for_fresh_depth(previous_depth_sequence, captured_image.header_time_s)
-        base_to_tool, tcp_pose_mmdeg, tcp_read_start_time_s, tcp_read_end_time_s = self._read_current_base_to_tool()
+        base_to_flange, flange_pose_mmdeg, flange_read_start_time_s, flange_read_end_time_s = self._read_current_base_to_flange()
         observation = self._estimate_camera_to_board_observation(captured_image, captured_depth)
         if observation.camera_to_board_matrix is None or not bool(observation.quality.get("accepted", False)):
             reject_reason = str(observation.quality.get("reject_reason", "sample_quality_rejected"))
@@ -990,13 +1118,14 @@ class EyeToHandCalibrationNode(Node):
             sample_quality["board_margin_px"] = self._compute_board_margin_px(observation.corners_xy, captured_image.image_bgr.shape)
         sample_quality["capture_attempt_index"] = int(attempt_index)
         sample = CalibrationSample(
-            base_to_tool_matrix=base_to_tool,
+            base_to_tool_matrix=base_to_flange,
             camera_to_board_matrix=observation.camera_to_board_matrix,
             image_header_time_s=captured_image.header_time_s,
             image_received_time_s=captured_image.received_time_s,
-            tcp_read_start_time_s=tcp_read_start_time_s,
-            tcp_read_end_time_s=tcp_read_end_time_s,
-            tcp_pose_mmdeg=tcp_pose_mmdeg,
+            tcp_read_start_time_s=flange_read_start_time_s,
+            tcp_read_end_time_s=flange_read_end_time_s,
+            # Historical field name retained for sample-log compatibility.
+            tcp_pose_mmdeg=flange_pose_mmdeg,
             image_sequence=captured_image.sequence,
             observation_mode=self.observation_mode,
             sample_quality=sample_quality,
@@ -1376,14 +1505,15 @@ class EyeToHandCalibrationNode(Node):
             joint_error, joint_deg = self.linux_client.get_actual_joint_pos_degree()
             if joint_error != 0:
                 raise RuntimeError(f"GetActualJointPosDegree failed with code {joint_error}.")
-            tcp_error, tcp_pose_mmdeg = self.linux_client.get_actual_tcp_pose()
-            if tcp_error != 0:
-                raise RuntimeError(f"GetActualTCPPose failed with code {tcp_error}.")
+            flange_error, flange_pose_mmdeg = self.linux_client.get_actual_tool_flange_pose()
+            if flange_error != 0:
+                raise RuntimeError(f"GetActualToolFlangePose failed with code {flange_error}.")
             record_quality = self._probe_current_board_quality()
             waypoint = build_recorded_waypoint(
                 index=len(self.recorded_trajectory.waypoints) + 1,
                 joint_deg=joint_deg,
-                tcp_pose_mmdeg=tcp_pose_mmdeg,
+                # Keep the legacy YAML field name, but store the flange pose.
+                tcp_pose_mmdeg=flange_pose_mmdeg,
                 vel=self.move_vel,
                 acc=self.move_acc,
                 dwell_s=self.dwell_s,
@@ -1550,15 +1680,15 @@ class EyeToHandCalibrationNode(Node):
             self._publish_status("new_trajectory_failed", response.message, {"session_dir": str(self.session_dir) if self.session_dir else None})
         return response
 
-    def _wait_until_tcp_stable(self) -> list[float]:
+    def _wait_until_flange_stable(self) -> list[float]:
         deadline = time.monotonic() + self.stable_timeout_s
         stable_since: float | None = None
         previous_pose: list[float] | None = None
         last_pose: list[float] | None = None
         while time.monotonic() < deadline:
-            error, pose = self.linux_client.get_actual_tcp_pose()
+            error, pose = self.linux_client.get_actual_tool_flange_pose()
             if error != 0:
-                raise RuntimeError(f"GetActualTCPPose failed with code {error}.")
+                raise RuntimeError(f"GetActualToolFlangePose failed with code {error}.")
             last_pose = pose
             if previous_pose is not None:
                 position_delta_mm = float(np.linalg.norm(np.asarray(pose[:3], dtype=np.float64) - np.asarray(previous_pose[:3], dtype=np.float64)))
@@ -1571,7 +1701,241 @@ class EyeToHandCalibrationNode(Node):
                     stable_since = None
             previous_pose = pose
             time.sleep(0.05)
-        raise RuntimeError(f"TCP did not become stable within {self.stable_timeout_s:.3f}s. Last pose: {last_pose!r}")
+        raise RuntimeError(f"Flange did not become stable within {self.stable_timeout_s:.3f}s. Last pose: {last_pose!r}")
+
+    # Compatibility alias for callers from the previous TCP-based implementation.
+    def _wait_until_tcp_stable(self) -> list[float]:
+        return self._wait_until_flange_stable()
+
+    def _collect_waypoint_motion_diagnostics(self, target_joint_deg: list[float]) -> dict[str, object]:
+        """Collect safe-to-log state around one MoveJ command."""
+        if len(target_joint_deg) != 6 or not all(math.isfinite(float(value)) for value in target_joint_deg):
+            raise RuntimeError(f"MoveJ target must contain six finite joint angles: {target_joint_deg!r}.")
+        diagnostics: dict[str, object] = {
+            "target_joint_deg": [float(value) for value in target_joint_deg],
+        }
+        for name, getter in (
+            ("actual_joint_deg", self.linux_client.get_actual_joint_pos_degree),
+            ("active_tool", self.linux_client.get_actual_tcp_num),
+            ("active_user", self.linux_client.get_actual_wobj_num),
+            ("target_fk", lambda: self.linux_client.get_forward_kin(target_joint_deg)),
+            ("joint_soft_limits_deg", self.linux_client.get_joint_soft_limit_deg),
+            ("motion_state", self.linux_client.get_motion_diagnostics),
+        ):
+            try:
+                value = getter()
+                if isinstance(value, tuple):
+                    diagnostics[name] = list(value) if len(value) != 2 or not isinstance(value[1], list) else [value[0], list(value[1])]
+                else:
+                    diagnostics[name] = value
+            except Exception as exc:
+                diagnostics[f"{name}_error"] = repr(exc)
+
+        soft_limit_result = diagnostics.get("joint_soft_limits_deg")
+        if (
+            isinstance(soft_limit_result, list)
+            and len(soft_limit_result) == 2
+            and int(soft_limit_result[0]) == 0
+            and isinstance(soft_limit_result[1], list)
+            and len(soft_limit_result[1]) == 12
+        ):
+            limits = [float(value) for value in soft_limit_result[1]]
+            violations = []
+            for joint_index, target in enumerate(target_joint_deg):
+                lower = limits[joint_index * 2]
+                upper = limits[joint_index * 2 + 1]
+                if float(target) < lower or float(target) > upper:
+                    violations.append(
+                        {
+                            "joint": joint_index + 1,
+                            "target_deg": float(target),
+                            "lower_deg": lower,
+                            "upper_deg": upper,
+                        }
+                    )
+            diagnostics["joint_soft_limit_violations"] = violations
+            if violations:
+                raise RuntimeError(f"MoveJ target is outside joint soft limits: {violations}.")
+        target_fk_result = diagnostics.get("target_fk")
+        if (
+            isinstance(target_fk_result, list)
+            and len(target_fk_result) == 2
+            and int(target_fk_result[0]) != 0
+        ):
+            raise RuntimeError(f"GetForwardKin failed for MoveJ target with code {target_fk_result[0]}.")
+        return diagnostics
+
+    def _wait_until_waypoint_joint_target_reached(
+        self,
+        target_joint_deg: list[float],
+        *,
+        waypoint_name: str,
+        waypoint_index: int,
+    ) -> list[float]:
+        """Wait for the non-blocking MoveJ command to actually finish."""
+        motion_timeout_s = max(float(getattr(self, "motion_timeout_s", 120.0)), 0.0)
+        poll_interval_s = max(float(getattr(self, "motion_poll_interval_s", 0.05)), 0.01)
+        tolerance_deg = max(float(getattr(self, "motion_target_tolerance_deg", 0.5)), 0.05)
+        deadline = time.monotonic() + motion_timeout_s
+        last_joint: list[float] | None = None
+        last_state: dict[str, object] = {}
+        while True:
+            self._raise_if_stop_requested(waypoint_name=waypoint_name, waypoint_index=waypoint_index)
+            joint_error, joint_deg = self.linux_client.get_actual_joint_pos_degree()
+            if joint_error != 0:
+                raise RuntimeError(f"GetActualJointPosDegree failed with code {joint_error}.")
+            if len(joint_deg) != len(target_joint_deg):
+                raise RuntimeError(
+                    f"GetActualJointPosDegree returned {len(joint_deg)} joints; expected {len(target_joint_deg)}."
+                )
+            last_joint = [float(value) for value in joint_deg]
+            motion_error, motion_done = self.linux_client.get_robot_motion_done()
+            queue_error, queue_len = self.linux_client.get_motion_queue_length()
+            last_state = {
+                "motion_done_error": int(motion_error),
+                "motion_done": int(motion_done) if motion_done is not None else None,
+                "queue_error": int(queue_error),
+                "queue_len": int(queue_len) if queue_len is not None else None,
+            }
+            if motion_error != 0:
+                raise RuntimeError(f"GetRobotMotionDone failed with code {motion_error}.")
+            if queue_error != 0:
+                raise RuntimeError(f"GetMotionQueueLength failed with code {queue_error}.")
+            max_delta_deg = max(
+                abs(float(target) - float(current))
+                for target, current in zip(target_joint_deg, last_joint)
+            )
+            last_state["max_joint_error_deg"] = float(max_delta_deg)
+            if (
+                max_delta_deg <= tolerance_deg
+                and int(motion_done or 0) == 1
+                and int(queue_len or 0) == 0
+            ):
+                return last_joint
+            if time.monotonic() >= deadline:
+                try:
+                    last_state["motion_diagnostics"] = self.linux_client.get_motion_diagnostics()
+                except Exception as diagnostic_error:
+                    last_state["motion_diagnostics_error"] = repr(diagnostic_error)
+                raise RuntimeError(
+                    f"MoveJ did not reach {waypoint_name} within {motion_timeout_s:.3f}s: "
+                    f"target_joint_deg={target_joint_deg}, last_joint_deg={last_joint}, state={last_state}."
+                )
+            time.sleep(poll_interval_s)
+
+    def _prepare_motion_for_semi_auto(self) -> None:
+        """Resolve the MoveJ frame and enter automatic mode before MoveJ."""
+        requested_motion_tool_id = int(getattr(self, "motion_tool_id", -1))
+        requested_motion_user_id = int(getattr(self, "motion_user_id", -1))
+        tool_error, active_tool_id = self.linux_client.get_actual_tcp_num()
+        user_error, active_user_id = self.linux_client.get_actual_wobj_num()
+        if tool_error != 0:
+            raise RuntimeError(f"GetActualTCPNum failed with code {tool_error}.")
+        if user_error != 0:
+            raise RuntimeError(f"GetActualWObjNum failed with code {user_error}.")
+        if active_tool_id is None or active_user_id is None:
+            raise RuntimeError(
+                "FAIRINO active frame query returned no tool/user ID; "
+                "cannot resolve the MoveJ frame."
+            )
+        motion_tool_id = active_tool_id if requested_motion_tool_id < 0 else requested_motion_tool_id
+        motion_user_id = active_user_id if requested_motion_user_id < 0 else requested_motion_user_id
+        active_frame_matches = active_tool_id == motion_tool_id and active_user_id == motion_user_id
+        if not active_frame_matches:
+            message = (
+                "FAIRINO MoveJ frame mismatch: "
+                f"configured tool={motion_tool_id}, user={motion_user_id}, "
+                f"but controller active tool={active_tool_id}, user={active_user_id}. "
+                "Select the configured frame on the controller or use motion_tool_id=-1 "
+                "and motion_user_id=-1 to follow the active frame."
+            )
+            payload = {
+                "success": False,
+                "error": message,
+                "requested_motion_tool_id": requested_motion_tool_id,
+                "requested_motion_user_id": requested_motion_user_id,
+                "motion_tool_id": motion_tool_id,
+                "motion_user_id": motion_user_id,
+                "active_tool_id": int(active_tool_id) if active_tool_id is not None else None,
+                "active_user_id": int(active_user_id) if active_user_id is not None else None,
+                "active_frame_matches": False,
+                "session_dir": str(self.session_dir) if self.session_dir else None,
+            }
+            self._append_run_log("motion_preparation_failed", payload)
+            self._publish_status("motion_preparation_failed", message, payload)
+            raise RuntimeError(message)
+
+        self._resolved_motion_tool_id = int(motion_tool_id)
+        self._resolved_motion_user_id = int(motion_user_id)
+        prepare_kwargs = {}
+        if hasattr(self, "global_speed"):
+            prepare_kwargs["global_speed"] = float(self.global_speed)
+        result = self.linux_client.prepare_motion(**prepare_kwargs)
+        payload = {
+            "result": {str(name): int(code) for name, code in result.items()},
+            "requested_motion_tool_id": requested_motion_tool_id,
+            "requested_motion_user_id": requested_motion_user_id,
+            "motion_tool_id": motion_tool_id,
+            "motion_user_id": motion_user_id,
+            "active_tool_id": int(active_tool_id) if active_tool_id is not None else None,
+            "active_user_id": int(active_user_id) if active_user_id is not None else None,
+            "active_frame_matches": bool(active_frame_matches),
+            "global_speed": float(self.global_speed) if hasattr(self, "global_speed") else None,
+            "session_dir": str(self.session_dir) if self.session_dir else None,
+        }
+        prepare_error_fields = {
+            "ResetAllError",
+            "RobotEnable",
+            "Mode",
+            "ModeConfirm",
+            "ModeState",
+            "RobotMode",
+            "GlobalSpeed",
+        }
+        failed = {
+            name: int(result[name])
+            for name in prepare_error_fields
+            if name in result and int(result[name]) != 0
+        }
+        if failed:
+            if int(result.get("ModeConfirm", 0)) != 0:
+                message = (
+                    "FAIRINO motion preparation failed: controller did not enter automatic mode "
+                    f"(robot_mode={result.get('RobotMode')}). Details: {failed}."
+                )
+            else:
+                message = f"FAIRINO motion preparation failed: {failed}."
+            payload["success"] = False
+            payload["error"] = message
+            self._append_run_log("motion_preparation_failed", payload)
+            self._publish_status("motion_preparation_failed", message, payload)
+            raise RuntimeError(message)
+        payload["success"] = True
+        self._append_run_log("motion_preparation", payload)
+        self._publish_status("motion_preparation", "Robot motion prepared.", payload)
+
+    def _release_motion_after_semi_auto(self) -> None:
+        result = self.linux_client.release_motion()
+        payload = {
+            "result": {str(name): int(code) for name, code in result.items()},
+            "session_dir": str(self.session_dir) if self.session_dir else None,
+        }
+        failed = {
+            name: int(code)
+            for name, code in result.items()
+            if int(code) != 0 and name not in {"RealtimeState", "MotionActive", "RobotMode"}
+        }
+        if int(result.get("ModeConfirm", 1)) != 0:
+            failed["ModeConfirm"] = int(result.get("ModeConfirm", 1))
+        if failed:
+            payload["success"] = False
+            payload["error"] = f"FAIRINO manual-mode recovery failed: {failed}."
+            self._append_run_log("motion_release_failed", payload)
+            self._publish_status("motion_release_failed", payload["error"], payload)
+            return
+        payload["success"] = True
+        self._append_run_log("motion_released", payload)
+        self._publish_status("motion_released", "Robot returned to manual mode.", payload)
 
     def _run_semi_auto_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         del request
@@ -1583,6 +1947,7 @@ class EyeToHandCalibrationNode(Node):
                 return response
             self._semi_auto_active = True
         created_session = False
+        motion_prepare_attempted = False
         try:
             self._clear_stop_requested()
             if not self.trajectory_path.exists():
@@ -1590,11 +1955,26 @@ class EyeToHandCalibrationNode(Node):
                 response.message = f"Trajectory YAML does not exist: {self.trajectory_path}. Record waypoints first."
                 self._publish_status("semi_auto_failed", response.message, {"session_dir": None})
                 return response
-            trajectory = load_trajectory(self.trajectory_path)
+            loaded_trajectory = load_trajectory(self.trajectory_path)
+            configured_move_vel = float(getattr(self, "move_vel", loaded_trajectory.default_vel))
+            configured_move_acc = float(getattr(self, "move_acc", loaded_trajectory.default_acc))
+            trajectory = override_trajectory_motion(
+                loaded_trajectory,
+                vel=configured_move_vel,
+                acc=configured_move_acc,
+            )
             self._ensure_session_started(owner="semi_auto")
             created_session = True
-            self._archive_current_trajectory()
-            self._append_run_log("semi_auto_started", {"trajectory_path": str(self.trajectory_path), "execute_motion": self.execute_motion, "waypoint_count": len(trajectory.waypoints)})
+            self._archive_current_trajectory(trajectory)
+            self._append_run_log(
+                "semi_auto_started",
+                {
+                    "trajectory_path": str(self.trajectory_path),
+                    "execute_motion": self.execute_motion,
+                    "waypoint_count": len(trajectory.waypoints),
+                    "motion_config": self._motion_config_payload(),
+                },
+            )
             waypoint_count = len(trajectory.waypoints)
             if not self.execute_motion:
                 for index, waypoint in enumerate(trajectory.waypoints, start=1):
@@ -1614,31 +1994,67 @@ class EyeToHandCalibrationNode(Node):
                 self._publish_status("semi_auto_dry_run_complete", response.message, {"session_dir": str(self.session_dir), "trajectory_path": str(self.trajectory_path)})
                 return response
 
+            motion_prepare_attempted = True
+            self._prepare_motion_for_semi_auto()
             captured_count = 0
             for index, waypoint in enumerate(trajectory.waypoints, start=1):
+                resolved_motion_tool_id = int(getattr(self, "_resolved_motion_tool_id", getattr(self, "motion_tool_id", -1)))
+                resolved_motion_user_id = int(getattr(self, "_resolved_motion_user_id", getattr(self, "motion_user_id", -1)))
                 waypoint_payload = {
                     "waypoint": waypoint.to_payload(),
                     "waypoint_name": waypoint.name,
                     "waypoint_index": index,
                     "waypoint_count": waypoint_count,
                     "session_dir": str(self.session_dir),
+                    "motion_tool_id": resolved_motion_tool_id,
+                    "motion_user_id": resolved_motion_user_id,
+                    "move_vel": float(waypoint.vel),
+                    "move_acc": float(waypoint.acc),
+                    "blend_time_ms": -1.0,
                 }
                 self._append_run_log("waypoint_motion_started", waypoint_payload)
                 self._publish_status("waypoint_motion_started", f"Moving to {waypoint.name}.", waypoint_payload)
+                move_diagnostics: dict[str, object] | None = None
                 try:
                     self._raise_if_stop_requested(waypoint_name=waypoint.name, waypoint_index=index)
                     if waypoint.motion != "movej":
                         raise RuntimeError(f"Unsupported waypoint motion: {waypoint.motion}")
+                    move_diagnostics = self._collect_waypoint_motion_diagnostics(waypoint.joint_deg)
+                    self._append_run_log(
+                        "waypoint_motion_preflight",
+                        {**waypoint_payload, "motion_diagnostics": move_diagnostics},
+                    )
                     move_error = self.linux_client.move_j(
                         waypoint.joint_deg,
-                        tool_id=trajectory.tool_id,
-                        user_id=trajectory.user_id,
+                        tool_id=resolved_motion_tool_id,
+                        user_id=resolved_motion_user_id,
                         vel=waypoint.vel,
+                        acc=waypoint.acc,
+                        # FAIRINO uses -1 for blocking MoveJ. A value of 0
+                        # starts a non-blocking motion and made the old
+                        # timeout check race the controller.
+                        blend_time_ms=-1.0,
                     )
                     if move_error != 0:
-                        raise RuntimeError(f"MoveJ failed at {waypoint.name} with code {move_error}.")
+                        try:
+                            failure_diagnostics = self.linux_client.get_motion_diagnostics()
+                        except Exception as diagnostic_error:
+                            failure_diagnostics = {"diagnostics_error": repr(diagnostic_error)}
+                        move_diagnostics = {
+                            **(move_diagnostics or {}),
+                            "failure_state": failure_diagnostics,
+                        }
+                        raise RuntimeError(
+                            f"MoveJ failed at {waypoint.name} with code {move_error}; "
+                            f"robot_state={failure_diagnostics}."
+                        )
+                    reached_joint_deg = self._wait_until_waypoint_joint_target_reached(
+                        waypoint.joint_deg,
+                        waypoint_name=waypoint.name,
+                        waypoint_index=index,
+                    )
                     self._raise_if_stop_requested(waypoint_name=waypoint.name, waypoint_index=index)
-                    stable_pose = self._wait_until_tcp_stable()
+                    stable_pose = self._wait_until_flange_stable()
                     self._raise_if_stop_requested(waypoint_name=waypoint.name, waypoint_index=index)
                     self._sleep_with_stop_checks(waypoint.dwell_s, waypoint_name=waypoint.name, waypoint_index=index)
                     self._sleep_with_stop_checks(
@@ -1646,7 +2062,13 @@ class EyeToHandCalibrationNode(Node):
                         waypoint_name=waypoint.name,
                         waypoint_index=index,
                     )
-                    reached_payload = {**waypoint_payload, "stable_tcp_pose_mmdeg": stable_pose}
+                    reached_payload = {
+                        **waypoint_payload,
+                        "reached_joint_deg": reached_joint_deg,
+                        "stable_flange_pose_mmdeg": stable_pose,
+                        # Keep the old status key for existing UI clients.
+                        "stable_tcp_pose_mmdeg": stable_pose,
+                    }
                     self._append_run_log("waypoint_reached", reached_payload)
                     self._publish_status("waypoint_reached", f"Reached {waypoint.name}.", reached_payload)
                     if not waypoint.capture:
@@ -1718,6 +2140,9 @@ class EyeToHandCalibrationNode(Node):
                     raise
                 except Exception as exc:
                     failed_payload = {**waypoint_payload, "reason": repr(exc), "error": repr(exc)}
+                    if move_diagnostics is not None:
+                        failed_payload["move_error"] = int(move_error)
+                        failed_payload["motion_diagnostics"] = move_diagnostics
                     self._append_run_log("waypoint_failed", failed_payload)
                     self._publish_status("waypoint_failed", f"Failed at {waypoint.name}: {exc!r}", failed_payload)
                     raise
@@ -1759,6 +2184,19 @@ class EyeToHandCalibrationNode(Node):
                 self._append_run_log("semi_auto_failed", {"error": response.message, "session_dir": str(self.session_dir)})
             self._publish_status("semi_auto_failed", response.message, {"session_dir": str(self.session_dir) if created_session else None})
         finally:
+            if motion_prepare_attempted:
+                try:
+                    self._release_motion_after_semi_auto()
+                except Exception as exc:
+                    self._append_run_log(
+                        "motion_release_failed",
+                        {"error": repr(exc), "session_dir": str(self.session_dir) if self.session_dir else None},
+                    )
+                    self._publish_status(
+                        "motion_release_failed",
+                        f"FAIRINO manual-mode recovery raised an exception: {exc!r}",
+                        {"session_dir": str(self.session_dir) if self.session_dir else None},
+                    )
             with self._semi_auto_lock:
                 self._semi_auto_active = False
         return response

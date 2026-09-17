@@ -27,6 +27,7 @@ class ConfigControlDefaultsTests(unittest.TestCase):
         self.assertEqual(control["linux_fairino_sdk_root"], "/opt/fairino_python_sdk/linux")
         self.assertNotIn("prefer_windows_exec_bridge", control)
         self.assertNotIn("prefer_remote_command_service", control)
+        self.assertEqual(control["global_speed"], 100.0)
 
     def test_default_control_config_uses_side_approach_hover(self) -> None:
         config = load_config(PROJECT_ROOT / "src" / "paus_bringup" / "configs" / "default.yaml")
@@ -146,6 +147,244 @@ class ConfigControlDefaultsTests(unittest.TestCase):
 
 
 class FairinoLinuxClientTests(unittest.TestCase):
+    def test_prepare_motion_waits_for_automatic_mode_confirmation(self) -> None:
+        class State:
+            main_code = 0
+            sub_code = 0
+            robot_state = 1
+            program_state = 1
+            rbtEnableState = 1
+            EmergencyStop = 0
+            safety_stop0_state = 0
+            safety_stop1_state = 0
+            motion_done = 1
+            mc_queue_len = 0
+            collisionState = 0
+
+        class RobotStub:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, int | None]] = []
+                self.states = [1, 0]
+
+            def ResetAllError(self):
+                self.calls.append(("ResetAllError", None))
+                return 0
+
+            def RobotEnable(self, state):
+                self.calls.append(("RobotEnable", state))
+                return 0
+
+            def Mode(self, state):
+                self.calls.append(("Mode", state))
+                return 0
+
+            def GetRobotRealTimeState(self):
+                state = State()
+                state.robot_mode = self.states.pop(0)
+                return 0, state
+
+        client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
+        client.robot = RobotStub()
+
+        result = client.prepare_motion(mode_timeout_s=1.0, poll_interval_s=0.0)
+
+        self.assertEqual(result["Mode"], 0)
+        self.assertEqual(result["ModeConfirm"], 0)
+        self.assertEqual(result["RobotMode"], 0)
+        self.assertEqual(
+            client.robot.calls,
+            [("ResetAllError", None), ("RobotEnable", 1), ("Mode", 0)],
+        )
+
+    def test_prepare_motion_sets_global_speed_after_mode_confirmation(self) -> None:
+        class State:
+            main_code = 0
+            sub_code = 0
+            robot_mode = 0
+            robot_state = 1
+            program_state = 1
+            rbtEnableState = 1
+            EmergencyStop = 0
+            safety_stop0_state = 0
+            safety_stop1_state = 0
+            motion_done = 1
+            mc_queue_len = 0
+            collisionState = 0
+
+        class RobotStub:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, int | float | None]] = []
+
+            def ResetAllError(self):
+                self.calls.append(("ResetAllError", None))
+                return 0
+
+            def RobotEnable(self, state):
+                self.calls.append(("RobotEnable", state))
+                return 0
+
+            def Mode(self, state):
+                self.calls.append(("Mode", state))
+                return 0
+
+            def GetRobotRealTimeState(self):
+                return 0, State()
+
+            def SetSpeed(self, speed):
+                self.calls.append(("SetSpeed", speed))
+                return 0
+
+        client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
+        client.robot = RobotStub()
+
+        result = client.prepare_motion(global_speed=100.0, mode_timeout_s=0.0, poll_interval_s=0.0)
+
+        self.assertEqual(result["GlobalSpeed"], 0)
+        self.assertEqual(
+            client.robot.calls,
+            [("ResetAllError", None), ("RobotEnable", 1), ("Mode", 0), ("SetSpeed", 100)],
+        )
+
+    def test_set_speed_rejects_values_outside_controller_range(self) -> None:
+        client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
+
+        with self.assertRaisesRegex(ValueError, r"\[0, 100\]"):
+            client.set_speed(100.1)
+
+    def test_prepare_motion_refuses_to_continue_when_mode_stays_manual(self) -> None:
+        class State:
+            main_code = 0
+            sub_code = 0
+            robot_mode = 1
+            robot_state = 1
+            program_state = 1
+            rbtEnableState = 1
+            EmergencyStop = 0
+            safety_stop0_state = 0
+            safety_stop1_state = 0
+            motion_done = 1
+            mc_queue_len = 0
+            collisionState = 0
+
+        class RobotStub:
+            def ResetAllError(self):
+                return 0
+
+            def RobotEnable(self, state):
+                del state
+                return 0
+
+            def Mode(self, state):
+                del state
+                return 0
+
+            def GetRobotRealTimeState(self):
+                return 0, State()
+
+        client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
+        client.robot = RobotStub()
+
+        result = client.prepare_motion(mode_timeout_s=0.0, poll_interval_s=0.0)
+
+        self.assertEqual(result["Mode"], 0)
+        self.assertEqual(result["ModeConfirm"], 1)
+        self.assertEqual(result["RobotMode"], 1)
+        self.assertEqual(result["ModeAttempts"], 3)
+
+    def test_get_motion_diagnostics_contains_controller_state(self) -> None:
+        class State:
+            main_code = 14
+            sub_code = 154
+            robot_mode = 1
+            robot_state = 1
+            program_state = 1
+            rbtEnableState = 1
+            EmergencyStop = 0
+            safety_stop0_state = 0
+            safety_stop1_state = 0
+            motion_done = 1
+            mc_queue_len = 0
+            collisionState = 0
+
+        class RobotStub:
+            def GetRobotRealTimeState(self):
+                return 0, State()
+
+        client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
+        client.robot = RobotStub()
+
+        diagnostics = client.get_motion_diagnostics()
+
+        self.assertEqual(diagnostics["realtime_state_error"], 0)
+        self.assertEqual(diagnostics["main_code"], 14)
+        self.assertEqual(diagnostics["sub_code"], 154)
+        self.assertEqual(diagnostics["robot_mode"], 1)
+
+    def test_realtime_state_waits_for_async_feedback_instance(self) -> None:
+        class State:
+            main_code = 0
+            sub_code = 0
+            robot_mode = 1
+            robot_state = 1
+            program_state = 1
+            rbtEnableState = 1
+            EmergencyStop = 0
+            safety_stop0_state = 0
+            safety_stop1_state = 0
+            motion_done = 1
+            mc_queue_len = 0
+            collisionState = 0
+
+        class RobotStub:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def GetRobotRealTimeState(self):
+                self.calls += 1
+                return 0, State if self.calls == 1 else State()
+
+        client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
+        client.robot = RobotStub()
+
+        error, state = client.get_robot_realtime_state()
+
+        self.assertEqual(error, 0)
+        self.assertEqual(state["robot_mode"], 1)
+        self.assertEqual(client.robot.calls, 2)
+
+    def test_client_wraps_forward_kinematics_and_joint_soft_limits(self) -> None:
+        class RobotStub:
+            def GetForwardKin(self, joint_pos):
+                del joint_pos
+                return 0, 100, 200, 300, 1, 2, 3
+
+            def GetJointSoftLimitDeg(self):
+                return 0, -180, 180, -120, 120, -120, 120, -180, 180, -120, 120, -360, 360
+
+        client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
+        client.robot = RobotStub()
+
+        fk_error, pose = client.get_forward_kin([1, 2, 3, 4, 5, 6])
+        limit_error, limits = client.get_joint_soft_limit_deg()
+
+        self.assertEqual(fk_error, 0)
+        self.assertEqual(pose, [100.0, 200.0, 300.0, 1.0, 2.0, 3.0])
+        self.assertEqual(limit_error, 0)
+        self.assertEqual(len(limits), 12)
+
+    def test_client_wraps_robot_error_code(self) -> None:
+        class RobotStub:
+            def GetRobotErrorCode(self):
+                return 0, [14, 154]
+
+        client = FairinoLinuxClient("/tmp/fairino", "192.168.58.2")
+        client.robot = RobotStub()
+
+        error, codes = client.get_robot_error_code()
+
+        self.assertEqual(error, 0)
+        self.assertEqual(codes, [14, 154])
+
     def test_move_j_forwards_acceleration_when_present(self) -> None:
         class RobotStub:
             def __init__(self) -> None:

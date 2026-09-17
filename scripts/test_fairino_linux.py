@@ -30,13 +30,20 @@ def parse_args() -> argparse.Namespace:
     # 指定机器人控制器 IP。
     parser.add_argument("--robot-ip", default="172.16.33.126", help="Robot controller IP.")
     # 指定要测试的命令类型。
-    parser.add_argument("--command", required=True, choices=("connect", "set_speed", "get_joints", "get_tcp", "move_j", "move_l"))
+    parser.add_argument(
+        "--command",
+        required=True,
+        choices=("connect", "set_speed", "get_joints", "get_tcp", "get_state", "move_j", "move_l"),
+    )
     # `set_speed` 使用的速度。
     parser.add_argument("--speed", type=float, default=5.0, help="Speed for set_speed.")
     # 运动命令用到的 tool / user / vel 参数。
     parser.add_argument("--tool-id", type=int, default=0, help="Tool id for move commands.")
     parser.add_argument("--user-id", type=int, default=0, help="User id for move commands.")
     parser.add_argument("--vel", type=float, default=5.0, help="Velocity for move commands.")
+    parser.add_argument("--acc", type=float, default=20.0, help="Acceleration for move commands.")
+    parser.add_argument("--blend-time-ms", type=float, default=-1.0, help="MoveJ blend time; -1 blocks until the target is reached.")
+    parser.add_argument("--global-speed", type=float, help="Optional controller global speed percentage to set before motion.")
     # `move_j` 所需的 6 关节输入。
     parser.add_argument("--joint-pos", nargs=6, type=float, help="Joint pose for move_j.")
     # `move_l` 所需的 6 维位姿输入。
@@ -72,12 +79,42 @@ def main() -> int:
         code, pose = client.get_actual_tcp_pose()
         print(json.dumps({"ok": code == 0, "command": "get_tcp", "code": code, "pose_mmdeg": pose}))
         return 0 if code == 0 else 1
+    # Read controller motion state and active frame without moving the robot.
+    if args.command == "get_state":
+        state = client.get_motion_diagnostics()
+        print(json.dumps({"ok": int(state.get("realtime_state_error", 1)) == 0, "command": "get_state", **state}))
+        return 0 if int(state.get("realtime_state_error", 1)) == 0 else 1
     # 测试关节空间运动。
     if args.command == "move_j":
         if args.joint_pos is None:
             raise SystemExit("--joint-pos is required for move_j")
-        code = client.move_j(list(args.joint_pos), tool_id=args.tool_id, user_id=args.user_id, vel=args.vel)
-        print(json.dumps({"ok": code == 0, "command": "move_j", "code": code}))
+        global_speed_code = None
+        if args.global_speed is not None:
+            global_speed_code = client.set_speed(args.global_speed)
+            if global_speed_code != 0:
+                print(json.dumps({"ok": False, "command": "move_j", "global_speed_code": global_speed_code}))
+                return 1
+        code = client.move_j(
+            list(args.joint_pos),
+            tool_id=args.tool_id,
+            user_id=args.user_id,
+            vel=args.vel,
+            acc=args.acc,
+            blend_time_ms=args.blend_time_ms,
+        )
+        print(
+            json.dumps(
+                {
+                    "ok": code == 0,
+                    "command": "move_j",
+                    "code": code,
+                    "global_speed": args.global_speed,
+                    "vel": args.vel,
+                    "acc": args.acc,
+                    "blend_time_ms": args.blend_time_ms,
+                }
+            )
+        )
         return 0 if code == 0 else 1
     # 测试笛卡尔空间直线运动。
     if args.command == "move_l":

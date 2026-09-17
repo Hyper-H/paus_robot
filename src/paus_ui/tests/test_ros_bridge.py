@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import sys
 import tempfile
 import threading
@@ -15,8 +16,11 @@ np = pytest.importorskip("numpy")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 UI_PACKAGE_ROOT = PROJECT_ROOT / "src" / "paus_ui"
+MARKER_PACKAGE_ROOT = PROJECT_ROOT / "src" / "paus_marker_ros2"
 if str(UI_PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(UI_PACKAGE_ROOT))
+if str(MARKER_PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(MARKER_PACKAGE_ROOT))
 
 pytest.importorskip("ament_index_python")
 pytest.importorskip("cv_bridge")
@@ -27,6 +31,7 @@ pytest.importorskip("std_srvs")
 
 from paus_ui.ros_bridge import CachedImage, UiRosBridge
 from paus_ui.session_store import SessionStore
+from paus_marker_ros2.board_observation import DEPTH_ALIGNED_MODE
 
 
 class _ServiceClient:
@@ -83,6 +88,23 @@ class _TriggerClient:
     def call_async(self, _request: object) -> _ImmediateFuture:
         self.calls += 1
         return _ImmediateFuture(type("TriggerResponse", (), {"success": self.success, "message": self.message})())
+
+
+class _ParameterClient:
+    def __init__(self, *, success: bool = True, reason: str = "") -> None:
+        self.srv_name = "/eye_to_hand/set_parameters"
+        self.success = success
+        self.reason = reason
+        self.request = None
+
+    def wait_for_service(self, timeout_sec: float) -> bool:
+        del timeout_sec
+        return True
+
+    def call_async(self, request: object) -> _ImmediateFuture:
+        self.request = request
+        result = type("SetParametersResult", (), {"successful": self.success, "reason": self.reason})()
+        return _ImmediateFuture(type("SetParametersResponse", (), {"results": [result]})())
 
 
 class _EventSink:
@@ -229,6 +251,53 @@ def test_stop_run_reports_unavailable_stop_service() -> None:
     assert result["success"] is False
     assert "Service is unavailable" in result["message"]
     assert client.calls == 0
+
+
+def test_delete_selected_waypoint_sends_string_parameter_before_service_call() -> None:
+    bridge = UiRosBridge.__new__(UiRosBridge)
+    parameter_client = _ParameterClient()
+    delete_client = _TriggerClient(ready=True, success=True, message="deleted")
+    bridge._parameter_clients = {"eye_to_hand": parameter_client}
+    bridge._service_clients = {"delete_selected_waypoint": delete_client}
+    bridge.events = _EventSink()
+    bridge._last_command_result = None
+    bridge._event_dedupe_key = lambda event_type, payload: f"{event_type}:dedupe"
+
+    result = UiRosBridge.delete_selected_waypoint(bridge, "waypoint_002")
+
+    assert result["success"] is True
+    assert delete_client.calls == 1
+    assert parameter_client.request is not None
+    parameter = parameter_client.request.parameters[0]
+    assert parameter.name == "selected_waypoint_name"
+    assert parameter.value.string_value == "waypoint_002"
+
+
+def test_set_motion_config_forwards_verified_baseline_parameters() -> None:
+    bridge = UiRosBridge.__new__(UiRosBridge)
+    parameter_client = _ParameterClient()
+    bridge._set_parameters_client = parameter_client
+    bridge.events = _EventSink()
+    bridge._last_command_result = None
+    bridge._event_dedupe_key = lambda event_type, payload: f"{event_type}:dedupe"
+
+    result = UiRosBridge.set_motion_config(
+        bridge,
+        move_vel=20,
+        move_acc=20,
+        global_speed=100,
+    )
+
+    assert result["success"] is True
+    assert [parameter.name for parameter in parameter_client.request.parameters] == [
+        "move_vel",
+        "move_acc",
+        "global_speed",
+    ]
+    assert [parameter.value.double_value for parameter in parameter_client.request.parameters] == [20.0, 20.0, 100.0]
+    assert bridge.local_move_vel == 20.0
+    assert bridge.local_move_acc == 20.0
+    assert bridge.local_global_speed == 100.0
 
 
 def test_workflow_maps_semi_auto_started_to_motion_stage() -> None:
@@ -1037,6 +1106,107 @@ def test_start_run_reports_queued_request_as_pending_not_success() -> None:
         assert result["queued"] is True
         assert result["success"] is False
         assert bridge._last_command_result == result
+
+
+def test_depth_run_enables_camera_before_queueing_calibration() -> None:
+    bridge = UiRosBridge.__new__(UiRosBridge)
+    bridge.observation_mode = DEPTH_ALIGNED_MODE
+    bridge._sync_backend_state = lambda: {
+        "execute_motion": True,
+        "backend_connected": True,
+        "motion_state_known": True,
+    }
+    bridge._motion_summary = lambda: {"waypoint_count": 1}
+    bridge._camera_depth_snapshot = lambda: {"requested": False, "active": False}
+    depth_calls: list[bool] = []
+    bridge._set_camera_depth_enabled = lambda enabled: (
+        depth_calls.append(bool(enabled))
+        or {"success": True, "active": bool(enabled), "depth_sequence": 1}
+    )
+    bridge._run_lock = threading.Lock()
+    bridge._run_thread = None
+    bridge._service_clients = {"run_semi_auto": _ServiceClient(True)}
+    bridge._run_semi_auto_worker = lambda: None
+    bridge._last_command_result = None
+    bridge.events = _EventSink()
+    bridge._event_dedupe_key = lambda event_type, payload: f"{event_type}:dedupe"
+
+    result = UiRosBridge.start_semi_auto_run(bridge, confirmed=True)
+
+    assert result["accepted"] is True
+    assert depth_calls == [True]
+
+
+def test_selecting_depth_mode_does_not_start_camera_depth() -> None:
+    bridge = UiRosBridge.__new__(UiRosBridge)
+    bridge.observation_mode = "rgb_pnp"
+    bridge.depth_topic = "/camera/depth_aligned"
+    bridge._run_thread = None
+    bridge._camera_depth_snapshot = lambda: {"requested": False, "active": False}
+    depth_calls: list[bool] = []
+    bridge._set_camera_depth_enabled = lambda enabled: depth_calls.append(bool(enabled)) or {"success": True}
+    bridge._set_parameters_client = _ParameterClient()
+    bridge.events = _EventSink()
+    bridge._last_command_result = None
+    bridge._event_dedupe_key = lambda event_type, payload: f"{event_type}:dedupe"
+
+    result = UiRosBridge.set_observation_mode(bridge, DEPTH_ALIGNED_MODE)
+
+    assert result["success"] is True
+    assert depth_calls == []
+
+
+def test_camera_depth_control_retries_until_camera_bridge_is_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    bridge = UiRosBridge.__new__(UiRosBridge)
+    bridge.camera_control_host = "127.0.0.1"
+    bridge.camera_control_port = 5002
+    bridge._camera_depth_command_lock = threading.Lock()
+    bridge._camera_depth_status_lock = threading.Lock()
+    bridge._camera_depth_status = {
+        "requested": False,
+        "active": False,
+        "depth_sequence": 0,
+        "last_error": None,
+    }
+
+    attempts = 0
+
+    class _Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            del exc_type, exc_value, traceback
+            return False
+
+        def settimeout(self, timeout: float) -> None:
+            del timeout
+
+        def sendall(self, payload: bytes) -> None:
+            request = json.loads(payload.decode("utf-8"))
+            assert request["command"] == "set_depth_enabled"
+            assert request["enabled"] is True
+
+        def makefile(self, mode: str):
+            assert mode == "rb"
+            return type("_ResponseFile", (), {"readline": lambda _self: b'{"success": true, "active": true, "requested": true, "depth_sequence": 1}\n'})()
+
+    def _create_connection(address, timeout):
+        nonlocal attempts
+        assert address == ("127.0.0.1", 5002)
+        assert timeout <= 0.5
+        attempts += 1
+        if attempts < 3:
+            raise ConnectionRefusedError("camera bridge is still starting")
+        return _Connection()
+
+    monkeypatch.setattr(socket, "create_connection", _create_connection)
+
+    response = UiRosBridge._set_camera_depth_enabled(bridge, True, timeout_s=0.5)
+
+    assert response["success"] is True
+    assert attempts == 3
+    assert bridge._camera_depth_status["active"] is True
 
 
 def test_latest_quality_treats_stale_cached_image_as_unavailable() -> None:

@@ -30,6 +30,14 @@ calibration:
   board_cols: 11
   square_size_m: 0.02
   solver_method: "joint_absolute"
+  # The chessboard is mounted on the robot flange.
+  tool_id: 0
+  user_id: 0
+  # Calibration data uses the flange reference (tool 0). A negative motion
+  # frame ID means that semi-auto MoveJ follows the controller's active frame.
+  # This avoids binding calibration to one hard-coded TCP.
+  motion_tool_id: -1
+  motion_user_id: -1
   min_sample_count: 10
   output_path: "/mnt/data/projects/paus_robot/calibration/current/extrinsics.yaml"
   example_output_path: "src/paus_bringup/configs/extrinsics.yaml"
@@ -43,6 +51,10 @@ calibration:
   stable_window_s: 0.5
   stable_timeout_s: 10.0
   dwell_s: 0.5
+  motion_target_tolerance_deg: 0.5
+  motion_timeout_s: 120.0
+  motion_poll_interval_s: 0.05
+  fresh_image_timeout_s: 5.0
   corner_patch_size_px: 5
   corner_min_points: 8
   min_valid_corner_patch_ratio: 0.80
@@ -118,10 +130,15 @@ control:
   robot_ip: "172.16.33.126"
   linux_fairino_sdk_root: "/opt/fairino_python_sdk/linux"
   execute_motion: false
-  tool_id: 2
+  tool_id: 4
   user_id: 0
-  move_vel: 10.0
-  move_acc: 10.0
+  # Conservative real-robot baseline for calibration. FAIRINO interprets
+  # these as percentage values.
+  move_vel: 20.0
+  move_acc: 20.0
+  # Keep the controller global limiter open so MoveJ vel is not silently
+  # reduced by a value left over from the teach pendant or another program.
+  global_speed: 100.0
   move_ovl: 20.0
   joint_motion_blend_time_ms: 0.0
   joint_motion_done_timeout_s: 120.0
