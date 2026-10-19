@@ -1,0 +1,16 @@
+.workbench { grid-template-rows: 64px auto minmax(0, 1fr); grid-template-columns: minmax(0, 1fr); }
+.ultrasound-panel { min-width: 0; border-bottom: 1px solid var(--line); background: #fff; }
+.ultrasound-panel summary { padding: 8px 16px; cursor: pointer; font-weight: 600; font-size: 14px; }
+.ultrasound-panel summary .chip { margin-left: 12px; }
+.ultrasound-content { display: grid; grid-template-columns: minmax(180px, 280px) minmax(0, 1fr); gap: 16px; padding: 0 16px 12px; }
+.ultrasound-stage { position: relative; height: 200px; min-width: 0; display: grid; place-items: center; background: #101112; color: #ddd; }
+.ultrasound-stage img { position: absolute; width: 100%; height: 100%; object-fit: contain; }
+.ultrasound-stage [hidden] { display: none; }
+.ultrasound-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px 16px; margin: 0; align-content: center; }
+.ultrasound-metrics div { min-width: 0; }
+.ultrasound-metrics dt { font-size: 12px; color: var(--muted); }
+.ultrasound-metrics dd { margin: 5px 0 0; font-size: 13px; overflow-wrap: anywhere; }
+@media (max-width: 900px) {
+  .ultrasound-content { grid-template-columns: minmax(0, 1fr); }
+  .ultrasound-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

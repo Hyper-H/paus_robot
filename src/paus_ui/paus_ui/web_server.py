@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import time
 from pathlib import Path
 import threading
@@ -53,6 +54,18 @@ def create_app(bridge: "UiRosBridge"):
         rows, last_id = bridge.get_events_since(since)
         return {"events": rows, "last_id": last_id}
 
+    @app.get("/api/ultrasound/status")
+    async def ultrasound_status() -> dict[str, Any]:
+        return bridge.get_ultrasound_status()
+
+    @app.get("/api/ultrasound/image.jpg")
+    async def ultrasound_image() -> Response:
+        jpeg = await asyncio.to_thread(bridge.get_ultrasound_jpeg)
+        return Response(
+            content=jpeg, status_code=200 if jpeg is not None else 204,
+            media_type="image/jpeg", headers={"Cache-Control": "no-store"},
+        )
+
     @app.get("/api/debug/frontend")
     async def frontend_debug() -> dict[str, Any]:
         app_js_path = static_root / "app.js"
@@ -84,10 +97,11 @@ def create_app(bridge: "UiRosBridge"):
     @app.websocket("/ws/image")
     async def websocket_image(websocket: WebSocket) -> None:
         await websocket.accept()
+        disconnect = asyncio.create_task(wait_for_disconnect(websocket))
         last_preview_sequence = -1
         last_raw_sequence = -1
         try:
-            while True:
+            while not disconnect.done():
                 preview_getter = getattr(bridge, "get_latest_preview_jpeg", None)
                 preview = await asyncio.to_thread(preview_getter) if preview_getter is not None else None
                 if preview is not None:
@@ -113,6 +127,10 @@ def create_app(bridge: "UiRosBridge"):
                 await asyncio.sleep(0.1)
         except WebSocketDisconnect:
             return
+        finally:
+            disconnect.cancel()
+            with suppress(asyncio.CancelledError, WebSocketDisconnect):
+                await disconnect
 
     @app.get("/api/handeye/quality")
     async def quality() -> dict[str, Any]:
@@ -293,15 +311,25 @@ def create_app(bridge: "UiRosBridge"):
     @app.websocket("/ws/events")
     async def websocket_events(websocket: WebSocket) -> None:
         await websocket.accept()
+        disconnect = asyncio.create_task(wait_for_disconnect(websocket))
         last_id = 0
         try:
-            while True:
+            while not disconnect.done():
                 events, last_id = bridge.get_events_since(last_id)
                 for event in events:
                     await websocket.send_json(event)
                 await asyncio.sleep(0.5)
         except WebSocketDisconnect:
             return
+        finally:
+            disconnect.cancel()
+            with suppress(asyncio.CancelledError, WebSocketDisconnect):
+                await disconnect
+
+    async def wait_for_disconnect(websocket: WebSocket) -> None:
+        # No outgoing data is required to notice a closed idle browser.
+        while (await websocket.receive())["type"] != "websocket.disconnect":
+            pass
 
     return app
 

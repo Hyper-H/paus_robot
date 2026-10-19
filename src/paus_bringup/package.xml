@@ -15,6 +15,7 @@
   <depend>paus_motion_ros2</depend>
   <depend>paus_perception</depend>
   <depend>paus_ui</depend>
+  <exec_depend>paus_ultrasound_ros2</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

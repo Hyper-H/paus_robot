@@ -10,6 +10,7 @@ from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from paus_bringup.extrinsics import resolve_extrinsics_path
+from paus_bringup.ultrasound_launch import ultrasound_actions
 from paus_perception import load_config
 
 
@@ -302,6 +303,7 @@ def generate_launch_description() -> LaunchDescription:
 
     return LaunchDescription(
         [
+            *ultrasound_actions(),
             DeclareLaunchArgument(
                 "config_path",
                 default_value=default_config_path,
