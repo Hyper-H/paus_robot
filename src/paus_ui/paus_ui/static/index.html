@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PAUS Robot UI</title>
     <link rel="stylesheet" href="/static/styles.css?v=20260911-1" />
+    <link rel="stylesheet" href="/static/ultrasound.css?v=20261016-1" />
   </head>
   <body>
     <div class="app-shell">
@@ -60,6 +61,25 @@
           </div>
         </header>
 
+        <details id="ultrasound-panel" class="ultrasound-panel">
+          <summary>超声图像 <span id="ultrasound-state" class="chip neutral">等待接收端</span></summary>
+          <div class="ultrasound-content">
+            <div class="ultrasound-stage">
+              <img id="ultrasound-image" alt="超声预览" hidden />
+              <span id="ultrasound-empty">等待超声图像</span>
+            </div>
+            <dl class="ultrasound-metrics">
+              <div><dt>接收帧数</dt><dd id="ultrasound-received">--</dd></div>
+              <div><dt>接收帧率</dt><dd id="ultrasound-fps">--</dd></div>
+              <div><dt>最近图像年龄</dt><dd id="ultrasound-age">--</dd></div>
+              <div><dt>ROI 确认</dt><dd id="ultrasound-roi">未知</dd></div>
+              <div><dt>输出图像</dt><dd id="ultrasound-size">--</dd></div>
+              <div><dt>显示标尺比例</dt><dd id="ultrasound-scale">横向未知 / 纵向未知</dd></div>
+              <div><dt>成像设置</dt><dd id="ultrasound-context">--</dd></div>
+              <div><dt>配置版本</dt><dd id="ultrasound-revision">--</dd></div>
+            </dl>
+          </div>
+        </details>
         <section class="dashboard">
           <section class="panel live-panel">
             <div class="panel-header compact">
@@ -290,5 +310,6 @@
       </div>
     </div>
     <script src="/static/app.js?v=20260911-1"></script>
+    <script src="/static/ultrasound.js?v=20261016-1"></script>
   </body>
 </html>

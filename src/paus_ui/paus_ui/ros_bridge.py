@@ -23,6 +23,7 @@ from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from paus_perception import load_camera_calibration, load_config
+from paus_interfaces.msg import UltrasoundFrame
 
 from .operator_messages import classify_operator_message
 from paus_marker_ros2.board_observation import DEPTH_ALIGNED_MODE, RGB_PNP_MODE, SUPPORTED_OBSERVATION_MODES, normalize_observation_mode
@@ -30,10 +31,12 @@ from paus_marker_ros2.board_observation import DEPTH_ALIGNED_MODE, RGB_PNP_MODE,
 from .overlay import BoardOverlayDetector, encode_jpeg, make_placeholder_image
 from .path_resolvers import resolve_ui_calibration_paths
 from .session_store import SessionStore
+from .ultrasound_preview import UltrasoundPreview
 
 
 STATUS_QOS = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 CAMERA_QOS = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
+ULTRASOUND_QOS = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
 CAMERA_FRESHNESS_S = 3.0
 DEPTH_RELEASE_STATUSES = {
     "semi_auto_finished",
@@ -156,6 +159,7 @@ class UiRosBridge(Node):
         self.effective_execute_motion = self.execute_motion
 
         self.bridge = CvBridge()
+        self._ultrasound = UltrasoundPreview()
         self.events = EventBuffer()
         self.session_store = SessionStore(
             session_root_path=self.effective_session_root_path,
@@ -198,6 +202,8 @@ class UiRosBridge(Node):
         self.create_subscription(Image, self.image_topic, self._image_callback, CAMERA_QOS)
         self.create_subscription(CompressedImage, self.preview_image_topic, self._preview_image_callback, CAMERA_QOS)
         self.create_subscription(String, self.status_topic, self._status_callback, STATUS_QOS)
+        self.create_subscription(UltrasoundFrame, "/ultrasound/us/frame", self._ultrasound_frame_callback, ULTRASOUND_QOS)
+        self.create_subscription(String, "/ultrasound/us/status", self._ultrasound_status_callback, STATUS_QOS)
         self._parameter_clients = {
             "eye_to_hand": self.create_client(SetParameters, "/eye_to_hand_calibration_node/set_parameters"),
         }
@@ -217,6 +223,25 @@ class UiRosBridge(Node):
         workspace_root = bringup_share.parents[3]
         source_config = workspace_root / "src" / "paus_bringup" / "configs" / "default.yaml"
         return source_config if source_config.exists() else bringup_share / "configs" / "default.yaml"
+
+    def _ultrasound_frame_callback(self, message: UltrasoundFrame) -> None:
+        try:
+            self._ultrasound.receive_frame(message)
+        except (ValueError, TypeError) as exc:
+            self.get_logger().warning(f"Ultrasound preview rejected: {exc}")
+
+    def _ultrasound_status_callback(self, message: String) -> None:
+        try:
+            self._ultrasound.receive_status(message.data)
+        except (ValueError, TypeError) as exc:
+            self.get_logger().warning(f"Ultrasound status rejected: {exc}")
+
+    def get_ultrasound_status(self) -> dict[str, Any]:
+        preview = getattr(self, "_ultrasound", None)
+        return preview.snapshot() if preview is not None else {"state": "WAITING", "stream_available": False}
+
+    def get_ultrasound_jpeg(self) -> bytes | None:
+        return self._ultrasound.jpeg()
 
     def _image_callback(self, message: Image) -> None:
         image_bgr = self.bridge.imgmsg_to_cv2(message, desired_encoding="bgr8")
@@ -452,6 +477,7 @@ class UiRosBridge(Node):
                 "port": self.ui_port,
                 "url": f"http://{ui_host}:{self.ui_port}",
             },
+            "ultrasound": self.get_ultrasound_status(),
             "camera": {
                 "connected": (camera_age_s is not None and camera_age_s < CAMERA_FRESHNESS_S) or (preview_age_s is not None and preview_age_s < CAMERA_FRESHNESS_S),
                 "image_sequence": latest_meta[0] if latest_meta else 0,
