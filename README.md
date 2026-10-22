@@ -15,6 +15,18 @@
 
 旧的 Windows / WSL 双桥方案已经降级到 `legacy/`，只保留作历史参考，不再作为默认主线。
 
+### Windows 超声图像接入
+
+Windows 采集器可从厂家窗口裁剪 B-mode 显示区域，以 USFR v2 发送到 Linux ROS 2。
+用户可从 [Releases](https://github.com/Hyper-H/paus_robot/releases) 下载 Windows x64
+测试包，解压运行，无需安装开发工具链。
+
+- [Windows 快速使用](windows/ultrasound_capture/QUICKSTART.md)
+- [采集器配置与构建](windows/ultrasound_capture/README.md)
+- [ROS 2 接收器与预览](src/paus_ultrasound_ros2/README.md)
+
+这是独立的超声图像接入模块，不是旧的 Windows / WSL 相机桥；接收图像不会启动机器人运动。
+
 ### Workspace 结构
 ```text
 paus_robot/

@@ -7,6 +7,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, TimerAction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from paus_bringup.ultrasound_launch import ultrasound_actions
 from paus_perception import load_config
 from paus_perception.config import resolve_config_artifact_path, resolve_runtime_data_path
 
@@ -317,6 +318,7 @@ def generate_launch_description() -> LaunchDescription:
 
     return LaunchDescription(
         [
+            *ultrasound_actions(),
             DeclareLaunchArgument("config_path", default_value=default_config_path, description="Path to the main YAML config file."),
             DeclareLaunchArgument(
                 "python_exec",
