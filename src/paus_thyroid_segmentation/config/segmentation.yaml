@@ -1,0 +1,25 @@
+thyroid_segmentation:
+  ros__parameters:
+    checkpoint: ""
+    model_bundle: ""
+    device: cpu
+    cpu_fallback: false
+    input_mode: frame
+    frame_topic: /ultrasound/us/frame
+    input_topic: /ultrasound/us/image_raw
+    mask_topic: /thyroid/gland/mask
+    overlay_topic: /thyroid/gland/overlay
+    result_topic: /thyroid/gland/result
+    status_topic: /thyroid/gland/status
+    model_version: tg3k_resnet18_unet_v1
+    model_sha256: e1d15acbfe3174167a66cbdd4609340bc19ea183b1eabe0b2ef0009e1aba529a
+    publish_result: true
+    threshold: 0.5
+    min_area: 1
+    warmup_frames: 5
+    cpu_threads: 1
+    mono16_mode: reject
+    mono16_low: 0.0
+    mono16_high: 65535.0
+    publish_overlay: true
+    stale_timeout_sec: 2.0
