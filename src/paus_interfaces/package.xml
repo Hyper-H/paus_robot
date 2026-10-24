@@ -2,15 +2,15 @@
 <package format="3">
   <name>paus_interfaces</name>
   <version>0.1.0</version>
-  <description>Placeholder interface package for future PAUS Robot messages, services, and actions.</description>
+  <description>Shared PAUS ultrasound and thyroid segmentation messages.</description>
   <maintainer email="local@example.com">Local User</maintainer>
   <license>Proprietary</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
-  <build_depend>rosidl_default_generators</build_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
   <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
   <exec_depend>rosidl_default_runtime</exec_depend>
-  <member_of_group>rosidl_interface_packages</member_of_group>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
@@ -18,4 +18,5 @@
   <export>
     <build_type>ament_cmake</build_type>
   </export>
+  <member_of_group>rosidl_interface_packages</member_of_group>
 </package>

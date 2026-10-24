@@ -1,0 +1,15 @@
+std_msgs/Header header
+string stream_id
+string session_id
+uint64 sequence_id
+string metadata_json
+sensor_msgs/Image mask
+sensor_msgs/Image overlay
+string model_version
+string model_sha256
+float32 threshold
+bool valid
+bool cleared
+uint32 mask_area_px
+float32 mask_area_fraction
+float32 confidence
